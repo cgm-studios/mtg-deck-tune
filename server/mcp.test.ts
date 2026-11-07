@@ -288,6 +288,9 @@ const DATA_STRINGS: Record<string, string> = {
   "find_cards.keywords[]": "a keyword from the store's vocabulary",
   "find_cards.name": "part of a card name, matched with instr() on a bound parameter",
   "card.name": "a card name, resolved in TypeScript",
+  "commander_profile.commander": "a card name, resolved in TypeScript (exact or front face only)",
+  "commander_profile.deckFile": "a file path, read from disk",
+  "commander_profile.decklist": "decklist text, parsed in TypeScript",
   "deck_stats.commander": "a card name, resolved in TypeScript",
   "deck_stats.deckFile": "a file path, read from disk",
   "deck_stats.decklist": "decklist text, parsed in TypeScript",
@@ -313,9 +316,9 @@ const DATA_STRINGS: Record<string, string> = {
 };
 const SQLISH = /sql|query|where|statement|clause|expr|order_?by|raw/i;
 
-test("no raw sql: the MCP has exactly its eight tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
+test("no raw sql: the MCP has exactly its nine tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
   const { tools } = await client.listTools();
-  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
   const strings: string[] = [];
   const walk = (s: JsonSchema & { enum?: unknown[]; propertyNames?: JsonSchema; additionalProperties?: JsonSchema | boolean }, path: string) => {
     if (s.type === "string" && !s.enum) strings.push(path);
@@ -367,7 +370,7 @@ test("stdio smoke: .mcp.json registers mtg-deck, and the registered command answ
   await stdio.connect(new StdioClientTransport({ command: entry.command, args: entry.args, cwd: root, stderr: "pipe" }));
   try {
     const { tools } = await stdio.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
     const res = await stdio.callTool({ name: "find_cards", arguments: { colorIdentity: "U", types: ["Legendary", "Creature"], subtypes: ["Merfolk"], keywords: ["Flying"], manaValue: { max: 3 } } });
     expect(res.isError).toBeFalsy();
     const out = res.structuredContent as { cards: { name: string }[] };

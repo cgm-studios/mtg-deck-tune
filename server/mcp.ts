@@ -7,6 +7,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { commanderProfile, commanderProfileShape } from "./commander";
 import {
   cardDetails, cardShape, deckStats, deckStatsShape, findCards, findCardsShape, findTags, neighbors, neighborsShape, openStore, tagsShape, type Store,
 } from "./deck-tools";
@@ -64,6 +65,15 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
       "Give the commander and either a decklist file path or the pasted list.",
     inputSchema: deckStatsShape,
   }, async (args) => withStore(store, (s) => deckStats(s, args)));
+  server.registerTool("commander_profile", {
+    title: "Commander profile",
+    description: "How a commander is usually played: its EDHREC themes with deck counts and shares (a share is of the commander's " +
+      "theme tag mentions, not of its decks), the strongest tags of its Tagger Deck profile with weights, and, when given a " +
+      "decklist, how strongly the list matches each of its top themes (0 to 1, with the cards held and the heaviest cards " +
+      "missing). A commander with no EDHREC page, or one with under 20 decks, is profiled from its own card tags, and " +
+      "`fallback` says why.",
+    inputSchema: commanderProfileShape,
+  }, async (args) => withStore(store, (s) => commanderProfile(s, args)));
   server.registerTool("neighbors", {
     title: "Card Space neighbors",
     description: "A card's nearest Card Space neighbors that a commander can play, nearest first, each with its similarity " +
