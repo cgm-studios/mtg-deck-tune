@@ -41,7 +41,13 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
   server.registerTool("find_cards", {
     title: "Find cards",
     description: "Find commander-legal cards in the card store (Scryfall, Tagger tags). Every filter given must hold. " +
-      "Find tag labels with the tags tool. Returns the total match count and one page of cards (default 25, at most 100) in a stable order.",
+      "Find tag labels with the tags tool. Returns the total match count and one page of cards (default 25, at most 100) in a stable order. " +
+      "Two filters let you search for what a commander or the player's plan rewards: `manaSymbols` asks for a minimum count of one color's " +
+      "mana symbols in the cost (two or more blue symbols = [{color: \"U\", min: 2}]; a hybrid or Phyrexian symbol counts once for each color " +
+      "it can be paid with), and `rulesText` asks for words or phrases in the card's rules text (\"noncreature spell\", \"whenever you cast\"; " +
+      "capitals ignored, part of a word matches). Both combine with every other filter. When a search misses (no cards, too few, or too many), " +
+      "change it and search again: loosen a count, use a shorter or longer phrase, or drop a filter. `types` must all hold, so there is no " +
+      "\"not a creature\" filter: for noncreature spells search Instant, Sorcery, Artifact and Enchantment (and others) in turn.",
     inputSchema: findCardsShape,
   }, async (args) => withStore(store, (s) => findCards(s, args)));
   server.registerTool("tags", {
