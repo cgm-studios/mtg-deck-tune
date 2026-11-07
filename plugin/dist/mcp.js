@@ -34893,11 +34893,6 @@ class StdioServerTransport {
   }
 }
 
-// server/deck-tools.ts
-import { Database } from "bun:sqlite";
-import { readFileSync } from "fs";
-import { isAbsolute, join as join2 } from "path";
-
 // server/color-identity.ts
 var CI_BIT = { W: 1, U: 2, B: 4, R: 8, G: 16 };
 var ciMask = (ci) => {
@@ -34956,6 +34951,11 @@ function parseDecklist(space, text) {
   });
   return { entries, unresolved: entries.filter((e) => !e.card), skipped };
 }
+
+// server/deck-tools.ts
+import { Database } from "bun:sqlite";
+import { readFileSync } from "fs";
+import { isAbsolute, join as join2 } from "path";
 
 // server/deck-swaps.ts
 var COLOR = { white: "W", blue: "U", black: "B", red: "R", green: "G" };
@@ -35541,6 +35541,140 @@ function findTags(store, input2) {
   };
 }
 
+// server/commander.ts
+var THEME_LIMIT = 10;
+var TAG_LIMIT = 12;
+var MATCH_THEMES = 5;
+var NAMED = 5;
+var MIN_SHARE = 0.15;
+var MIN_THEME_DECKS = 20;
+var MIN_CARD_DECKS = 3;
+var MIN_LIFT = 1.25;
+var MIN_COMMANDERS = 10;
+var commanderProfileShape = {
+  commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
+  deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory; with it (or `decklist`) the answer also says how strongly the deck matches each top theme"),
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile, or neither"),
+  themeLimit: exports_external.number().int().min(1).max(500).optional().describe(`How many themes to list, strongest first (default ${THEME_LIMIT}); the rest come back as one summed \`otherThemes\` entry`),
+  tagLimit: exports_external.number().int().min(1).max(100).optional().describe(`How many Tagger Deck tags to list, strongest first (default ${TAG_LIMIT})`),
+  matchThemes: exports_external.number().int().min(1).max(20).optional().describe(`With a decklist, how many of the strongest themes to match it against (default ${MATCH_THEMES})`)
+};
+var input2 = exports_external.object(commanderProfileShape).strict();
+var NOTES = {
+  "no page": () => "this commander has no EDHREC page, so the profile comes from its own card tags",
+  thin: (decks) => `its EDHREC page covers ${decks} decks, too few to say how it is usually played, so the profile comes from its own card tags`,
+  "no kept tags": () => "the cards on its EDHREC page carry no usable tags, so the profile comes from its own card tags"
+};
+var round = (x, places) => Math.round(x * 10 ** places) / 10 ** places;
+var byteCmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function unpackVector(blob) {
+  const n = blob.byteLength / 6;
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  return Array.from({ length: n }, (_, i) => ({ weight: view.getFloat32(i * 4, true), tagId: view.getUint16(n * 4 + i * 2, true) }));
+}
+var mined = new WeakMap;
+function minedFor(store) {
+  const hit = mined.get(store.db);
+  if (hit)
+    return hit;
+  const mentions = new Map(store.db.query("SELECT commander_id AS id, SUM(decks) AS n FROM commander_themes GROUP BY commander_id").all().map((r) => [r.id, r.n]));
+  const baseline = new Map;
+  let baselineMass = 0;
+  for (const r of store.db.query("SELECT card_id AS id, SUM(synergy) AS s FROM commander_cards WHERE synergy > 0 AND decks >= ? GROUP BY card_id ORDER BY card_id").all(MIN_CARD_DECKS)) {
+    baseline.set(r.id, r.s);
+    baselineMass += r.s;
+  }
+  const out = { mentions, baseline, baselineMass, profiles: new Map };
+  mined.set(store.db, out);
+  return out;
+}
+function themeProfile(store, themeId) {
+  const m = minedFor(store);
+  const hit = m.profiles.get(themeId);
+  if (hit)
+    return hit;
+  const chosen = store.db.query("SELECT commander_id AS id, decks FROM commander_themes WHERE theme_id = ? AND decks >= ? ORDER BY commander_id").all(themeId, MIN_THEME_DECKS).map((r) => ({ id: r.id, share: r.decks / m.mentions.get(r.id) })).filter((r) => r.share >= MIN_SHARE);
+  const weights = new Map;
+  if (chosen.length >= MIN_COMMANDERS) {
+    const mass = new Map;
+    let total = 0;
+    const cards = store.db.query("SELECT card_id AS id, synergy FROM commander_cards WHERE commander_id = ? AND synergy > 0 AND decks >= ? ORDER BY card_id");
+    for (const c of chosen)
+      for (const r of cards.all(c.id, MIN_CARD_DECKS)) {
+        const x = c.share * r.synergy;
+        mass.set(r.id, (mass.get(r.id) ?? 0) + x);
+        total += x;
+      }
+    for (const [id, x] of [...mass].sort((a, b) => a[0] - b[0])) {
+      const t = x / total, b = m.baseline.get(id) / m.baselineMass;
+      if (t / b >= MIN_LIFT)
+        weights.set(id, t * Math.log(t / b));
+    }
+  }
+  const out = { weights, commanders: chosen.length };
+  m.profiles.set(themeId, out);
+  return out;
+}
+function commanderProfile(store, raw) {
+  const f = input2.parse(raw);
+  if (f.deckFile !== undefined && f.decklist !== undefined)
+    throw new ToolInputError("give deckFile or decklist, not both");
+  const { card } = resolveCommander(store, f.commander);
+  const id = store.names.find((n) => n.oracleId === card.id).id;
+  const page = store.db.query("SELECT decks, tagger_deck, tagger_deck_fallback FROM commanders WHERE card_id = ?").get(id);
+  const reason = !page ? "no page" : page.tagger_deck_fallback ? page.tagger_deck_fallback : null;
+  const themed = reason !== "no page" && reason !== "thin";
+  const rows = !themed ? [] : store.db.query("SELECT t.id AS themeId, t.name AS theme, t.slug, ct.decks FROM commander_themes ct JOIN themes t ON t.id = ct.theme_id WHERE ct.commander_id = ? ORDER BY ct.decks DESC, t.slug").all(id);
+  const mentions = rows.reduce((n, r) => n + r.decks, 0);
+  const share = (n) => mentions ? n / mentions : 0;
+  const shown = rows.slice(0, f.themeLimit ?? THEME_LIMIT);
+  const rest = rows.slice(shown.length);
+  const own2 = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(id);
+  const deckVector = page && !page.tagger_deck_fallback ? page.tagger_deck : null;
+  const vector = deckVector ?? own2?.vector;
+  const labels = new Map(store.db.query("SELECT id, label FROM tags").all().map((t) => [t.id, t.label]));
+  const tags = (vector ? unpackVector(vector) : []).slice(0, f.tagLimit ?? TAG_LIMIT).map((v) => ({ tag: labels.get(v.tagId), weight: round(v.weight, 5) }));
+  const out = {
+    commander: { name: card.name, colorIdentity: card.ci.join("") },
+    decks: page?.decks ?? null,
+    themeMentions: mentions,
+    themes: shown.map(({ themeId: _, ...r }) => ({ ...r, share: round(share(r.decks), 6) })),
+    otherThemes: rest.length ? { count: rest.length, decks: rest.reduce((n, r) => n + r.decks, 0), share: round(share(rest.reduce((n, r) => n + r.decks, 0)), 6) } : null,
+    taggerDeck: { source: deckVector ? "deck" : "card", tags },
+    fallback: reason ? { reason, note: NOTES[reason](page?.decks ?? 0) } : null
+  };
+  if (f.deckFile !== undefined || f.decklist !== undefined) {
+    const deck = parseDecklist(store.space, readDeck(f));
+    const held = new Set(deck.entries.filter((e) => e.card && e.card.id !== card.id).map((e) => store.names.find((n) => n.oracleId === e.card.id).id));
+    const storeId = new Map(store.names.map((n) => [n.id, n]));
+    const themes = rows.slice(0, f.matchThemes ?? MATCH_THEMES).map((r) => {
+      const prof = themeProfile(store, r.themeId);
+      const base = { theme: r.theme, slug: r.slug, share: round(share(r.decks), 6) };
+      if (prof.commanders < MIN_COMMANDERS) {
+        return { ...base, match: null, held: [], missing: [], note: `only ${prof.commanders} ${prof.commanders === 1 ? "commander plays" : "commanders play"} ${r.theme} as at least ${MIN_SHARE * 100}% of their themes, too few commanders to say what the theme looks like` };
+      }
+      const usable = [...prof.weights].filter(([cid]) => cid !== id && fitsIdentity(store.space.cards.get(storeId.get(cid).oracleId), card.ci));
+      const sorted = usable.sort((a, b) => b[1] - a[1] || byteCmp(storeId.get(a[0]).name, storeId.get(b[0]).name));
+      const total = sorted.reduce((s, [, w]) => s + w, 0);
+      const heldW = sorted.filter(([cid]) => held.has(cid));
+      return {
+        ...base,
+        match: total ? round(heldW.reduce((s, [, w]) => s + w, 0) / total, 6) : 0,
+        held: heldW.slice(0, NAMED).map(([cid]) => storeId.get(cid).name),
+        missing: sorted.filter(([cid]) => !held.has(cid)).slice(0, NAMED).map(([cid]) => storeId.get(cid).name)
+      };
+    });
+    themes.sort((a, b) => (b.match ?? -1) - (a.match ?? -1) || b.share - a.share || byteCmp(a.slug, b.slug));
+    out.deckMatch = {
+      deckCards: held.size,
+      unresolved: unresolvedLines(store, deck.unresolved),
+      strongest: themes[0]?.match != null ? themes[0].theme : null,
+      themes
+    };
+  }
+  return out;
+}
+
 // server/store.ts
 import { Database as Database2 } from "bun:sqlite";
 import { createHash } from "crypto";
@@ -35959,8 +36093,8 @@ var fillWhy = (f, cut) => [
   f.nearest ? `in-color neighbor of ${f.affinity} deck card${f.affinity > 1 ? "s" : ""} (nearest: #${f.nearest.rank} of ${f.nearest.from.name}, similarity ${f.nearest.sim.toFixed(3)})` : "not a Card Space neighbor of any deck card",
   ...cut ? [cutText(cut)] : []
 ];
-function swapCandidates(store, input2) {
-  const f = swapCandidatesInput.parse(input2);
+function swapCandidates(store, input3) {
+  const f = swapCandidatesInput.parse(input3);
   const text = readDeck(f);
   const { card: commander } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
@@ -36066,8 +36200,8 @@ function appendLabel(label, path) {
   appendFileSync(path, `${JSON.stringify(label)}
 `);
 }
-function acceptSwap(store, input2, opts = {}) {
-  const f = acceptSwapInput.parse(input2);
+function acceptSwap(store, input3, opts = {}) {
+  const f = acceptSwapInput.parse(input3);
   const { card: commander } = resolveCommander(store, f.commander);
   const { out, inCard } = pairOf(store, f);
   const path = deckPath(f.deckFile);
@@ -36118,8 +36252,8 @@ function acceptSwap(store, input2, opts = {}) {
     after: swapStats(deckNumbers(store, commander, parseDecklist(store.space, next).entries))
   };
 }
-function rejectSwap(store, input2, opts = {}) {
-  const f = rejectSwapInput.parse(input2);
+function rejectSwap(store, input3, opts = {}) {
+  const f = rejectSwapInput.parse(input3);
   const { card: commander } = resolveCommander(store, f.commander);
   const { out, inCard } = pairOf(store, f);
   const label = {
@@ -36176,6 +36310,11 @@ function createDeckServer(store) {
     description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load and plan fit against the commander's own text, plus unresolved lines and off-identity cards. " + "Give the commander and either a decklist file path or the pasted list.",
     inputSchema: deckStatsShape
   }, async (args) => withStore(store, (s) => deckStats(s, args)));
+  server.registerTool("commander_profile", {
+    title: "Commander profile",
+    description: "How a commander is usually played: its EDHREC themes with deck counts and shares (a share is of the commander's " + "theme tag mentions, not of its decks), the strongest tags of its Tagger Deck profile with weights, and, when given a " + "decklist, how strongly the list matches each of its top themes (0 to 1, with the cards held and the heaviest cards " + "missing). A commander with no EDHREC page, or one with under 20 decks, is profiled from its own card tags, and " + "`fallback` says why.",
+    inputSchema: commanderProfileShape
+  }, async (args) => withStore(store, (s) => commanderProfile(s, args)));
   server.registerTool("neighbors", {
     title: "Card Space neighbors",
     description: "A card's nearest Card Space neighbors that a commander can play, nearest first, each with its similarity " + "score, mana value, type line, color identity, price and deck roles (up to 30). The card must be inside the " + "commander's color identity; lands have no neighbors.",

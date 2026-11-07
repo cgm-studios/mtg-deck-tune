@@ -42,9 +42,11 @@ async function run(manifest: object, seedStoreFrom?: string) {
 const good = await run({ ...real, url });
 check(good.connectMs < 5000, `server answers before the download (connected in ${Math.round(good.connectMs)} ms)`);
 const tools = (await good.client.listTools()).tools.map((t) => t.name).sort();
-check(tools.length === 8, `8 tools listed (${tools.join(", ")})`);
+check(tools.length === 9, `9 tools listed (${tools.join(", ")})`);
 const stats = await good.call("deck_stats", { commander: "Namor the Sub-Mariner", deckFile: "decks/namor.txt" });
 check(!stats.isError && stats.structuredContent?.cards === 100, `deck_stats on a project-relative deck path: ${stats.isError ? stats.content[0].text : `${stats.structuredContent.cards} cards, avg MV ${stats.structuredContent.averageManaValue}`}`);
+const profile = await good.call("commander_profile", { commander: "Namor the Sub-Mariner", deckFile: "decks/namor.txt" });
+check(!profile.isError && profile.structuredContent?.decks === 4772 && profile.structuredContent?.deckMatch?.themes?.length > 0, `commander_profile on Namor with the deck: ${profile.isError ? profile.content[0].text : `${profile.structuredContent.themes[0].theme} first, deck matches ${profile.structuredContent.deckMatch.strongest} best`}`);
 check(existsSync(join(good.data, "cards.db")) && readFileSync(join(good.data, "cards.db.sha256"), "utf8").trim() === real.dbSha256, "store installed in the plugin data folder with its checksum stamp");
 {
   // the installed store carries the card graph and the commander data (store schema 2), not only the card rows

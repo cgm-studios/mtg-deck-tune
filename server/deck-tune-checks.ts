@@ -259,7 +259,7 @@ export function checkSearchesNotDeferred(t: Transcript): CheckResult {
 // MCP or the repo uses and a player would not: tool names, tool arguments and JSON fields, file paths, tag talk, search
 // match counts and the plumbing words.
 const TOOL_TALK: [string, RegExp][] = [
-  ["tool name", /\b(?:deck_stats|swap_candidates|find_cards|accept_swap|reject_swap)\b/],
+  ["tool name", /\b(?:deck_stats|swap_candidates|find_cards|accept_swap|reject_swap|commander_profile)\b/],
   ["tool lever in backticks", new RegExp("`(?:" + LEVERS.join("|") + ")`")],
   ["tool argument or field", /\b(?:belowTarget|dropsRole|deckFile|decklist|colorIdentity|manaValue)\b|`(?:card|targets|tags|neighbors)`/],
   ["file path", /(?:^|[\s(`])(?:app|labels|evals|data)\/\S+|\S+\.(?:json|jsonl|ts|yaml)\b/],
