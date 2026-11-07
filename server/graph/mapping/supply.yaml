@@ -1,0 +1,40 @@
+version: "1.0"
+description: >
+  What feeds a cost that spends something. A card that "consumes Sacrifice" needs a permanent
+  on the battlefield, so anything that puts one there (ETB) feeds it. Used by src/interact.ts.
+  ManaPaid is left out on purpose (ISA Decisions 2026-11-06): ramp is a role the Galaxy fills,
+  and linking every mana source to every mana cost would drown the real interactions.
+
+supply:
+  - consumes: Sacrifice
+    fed_by: [ETB]
+    note: "Sacrifice outlets eat permanents: tokens, reanimation, anything entering."
+  - consumes: Exile
+    fed_by: [ETB]
+    note: "An exile-a-permanent cost, same source as sacrifice."
+  - consumes: Bounce
+    fed_by: [ETB]
+    note: "A return-a-permanent-to-hand cost."
+  - consumes: Tap
+    fed_by: [Untap]
+    note: "A {T} cost is paid again when the permanent untaps."
+  - consumes: Untap
+    fed_by: [Tap]
+  - consumes: Discard
+    fed_by: [CardDrawn, Regrowth]
+    note: "Discard costs spend cards in hand."
+  - consumes: ExileFromHand
+    fed_by: [CardDrawn, Regrowth]
+  - consumes: HandToLibrary
+    fed_by: [CardDrawn, Regrowth]
+  - consumes: ExileFromGraveyard
+    fed_by: [PutIntoGraveyard, Mill, Discard]
+    note: "Delve-style and escape-style costs spend graveyard cards."
+  - consumes: CollectEvidence
+    fed_by: [PutIntoGraveyard, Mill, Discard]
+  - consumes: LifeLoss
+    fed_by: [LifeGain]
+    note: "Paying life is spent from the life total."
+  - consumes: CounterRemoved
+    fed_by: [CounterPlaced]
+    note: "CounterRemoved:P1P1 is fed by CounterPlaced:P1P1; the subtype carries over (src/interact.ts)."
