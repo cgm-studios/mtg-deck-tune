@@ -68,23 +68,23 @@ function unpack(blob: Uint8Array): Vector {
   return out;
 }
 
-type TagData = { labels: Map<number, string>; deck: Map<number, Vector>; meanDeck: Map<number, number> };
+// Tag labels and the all-commander mean Tagger Deck weight per tag, once per store. Commander vectors are read again per
+// theme (a theme has at most a few hundred commanders) rather than kept: all of them unpacked would hold 1.4M entries.
+type TagData = { labels: Map<number, string>; meanDeck: Map<number, number> };
 const TAGS = new WeakMap<Store, TagData>();
 
 function tagData(store: Store): TagData {
   const hit = TAGS.get(store);
   if (hit) return hit;
   const labels = new Map((store.db.query("SELECT id, label FROM tags").all() as { id: number; label: string }[]).map((t) => [t.id, t.label]));
-  const deck = new Map<number, Vector>();
   const sum = new Map<number, number>();
-  const rows = store.db.query("SELECT card_id, tagger_deck FROM commanders WHERE decks > 0 ORDER BY card_id").all() as { card_id: number; tagger_deck: Uint8Array }[];
-  for (const r of rows) {
-    const v = unpack(r.tagger_deck);
-    deck.set(r.card_id, v);
-    for (const [t, w] of v) sum.set(t, (sum.get(t) ?? 0) + w);
+  let n = 0;
+  for (const r of store.db.query("SELECT tagger_deck FROM commanders WHERE decks > 0 ORDER BY card_id").iterate() as Iterable<{ tagger_deck: Uint8Array }>) {
+    n++;
+    for (const [t, w] of unpack(r.tagger_deck)) sum.set(t, (sum.get(t) ?? 0) + w);
   }
-  const meanDeck = new Map([...sum].map(([t, s]) => [t, s / rows.length]));
-  const out = { labels, deck, meanDeck };
+  const meanDeck = new Map([...sum].map(([t, s]) => [t, s / n]));
+  const out = { labels, meanDeck };
   TAGS.set(store, out);
   return out;
 }
@@ -102,12 +102,14 @@ function topTags(store: Store, weights: Map<number, number>): ProfileTag[] {
 
 /** A theme's tags: the share-weighted mean of its commanders' Tagger Deck vectors against the all-commander mean. */
 function themeTags(store: Store, chosen: { page: { cardId: number }; share: number }[]): ProfileTag[] {
-  const { deck, meanDeck } = tagData(store);
+  const { meanDeck } = tagData(store);
+  const q = store.db.query("SELECT tagger_deck FROM commanders WHERE card_id = ?");
   const t = new Map<number, number>();
   let total = 0;
   for (const { page, share } of chosen) {
     total += share;
-    for (const [tag, w] of deck.get(page.cardId) ?? []) t.set(tag, (t.get(tag) ?? 0) + share * w);
+    const row = q.get(page.cardId) as { tagger_deck: Uint8Array } | null;
+    for (const [tag, w] of row ? unpack(row.tagger_deck) : []) t.set(tag, (t.get(tag) ?? 0) + share * w);
   }
   const scored = new Map<number, number>();
   for (const [tag, mass] of t) {

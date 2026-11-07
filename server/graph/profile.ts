@@ -1,12 +1,14 @@
 // Hook profiles, ported from mtg-graph-api src/profile.ts (branch rework/ts-card-graph; its ISA F4): a plan stated as
-// priority cards or as a strategy name becomes one shape, the hooks the plan makes and spends, ranked. Both intent forms build ProfileEntry lists and pass them through normalizeProfile,
-// so they share one shape by construction (graph ISA ISC-18). Card profiles: cardProfile (graph ISA ISC-16). Strategy profiles:
-// strategy.ts (graph ISA ISC-17). The graph's ranking (its src/rank.ts) is not ported; the diagnose and shortlist tools read a profile through
-// profileMatcher and profileFit. What changed in the port: names sort by byte order, not localeCompare (locale
-// collation can differ between machines, and the tools answer the same everywhere); Plan is declared here.
+// priority cards or as a strategy name becomes one shape, the hooks the plan makes and spends, ranked. Both intent forms
+// build ProfileEntry lists and pass them through normalizeProfile, so they share one shape by construction (graph ISA
+// ISC-18). Card profiles: cardProfile (graph ISA ISC-16). Strategy profiles: strategy.ts (graph ISA ISC-17). The graph's
+// ranking (its src/rank.ts) is not ported; the diagnose and shortlist tools read a profile through profileMatcher and
+// profileFit. What changed in the port: names sort by byte order, not localeCompare (locale collation can differ between
+// machines, and the tools answer the same everywhere); Plan is declared here.
 
 import type { Selector } from "./grammar";
 import type { Emit, InteractionIndex, Listen, Me } from "./interact";
+
 /** A card plan: the commander and its priority cards, by graph (store) card name. */
 export interface Plan { commander: string; priorities: string[] }
 

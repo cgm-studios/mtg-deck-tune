@@ -5,6 +5,8 @@ A Claude Code plugin: the `deck-tune` skill plus the `mtg-deck` MCP server (type
 ## Layout
 
 - `server/`: the MCP server source (`mcp.ts` is the entry) and its tests. `paths.ts` decides where the store, labels and deck files live; `store.ts` downloads and verifies the card store on a plugin's first start.
+- `server/graph/`: the card graph code ported from `mtg-graph-api` (interaction index, closure, hook profiles, strategy profiles) as source, reading only the store; its mapping files are verbatim copies, and the store's `meta.graph_mapping_version` must match `mapping/forge-map.json`. Port fidelity is checked against output recorded from the graph repo on the store's own inputs (`fixtures/graph-profiles.json`; re-record it when the store's corpus or the EDHREC pages change).
+- `server/plan.ts`: the player's plan (themes, priority cards, themes to avoid) resolved into profiles, and the one plan fit the tools read. The plan always comes from the player, never from the commander's text.
 - `plugin/`: exactly what an install copies. `plugin/.claude-plugin/plugin.json` (its MCP server runs `dist/mcp.js`), `plugin/skills/deck-tune/SKILL.md` (the tuning workflow; its lever table and block shapes are what `server/deck-tune-checks.ts` reads) and `plugin/dist/`, the bundled server (`bun run build`). Commit `plugin/dist/` rebuilt with every server change; ISC-34 checks it matches the source.
 - `.claude-plugin/marketplace.json`: the marketplace, listing `./plugin`. `.mcp.json` runs `server/mcp.ts` for development in a checkout.
 - `scripts/plugin-smoke.ts`: the installed-plugin check, run before every release.
