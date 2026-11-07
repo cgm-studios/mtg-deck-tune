@@ -39069,6 +39069,10 @@ function cardFacts(graph) {
   FACTS.set(graph, keys);
   return keys;
 }
+function strategyFacts(graph, cardId) {
+  const i = graph.positionOf.get(cardId);
+  return i === undefined ? [] : cardFacts(graph)[i];
+}
 var MINED = new WeakMap;
 function mined(db, graph, minCardDecks) {
   const per = MINED.get(graph) ?? MINED.set(graph, new Map).get(graph);
@@ -39294,14 +39298,19 @@ function planScorer(store, plan) {
   };
 }
 var themeName = (p) => p.source.kind === "strategy" ? p.source.theme : p.source.commander;
+function planEcho(resolved) {
+  return { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) };
+}
+function strongestTags(store, cardId, n) {
+  const row = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(cardId);
+  const { labels } = tagData(store);
+  return (row ? unpack(row.vector) : []).slice(0, n).map(([t]) => labels.get(t) ?? String(t));
+}
 function planContext(store, commander, plan) {
   if (plan === undefined)
     return null;
   const resolved = resolvePlan(store, { commander, plan });
-  return {
-    plan: { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) },
-    fit: planScorer(store, resolved)
-  };
+  return { plan: planEcho(resolved), fit: planScorer(store, resolved) };
 }
 
 // server/paths.ts
@@ -39957,80 +39966,290 @@ function commanderProfile(store, raw) {
   return out;
 }
 
-// server/store.ts
-import { Database as Database2 } from "bun:sqlite";
-import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "fs";
-import { dirname } from "path";
-var STORE_SCHEMA = 2;
-var MANIFEST_PATH = process.env.MTG_DECK_STORE_MANIFEST ?? new URL("./store.json", import.meta.url).pathname;
-var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-var stampPath = (dbPath) => `${dbPath}.sha256`;
-function readManifest(path = MANIFEST_PATH) {
-  const m = JSON.parse(readFileSync2(path, "utf8"));
-  for (const k of ["version", "url", "gzSha256", "dbSha256"]) {
-    if (typeof m[k] !== "string" || !m[k])
-      throw new Error(`${path}: missing "${k}"`);
+// server/graph/deck.ts
+function deckGraph(idx, entries, commanders = [], roleIndex) {
+  const unresolved = [];
+  const members2 = new Map;
+  const sectionCommanders = new Set;
+  for (const e of entries) {
+    let i;
+    try {
+      i = idx.indexOf(e.name);
+    } catch {
+      unresolved.push(e.name);
+      continue;
+    }
+    members2.set(i, (members2.get(i) ?? 0) + e.count);
+    if (e.commander)
+      sectionCommanders.add(i);
   }
-  return m;
-}
-function checkStoreSchema(dbPath) {
-  const db = new Database2(dbPath, { readonly: true });
-  let found2;
-  try {
-    const hasMeta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get();
-    found2 = hasMeta ? db.query("SELECT value FROM meta WHERE key = 'schema'").get()?.value ?? null : null;
-  } finally {
-    db.close();
+  const cmdIdx = commanders.length ? commanders.map((n) => {
+    let i;
+    try {
+      i = idx.indexOf(n);
+    } catch {
+      throw new Error(`${n} is not a card the graph knows`);
+    }
+    if (!members2.has(i))
+      throw new Error(`${idx.cards[i].name} is not in the list`);
+    return i;
+  }) : [...sectionCommanders];
+  const memberSet = new Set(members2.keys());
+  const links = [...members2.keys()].flatMap((i) => idx.linksWith(i, memberSet).filter((l) => l.from === idx.cards[i].name));
+  const degree = new Map;
+  for (const l of links)
+    for (const n of [l.from, l.to])
+      degree.set(n, (degree.get(n) ?? 0) + 1);
+  const cards = [...members2].map(([i, count]) => {
+    const c = idx.cards[i];
+    const isLand = c.types.includes("Land");
+    const r = roleIndex && !isLand ? rolesOf(roleIndex, c.oracleId) : undefined;
+    return { name: c.name, oracleId: c.oracleId, count, isLand, degree: degree.get(c.name) ?? 0, ...r ? { roles: r.roles } : {} };
+  }).sort((a, b) => b.degree - a.degree || byteOrder(a.name, b.name));
+  let roles;
+  if (roleIndex) {
+    const counts = Object.fromEntries(roleIndex.roleNames.map((n) => [n, 0]));
+    for (const c of cards)
+      for (const r of c.roles ?? [])
+        counts[r.role] += c.count;
+    roles = { counts, unroled: cards.filter((c) => !c.isLand && !c.roles?.length).map((c) => c.name) };
   }
-  if (found2 !== String(STORE_SCHEMA)) {
-    throw new Error(`card data at ${dbPath} is ${found2 === null ? "a store with no schema" : `store schema ${found2}`}; this server needs schema ${STORE_SCHEMA}` + (IN_PLUGIN ? "" : " (rebuild it with mtg-vector's app/build-db.ts)"));
+  return { cards, links, unresolved, commanders: cmdIdx.map((i) => idx.cards[i].name), ...roles ? { roles } : {} };
+}
+
+// server/graph/diagnose.ts
+var GAME_FED = new Set([
+  ...Object.values(forge_map_default.phases),
+  "Attacks",
+  "AttackersDeclared",
+  "BlockersDeclared",
+  "Blocks",
+  "BecomesBlocked",
+  "CombatDamage",
+  "Damage",
+  "ExcessDamage",
+  "CumulativeUpkeep"
+]);
+var BROAD = 1 / 3;
+var selfOnly = (l) => l.sel.any.length > 0 && l.sel.any.every((a) => a.self);
+var selfOnlySel = (s) => s.any.length > 0 && s.any.every((a) => a.self);
+var opponentOnly = (l) => l.sel.any.length > 0 && l.sel.any.every((a) => a.controller === "opponent" || a.player === "Opponent");
+var ACTOR_HOOKS = new Set(["SpellCast", "CardDrawn", "LandPlayed"]);
+var opponentFed = (l) => opponentOnly(l) && (ACTOR_HOOKS.has(l.hook) || l.sel.any.some((a) => a.player === undefined));
+var UNFED_COSTS = new Set(["Tap", "LifeLoss"]);
+function isPayoff(l) {
+  return !offProfile(l.hook) && !GAME_FED.has(l.hook) && !UNFED_COSTS.has(l.consumed ?? "") && !selfOnly(l) && !opponentFed(l);
+}
+var MANA_HOOKS = new Set(["ManaAdded", "ManaPaid", "Tap"]);
+var AGAIN = new Set(["activated", "mana", "static", "replacement"]);
+var ONCE_SELF = new Set(["ETB", "SpellCast", "LTB", "Dies"]);
+function makesOwn(idx, i, hook) {
+  let own2 = false, repeatable = false;
+  const abilities = idx.cards[i].graph.abilities;
+  for (const e of idx.emitsOf(i)) {
+    if (e.hook !== hook)
+      continue;
+    const ok = e.by !== "effect" || e.sel.any.some((a) => a.self || a.player !== undefined || a.controller === "you" || a.props.includes("EquippedBy") || hook === "ETB" && a.controller === "any");
+    if (!ok)
+      continue;
+    own2 = true;
+    if (e.ability === undefined || selfOnlySel(e.sel))
+      continue;
+    const ab = abilities[e.ability];
+    if (!ab)
+      continue;
+    if (AGAIN.has(ab.kind))
+      repeatable = true;
+    else if (ab.kind === "triggered") {
+      const once = ab.relations.some((r) => r.relation === "triggers_on" && ONCE_SELF.has(r.hook) && selfOnlySel(r.selector));
+      if (!once)
+        repeatable = true;
+    }
   }
+  return { own: own2, repeatable };
 }
-function storeIsCurrent(manifest, dbPath = DB_PATH) {
-  return existsSync(dbPath) && existsSync(stampPath(dbPath)) && readFileSync2(stampPath(dbPath), "utf8").trim() === manifest.dbSha256;
+function worksThroughStatic(idx, i) {
+  return idx.cards[i].graph.abilities.some((a) => a.relations.some((r) => r.relation === "modifies" && !selfOnlySel(r.selector)));
 }
-async function installStore(manifest, dbPath = DB_PATH, fetchImpl = fetch) {
-  const res = await fetchImpl(manifest.url, { redirect: "follow" });
-  if (!res.ok)
-    throw new Error(`card data download failed: HTTP ${res.status} from ${manifest.url}`);
-  const gz = new Uint8Array(await res.arrayBuffer());
-  if (sha256(gz) !== manifest.gzSha256)
-    throw new Error(`card data download failed its checksum (${manifest.url})`);
-  const db = Bun.gunzipSync(gz);
-  if (sha256(db) !== manifest.dbSha256)
-    throw new Error("card data unpacked to the wrong checksum");
-  mkdirSync(dirname(dbPath), { recursive: true });
-  const tmp = `${dbPath}.download`;
-  writeFileSync(tmp, db);
-  try {
-    checkStoreSchema(tmp);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
+function deckContext(idx, g) {
+  const members2 = new Set(g.cards.map((c) => idx.indexOf(c.name)));
+  const nameIdx = new Map([...members2].map((i) => [idx.cards[i].name, i]));
+  const broadMemo = new Map;
+  const broadOf = (i) => {
+    let s = broadMemo.get(i);
+    if (s)
+      return s;
+    const by = new Map;
+    for (const l of idx.listensOf(i)) {
+      const key = `${l.hook}|${l.consumed ?? ""}`;
+      const acc = by.get(key) ?? by.set(key, new Set).get(key);
+      for (const f of idx.castFeeders(l))
+        acc.add(f);
+    }
+    s = new Set([...by].filter(([, from]) => from.size / idx.cards.length >= BROAD).map(([key]) => key));
+    broadMemo.set(i, s);
+    return s;
+  };
+  const byName = (name) => nameIdx.get(name) ?? idx.indexOf(name);
+  const generic = (l) => l.emittedBy === "card" && broadOf(byName(l.to)).has(`${l.hook}|${l.consumed ?? ""}`);
+  const counts = (l) => !offProfile(l.hook) && !generic(l);
+  return { members: members2, nameIdx, generic, counts };
+}
+function diagnose(idx, g, opts = {}, ctx = deckContext(idx, g)) {
+  const top = opts.top ?? 10;
+  const { members: members2, nameIdx, generic, counts } = ctx;
+  const commanders = new Set(g.commanders);
+  const ci = new Set(commanders.size ? g.commanders.flatMap((c) => idx.cards[nameIdx.get(c)].colorIdentity) : [...members2].flatMap((i) => idx.cards[i].colorIdentity));
+  const inColor = (i) => idx.cards[i].colorIdentity.every((x) => ci.has(x));
+  const partners = new Map;
+  for (const l of g.links)
+    if (counts(l))
+      for (const [a, b] of [[l.from, l.to], [l.to, l.from]])
+        (partners.get(a) ?? partners.set(a, new Set).get(a)).add(b);
+  const p = (name) => partners.get(name)?.size ?? 0;
+  const nonland = g.cards.filter((c) => !c.isLand);
+  const ranked = nonland.filter((c) => !commanders.has(c.name)).map((c) => p(c.name)).sort((a, b) => a - b);
+  const lowPartners = ranked.length ? ranked[Math.floor((ranked.length - 1) / 4)] : 0;
+  const rolesKnown = !!g.roles;
+  const manaOnly = (i) => {
+    const rels = idx.cards[i].graph.abilities.flatMap((a) => a.relations);
+    return rels.length > 0 && rels.every((r) => MANA_HOOKS.has(r.hook));
+  };
+  const ownMemo = new Map;
+  const own2 = (i, hook) => {
+    const k = `${i}|${hook}`;
+    let v = ownMemo.get(k);
+    if (!v) {
+      v = makesOwn(idx, i, hook);
+      ownMemo.set(k, v);
+    }
+    return v;
+  };
+  const payoffs = new Map;
+  for (const c of nonland) {
+    const i = nameIdx.get(c.name);
+    for (const l of idx.listensOf(i))
+      if (isPayoff(l))
+        (payoffs.get(l.hook) ?? payoffs.set(l.hook, new Set).get(l.hook)).add(i);
   }
-  renameSync(tmp, dbPath);
-  writeFileSync(stampPath(dbPath), `${manifest.dbSha256}
-`);
-}
-async function ensureStore(dbPath = DB_PATH) {
-  if (!IN_PLUGIN || process.env.MTG_DECK_DB) {
-    if (!existsSync(dbPath))
-      throw new Error(`no card store at ${dbPath}`);
-    checkStoreSchema(dbPath);
-    return;
+  const enablers = new Map;
+  for (const l of g.links) {
+    const to = nameIdx.get(l.to);
+    if (to === undefined || !payoffs.get(l.hook)?.has(to) || !own2(nameIdx.get(l.from), l.hook).own)
+      continue;
+    (enablers.get(l.hook) ?? enablers.set(l.hook, new Set).get(l.hook)).add(l.from);
   }
-  const manifest = readManifest();
-  if (storeIsCurrent(manifest, dbPath))
-    return checkStoreSchema(dbPath);
-  rmSync(stampPath(dbPath), { force: true });
-  await installStore(manifest, dbPath);
+  const names = (s) => [...s].sort(byteOrder);
+  const mechanics = [...payoffs].map(([hook, ps]) => ({ hook, payoffs: names([...ps].map((i) => idx.cards[i].name)), enablers: names(enablers.get(hook) ?? []) })).sort((a, b) => b.payoffs.length - a.payoffs.length || byteOrder(a.hook, b.hook));
+  const starved = [];
+  for (const [hook, ps] of payoffs) {
+    const es = enablers.get(hook) ?? new Set;
+    if (ps.size < 2 || ps.size <= es.size)
+      continue;
+    const feeds2 = new Map;
+    for (const pi of ps)
+      for (const l of idx.linksTo(pi)) {
+        if (l.hook !== hook || generic(l))
+          continue;
+        const from = idx.indexOf(l.from);
+        if (members2.has(from) || !inColor(from) || !own2(from, hook).own)
+          continue;
+        (feeds2.get(from) ?? feeds2.set(from, new Set).get(from)).add(idx.cards[pi].name);
+      }
+    const rep = (i) => own2(i, hook).repeatable ? 0 : 1;
+    const candidates = [...feeds2].filter(([, s]) => s.size >= 2).sort(([a, x], [b, y]) => y.size - x.size || rep(a) - rep(b) || (idx.cards[a].edhrecRank ?? Infinity) - (idx.cards[b].edhrecRank ?? Infinity) || byteOrder(idx.cards[a].name, idx.cards[b].name)).slice(0, top).map(([i, s]) => ({ name: idx.cards[i].name, feeds: names(s), repeatable: own2(i, hook).repeatable }));
+    starved.push({ hook, payoffs: names([...ps].map((i) => idx.cards[i].name)), enablers: names(es), ratio: `${ps.size}:${es.size}`, candidates });
+  }
+  starved.sort((a, b) => b.payoffs.length / Math.max(1, b.enablers.length) - a.payoffs.length / Math.max(1, a.enablers.length) || byteOrder(a.hook, b.hook));
+  const starvedOf = new Map;
+  for (const s of starved)
+    for (const name of s.payoffs)
+      if (!starvedOf.has(name))
+        starvedOf.set(name, s);
+  const engine = nonland.map((c) => {
+    const i = nameIdx.get(c.name);
+    const roles2 = (c.roles ?? []).map((r) => r.role);
+    const base = { name: c.name, partners: p(c.name), degree: c.degree, roles: roles2 };
+    if (commanders.has(c.name))
+      return { ...base, bucket: "commander" };
+    const low = base.partners <= lowPartners;
+    if (!low)
+      return { ...base, bucket: roles2.length ? "core" : "engine" };
+    if (roles2.length)
+      return { ...base, bucket: "utility", reason: `fills ${roles2.join(" and ")}, so few links is fine` };
+    if (manaOnly(i))
+      return { ...base, bucket: "utility", reason: "only makes mana: a ramp slot, not a plan card" };
+    if (worksThroughStatic(idx, i))
+      return { ...base, bucket: "unread", reason: "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet" };
+    const s = starvedOf.get(c.name);
+    if (s)
+      return { ...base, bucket: "starved", reason: `waits on ${hookPhrase(s.hook)}, which only ${s.enablers.length} card${s.enablers.length === 1 ? "" : "s"} in the deck make happen` };
+    if (!rolesKnown)
+      return { ...base, bucket: "unjudged", reason: "loosely linked, but there is no role data, so it may fill a role this run cannot see" };
+    const why = base.partners === 0 && c.degree > 0 ? `its ${c.degree} links all come from cards that care about any spell or any creature, so any card would make them` : `links to ${base.partners} card${base.partners === 1 ? "" : "s"} in the deck, in the bottom quarter (${lowPartners} or fewer)`;
+    return { ...base, bucket: "cut", reason: `${why}, and it fills none of the roles` };
+  }).sort((a, b) => b.partners - a.partners || byteOrder(a.name, b.name));
+  let roles;
+  if (g.roles && opts.targets) {
+    const over = [], under = [];
+    for (const [role, target] of Object.entries(opts.targets.targets)) {
+      const count = g.roles.counts[role];
+      if (count === undefined || count === target)
+        continue;
+      if (count > target) {
+        const trims = engine.filter((e) => e.roles.includes(role) && e.bucket !== "commander").map((e) => ({ name: e.name, partners: e.partners })).sort((a, b) => a.partners - b.partners || byteOrder(a.name, b.name));
+        over.push({ role, count, target, trims });
+      } else
+        under.push({ role, count, target });
+    }
+    roles = { source: opts.targets.source, over, under };
+  }
+  return { commanders: g.commanders, colorIdentity: ["W", "U", "B", "R", "G"].filter((x) => ci.has(x)), mechanics, starved, engine, lowPartners, ...roles ? { roles } : {} };
 }
-if (false) {}
+var HOOK_WORDS = {
+  Dies: "a creature dying",
+  ETB: "something entering the battlefield",
+  LTB: "something leaving the battlefield",
+  SpellCast: "casting a spell",
+  CardDrawn: "drawing a card",
+  TokenCreated: "making a token",
+  LifeGain: "gaining life",
+  LifeLoss: "losing life",
+  Sacrifice: "sacrificing a permanent",
+  Discard: "discarding a card",
+  PutIntoGraveyard: "a card going to the graveyard",
+  Mill: "milling",
+  SpellCountered: "countering a spell",
+  Untap: "untapping",
+  Tap: "tapping",
+  CounterPlaced: "putting a counter on something",
+  "CounterPlaced:P1P1": "putting a +1/+1 counter on something",
+  CounterRemoved: "removing a counter",
+  Exile: "exiling something",
+  Bounce: "returning a permanent to hand",
+  Scry: "scrying",
+  Surveil: "surveilling",
+  GainControl: "taking control of something",
+  Destroy: "destroying something",
+  Regrowth: "returning a card from the graveyard to hand"
+};
+var COUNTER_WORDS = { P1P1: "+1/+1", M1M1: "-1/-1" };
+var hookPhrase = (hook) => {
+  if (HOOK_WORDS[hook])
+    return HOOK_WORDS[hook];
+  const [base, sub] = hook.split(":");
+  const kind = sub ? COUNTER_WORDS[sub] ?? sub.toLowerCase() : "";
+  if (sub && base === "CounterPlaced")
+    return `putting a ${kind} counter on something`;
+  if (sub && base === "CounterRemoved")
+    return `removing a ${kind} counter`;
+  const words2 = base.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  return sub ? `${words2} (${kind})` : words2;
+};
 
 // server/swap-tools.ts
-import { appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "fs";
-import { dirname as dirname2 } from "path";
+import { appendFileSync, mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "fs";
+import { dirname } from "path";
 
 // server/deck-swaps.ts
 var SWAP_DEFAULTS = { method: "leidenHi", maxCmcUp: 1, perCard: 3, sameRegion: true, minGain: 0.000000001, tieFloor: 0, cmcPenalty: 0, reverse: true };
@@ -40133,7 +40352,7 @@ function directTags(store, oracleId) {
 var countedRoles = (store, c) => rolesOf(store.roles, c.id).roles;
 var TARGETS_PATH = new URL("./role-targets.json", import.meta.url).pathname;
 function loadTargets(roleNames, path = TARGETS_PATH) {
-  const file2 = JSON.parse(readFileSync3(path, "utf8"));
+  const file2 = JSON.parse(readFileSync2(path, "utf8"));
   const t = file2.targets;
   if (!t || typeof t !== "object")
     throw new Error(`${path}: no "targets" table`);
@@ -40540,7 +40759,7 @@ function pairOf(store, f) {
   return { out: f.out !== undefined ? exactCard(store, f.out) : null, inCard: f.in !== undefined ? exactCard(store, f.in) : null };
 }
 function appendLabel(label, path) {
-  mkdirSync2(dirname2(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify(label)}
 `);
 }
@@ -40584,8 +40803,8 @@ function acceptSwap(store, input3, opts = {}) {
 `) + (hadFinalNewline ? `
 ` : "");
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync2(tmp, next);
-  renameSync2(tmp, path);
+  writeFileSync(tmp, next);
+  renameSync(tmp, path);
   const label = { date: date6, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null };
   appendLabel(label, opts.labelsPath ?? LABELS_PATH);
   return {
@@ -40613,6 +40832,251 @@ function rejectSwap(store, input3, opts = {}) {
   appendLabel(label, opts.labelsPath ?? LABELS_PATH);
   return { label };
 }
+
+// server/diagnose.ts
+var diagnoseShape = {
+  commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
+  deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.describe("The player's confirmed plan (themes, priority cards, themes to avoid): the diagnosis is measured against it")
+};
+var diagnoseInput = exports_external.object(diagnoseShape).strict();
+function diagnose2(store, input3) {
+  const f = diagnoseInput.parse(input3);
+  const text = readDeck(f);
+  const { card: commander } = resolveCommander(store, f.commander);
+  const plan = resolvePlan(store, { commander: commander.name, plan: f.plan });
+  const graph = graphOf(store.db);
+  const idx = graph.index;
+  const deck = parseDecklist(store.space, text);
+  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  const counts = new Map;
+  const noGraphData = new Set;
+  for (const e of deck.entries) {
+    if (!e.card)
+      continue;
+    const pos = graph.positionOf.get(idOf.get(e.card.id));
+    if (pos !== undefined)
+      counts.set(pos, (counts.get(pos) ?? 0) + e.qty);
+    else
+      noGraphData.add(e.card.name);
+  }
+  const commanderPos = graph.positionOf.get(plan.commander.id);
+  if (commanderPos === undefined)
+    throw new ToolInputError(`${commander.name} has no card graph data (its card script could not be read), so the deck's engine cannot be read around it`);
+  if (!counts.has(commanderPos))
+    counts.set(commanderPos, 1);
+  const entries = [...counts].map(([pos, count]) => ({ name: idx.cards[pos].name, count }));
+  const g = deckGraph(idx, entries, [idx.cards[commanderPos].name], store.roles);
+  const sheet = roleSheet(store.roles, deck.entries.map((e) => ({ ...e, card: e.card && { id: e.card.id, name: e.card.name, land: e.card.land } })));
+  g.roles = { counts: sheet.counts, unroled: sheet.unroled };
+  const nonland = sheet.cards.reduce((n, c) => n + c.qty, 0);
+  const targets = roleTargets(store, plan, commander.ci, nonland);
+  const ctx = deckContext(idx, g);
+  const d = diagnose(idx, g, { targets: { targets: Object.fromEntries(targets.map((t) => [t.role, t.target])), source: "plan" } }, ctx);
+  const roles = targets.map((t) => ({ role: t.role, count: sheet.counts[t.role] ?? 0, target: t.target, source: t.source, basis: t.basis, ...t.expected !== undefined ? { expected: t.expected } : {} }));
+  const read = new Map(roles.map((r) => [r.role, r]));
+  const isStatic = (name) => worksThroughStatic(idx, idx.indexOf(name));
+  const linksOf = (name) => {
+    const seen = new Set;
+    return g.links.filter((l) => l.from === name || l.to === name).map((l) => ({
+      card: l.from === name ? l.to : l.from,
+      direction: l.from === name ? "feeds" : "fed by",
+      on: hookPhrase(l.hook),
+      generic: ctx.generic(l)
+    })).filter((l) => {
+      const k = `${l.card}|${l.direction}|${l.on}|${l.generic}`;
+      return !seen.has(k) && !!seen.add(k);
+    }).sort((a, b) => (a.card < b.card ? -1 : a.card > b.card ? 1 : 0) || (a.direction < b.direction ? -1 : a.direction > b.direction ? 1 : 0) || (a.on < b.on ? -1 : a.on > b.on ? 1 : 0));
+  };
+  const nonlandCards = [...new Map(deck.entries.filter((e) => e.card && !e.card.land).map((e) => [e.card.id, { id: idOf.get(e.card.id), oracleId: e.card.id, name: e.card.name }])).values()];
+  const gapOf = new Map;
+  for (const s of d.starved)
+    for (const name of s.payoffs)
+      if (!gapOf.has(name))
+        gapOf.set(name, s.hook);
+  const leansOn = mainParts([...plan.themes, ...plan.cards ? [plan.cards] : []]);
+  return {
+    commander: { name: commander.name, colorIdentity: commander.ci.join("") },
+    plan: { ...planEcho(plan), leansOn },
+    engineGaps: d.starved.map((s) => ({
+      mechanic: hookPhrase(s.hook),
+      payoffCount: s.payoffs.length,
+      enablerCount: s.enablers.length,
+      payoffs: s.payoffs,
+      enablers: s.enablers,
+      toTry: s.candidates.map((c) => ({ name: c.name, feeds: c.feeds, everyTurn: c.repeatable })),
+      waitingOnIt: d.engine.filter((e) => e.bucket === "starved" && gapOf.get(e.name) === s.hook).map((e) => e.name)
+    })),
+    roles,
+    over: (d.roles?.over ?? []).map((o) => ({ ...read.get(o.role), trims: (o.trims ?? []).map((t) => isStatic(t.name) ? { ...t, unread: true } : t) })),
+    under: (d.roles?.under ?? []).map((u) => read.get(u.role)),
+    offPlan: offPlanCards(store, plan, nonlandCards.filter((c) => c.id !== plan.commander.id), leansOn),
+    doingLeast: d.engine.filter((e) => e.bucket === "cut").map((e) => ({ name: e.name, partners: e.partners, links: linksOf(e.name), reason: e.reason })),
+    unread: d.engine.filter((e) => isStatic(e.name)).map((e) => ({
+      name: e.name,
+      reason: "works through a static effect (a lord, an anthem, a keyword grant, a cost or trigger change) the graph does not link yet, so its links undercount it" + (e.bucket === "unread" ? "" : `; it still reads as ${e.bucket} from the links it does have`)
+    })),
+    cards: d.engine.map(({ degree: _d, ...e }) => e),
+    lowPartners: d.lowPartners,
+    noGraphData: [...noGraphData].sort(),
+    unresolved: unresolvedLines(store, deck.unresolved)
+  };
+}
+var THEME_ROLES = new WeakMap;
+function themeRoles(store, theme) {
+  const per = THEME_ROLES.get(store) ?? THEME_ROLES.set(store, new Map).get(store);
+  const { name, chosen } = themeCommanders(store.db, theme);
+  const hit = per.get(name);
+  if (hit)
+    return hit;
+  const rows = store.db.query("SELECT cc.card_id, cc.decks FROM commander_cards cc JOIN cards c ON c.id = cc.card_id WHERE cc.commander_id = ? AND c.is_land = 0 ORDER BY cc.card_id");
+  const commanders = chosen.map(({ page, share: share2 }) => {
+    const cmd = store.space.cards.get(store.names[page.cardId - 1].oracleId);
+    let total = 0;
+    const mass = new Map;
+    for (const r of rows.all(page.cardId)) {
+      total += r.decks;
+      for (const h of rolesOf(store.roles, store.names[r.card_id - 1].oracleId).roles)
+        mass.set(h.role, (mass.get(h.role) ?? 0) + r.decks);
+    }
+    return { ci: cmd.ci, weight: share2, shares: new Map([...mass].map(([role, m]) => [role, total ? m / total : 0])) };
+  });
+  const out = { name, commanders };
+  per.set(name, out);
+  return out;
+}
+function colorOverlap(a, b) {
+  const all = new Set([...a, ...b]);
+  if (!all.size)
+    return 1;
+  return a.filter((c) => b.includes(c)).length / all.size;
+}
+function roleTargets(store, plan, deckCi, nonland) {
+  const defaults = loadTargets(store.roles.roleNames);
+  const covered = [];
+  const thin = [];
+  for (const theme of plan.themes) {
+    if (theme.source.kind !== "strategy")
+      continue;
+    const t = themeRoles(store, theme.source.theme);
+    const weighted = t.commanders.map((c) => ({ ...c, w: c.weight * colorOverlap(c.ci, deckCi) })).filter((c) => c.w > 0);
+    if (weighted.length < STRATEGY_DEFAULTS.minCommanders) {
+      thin.push(`only ${weighted.length} of ${t.name}'s ${t.commanders.length} commanders share a color with this deck (${STRATEGY_DEFAULTS.minCommanders} needed)`);
+      continue;
+    }
+    const sum = weighted.reduce((s, c) => s + c.w, 0);
+    const expected = new Map(store.roles.roleNames.map((role) => [role, nonland * weighted.reduce((s, c) => s + c.w * (c.shares.get(role) ?? 0), 0) / sum]));
+    covered.push({ name: t.name, sharing: weighted.length, of: t.commanders.length, expected });
+  }
+  return store.roles.roleNames.map((role) => {
+    if (covered.length) {
+      const expected = Math.round(covered.reduce((s, c) => s + c.expected.get(role), 0) / covered.length * 10) / 10;
+      const basis = covered.map((c) => `${c.name} decks (${c.sharing} of its ${c.of} commanders share a color with this deck)`).join("; ");
+      return { role, target: Math.round(expected), source: "plan", basis, expected };
+    }
+    const why = thin.length ? thin.join("; ") : "the plan names no theme";
+    return { role, target: defaults[role], source: "default", basis: `default table: ${why}` };
+  });
+}
+var hookWordsOf = (key) => {
+  const { hook, token } = parseProfileHook(key);
+  return token === null ? hookPhrase(hook) : `${hookPhrase(hook)} (${token ? "tokens" : "nontokens"})`;
+};
+function mainParts(profiles) {
+  const hooks = profiles.flatMap((p) => p.hooks.filter(isMainHook).map((h) => hookWordsOf(h.hook)));
+  const tags = profiles.flatMap((p) => p.tags.filter((t) => t.weight > 0.5).map((t) => t.tag));
+  return { hooks: [...new Set(hooks)], tags: [...new Set(tags)] };
+}
+var TAGS_SHOWN = 5;
+function offPlanCards(store, plan, cards, leansOn) {
+  const fit = planScorer(store, plan);
+  const avoid = plan.avoid.map((p) => ({ name: p.source.kind === "strategy" ? p.source.theme : p.source.commander, fit: planScorer(store, { ...plan, themes: [p], cards: null }) }));
+  const graph = graphOf(store.db);
+  const name = planEcho(plan);
+  const planName = [...name.themes, ...name.priorities.length ? [`${plan.commander.name} with ${name.priorities.join(", ")}`] : []].join(" and ");
+  const leaning = [...leansOn.hooks, ...leansOn.tags].slice(0, 6).join(", ");
+  return cards.filter((c) => fit(c.oracleId).score === 0).map((c) => {
+    const does = strategyFacts(graph, c.id).map((k) => {
+      const [side, hook] = k.split("|");
+      return `${side === "makes" ? "makes happen" : "waits on"}: ${hookPhrase(hook)}`;
+    });
+    const fitsAvoided = avoid.filter((a) => a.fit(c.oracleId).score > 0).map((a) => a.name);
+    const reason = `nothing it does is something the ${planName} plan leans on (${leaning})` + (fitsAvoided.length ? `, and it fits ${fitsAvoided.join(" and ")}, which the plan avoids` : "");
+    return { name: c.name, reason, does, tags: strongestTags(store, c.id, TAGS_SHOWN), roles: rolesOf(store.roles, c.oracleId).roles.map((r) => r.role), fitsAvoided };
+  }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
+// server/store.ts
+import { Database as Database2 } from "bun:sqlite";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync2 } from "fs";
+import { dirname as dirname2 } from "path";
+var STORE_SCHEMA = 2;
+var MANIFEST_PATH = process.env.MTG_DECK_STORE_MANIFEST ?? new URL("./store.json", import.meta.url).pathname;
+var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+var stampPath = (dbPath) => `${dbPath}.sha256`;
+function readManifest(path = MANIFEST_PATH) {
+  const m = JSON.parse(readFileSync3(path, "utf8"));
+  for (const k of ["version", "url", "gzSha256", "dbSha256"]) {
+    if (typeof m[k] !== "string" || !m[k])
+      throw new Error(`${path}: missing "${k}"`);
+  }
+  return m;
+}
+function checkStoreSchema(dbPath) {
+  const db = new Database2(dbPath, { readonly: true });
+  let found2;
+  try {
+    const hasMeta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get();
+    found2 = hasMeta ? db.query("SELECT value FROM meta WHERE key = 'schema'").get()?.value ?? null : null;
+  } finally {
+    db.close();
+  }
+  if (found2 !== String(STORE_SCHEMA)) {
+    throw new Error(`card data at ${dbPath} is ${found2 === null ? "a store with no schema" : `store schema ${found2}`}; this server needs schema ${STORE_SCHEMA}` + (IN_PLUGIN ? "" : " (rebuild it with mtg-vector's app/build-db.ts)"));
+  }
+}
+function storeIsCurrent(manifest, dbPath = DB_PATH) {
+  return existsSync(dbPath) && existsSync(stampPath(dbPath)) && readFileSync3(stampPath(dbPath), "utf8").trim() === manifest.dbSha256;
+}
+async function installStore(manifest, dbPath = DB_PATH, fetchImpl = fetch) {
+  const res = await fetchImpl(manifest.url, { redirect: "follow" });
+  if (!res.ok)
+    throw new Error(`card data download failed: HTTP ${res.status} from ${manifest.url}`);
+  const gz = new Uint8Array(await res.arrayBuffer());
+  if (sha256(gz) !== manifest.gzSha256)
+    throw new Error(`card data download failed its checksum (${manifest.url})`);
+  const db = Bun.gunzipSync(gz);
+  if (sha256(db) !== manifest.dbSha256)
+    throw new Error("card data unpacked to the wrong checksum");
+  mkdirSync2(dirname2(dbPath), { recursive: true });
+  const tmp = `${dbPath}.download`;
+  writeFileSync2(tmp, db);
+  try {
+    checkStoreSchema(tmp);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+  renameSync2(tmp, dbPath);
+  writeFileSync2(stampPath(dbPath), `${manifest.dbSha256}
+`);
+}
+async function ensureStore(dbPath = DB_PATH) {
+  if (!IN_PLUGIN || process.env.MTG_DECK_DB) {
+    if (!existsSync(dbPath))
+      throw new Error(`no card store at ${dbPath}`);
+    checkStoreSchema(dbPath);
+    return;
+  }
+  const manifest = readManifest();
+  if (storeIsCurrent(manifest, dbPath))
+    return checkStoreSchema(dbPath);
+  rmSync(stampPath(dbPath), { force: true });
+  await installStore(manifest, dbPath);
+}
+if (false) {}
 
 // server/mcp.ts
 function toolResult(run) {
@@ -40659,6 +41123,11 @@ function createDeckServer(store) {
     description: "How a commander is usually played: its EDHREC themes with deck counts and shares (a share is of the commander's " + "theme tag mentions, not of its decks), the strongest tags of its Tagger Deck profile with weights, and, when given a " + "decklist, how strongly the list matches each of its top themes (0 to 1, with the cards held and the heaviest cards " + "missing). A commander with no EDHREC page, or one with under 20 decks, is profiled from its own card tags, and " + "`fallback` says why.",
     inputSchema: commanderProfileShape
   }, async (args) => withStore(store, (s) => commanderProfile(s, args)));
+  server.registerTool("diagnose", {
+    title: "Diagnose a deck against the plan",
+    description: "What a Commander deck lacks and overdoes against the player's confirmed plan (`plan`, required: themes, " + "priority cards, themes to avoid). Returns engine gaps (payoffs waiting on something too few cards make happen, with both " + "counts and in-color cards that would feed them), every role against its target with the target's source (the plan's " + "theme decks, or the default table when the plan's themes do not cover it) and the roles over and under, cards off the " + "plan with the reason, the cards doing the least with their links into the deck, and the cards the card graph cannot " + "read (static effects), which are never judged by their links. Give the commander and either a decklist file path or " + "the pasted list. Same deck and plan, same answer.",
+    inputSchema: diagnoseShape
+  }, async (args) => withStore(store, (s) => diagnose2(s, args)));
   server.registerTool("neighbors", {
     title: "Card Space neighbors",
     description: "A card's nearest Card Space neighbors that a commander can play, nearest first, each with its similarity " + "score, mana value, type line, color identity, price and deck roles (up to 30). The card must be inside the " + "commander's color identity; lands have no neighbors.",
