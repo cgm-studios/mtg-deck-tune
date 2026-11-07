@@ -238,7 +238,7 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
     (allowLand || !c.land) && c.id !== commander.id && !inDeck.has(c.id) && fitsIdentity(c, commander.ci) &&
     (f.maxManaValue === undefined || c.meta!.cmc <= f.maxManaValue) &&
     (f.maxPrice === undefined || (c.meta!.usd !== null && c.meta!.usd <= f.maxPrice));
-  const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null }));
+  const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null, inference: null }));
   let avoided = 0;
   const keep = (c: SpaceCard): boolean => {
     if (!avoid.length || fit(c.id).score > 0 || !avoid.some((a) => a(c.id).score > 0)) return true;

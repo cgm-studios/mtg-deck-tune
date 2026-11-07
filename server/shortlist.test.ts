@@ -264,7 +264,7 @@ describe("the plan's other parts", () => {
     const r = shortlist(store, { ...NAMOR, plan, problem: { role: "removal" } });
     // the fits are read by the plan module, apart from the shortlist
     const resolved = resolvePlan(store, { commander: NAMOR.commander, plan });
-    const tokens = planScorer(store, { ...resolved, themes: resolved.avoid, cards: null });
+    const tokens = planScorer(store, { ...resolved, themes: resolved.avoid, cards: null, inference: null });
     const spells = planScorer(store, resolved);
     const id = (n: string) => store.names.find((x) => x.name === n)!.oracleId;
     for (const c of r.cards) expect([c.name, tokens(id(c.name)).score > 0 && spells(id(c.name)).score === 0]).toEqual([c.name, false]);
@@ -299,5 +299,16 @@ describe("commanders without a full page, and caller mistakes", () => {
     // roles and engine events match whatever the capitals
     expect(shortlist(store, { ...NAMOR, plan: SPELLSLINGER, problem: { role: " Removal" } }).problem).toEqual({ kind: "role", role: "removal" });
     expect(shortlist(store, { ...TEYSA, plan: ARISTOCRATS, problem: { engineGap: "A Creature Dying" } }).problem).toMatchObject({ mechanic: "a creature dying" });
+  }, 60_000);
+});
+
+describe("a plan of cards alone (DT-6.12)", () => {
+  test("the shortlist reads a cards-only plan under the theme those cards fit best, and its plan echo names that theme", () => {
+    const r = shortlist(store, { ...TEYSA, plan: { priorities: ["Blood Artist", "Zulaport Cutthroat", "Viscera Seer"] }, problem: { role: "removal" } });
+    expect(r.plan.themes).toEqual([]);
+    expect(r.plan.inferred?.theme).toBeTruthy();
+    expect(r.cards.length).toBe(30);
+    // cards fit the plan through the inferred theme as well as the priority cards
+    expect(r.cards.some((c) => c.evidence.planFit.score > 0)).toBe(true);
   }, 60_000);
 });
