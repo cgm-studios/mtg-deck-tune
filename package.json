@@ -1,0 +1,17 @@
+{
+  "name": "mtg-deck-tune",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "test": "bun test server",
+    "mcp": "bun server/mcp.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "fast-check": "3.23.2"
+  }
+}

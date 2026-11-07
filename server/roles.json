@@ -1,0 +1,63 @@
+{
+  "about": "Role map: Scryfall Tagger tags to deck roles. A card gets a role when it carries one of the role's tags or any tag below it in the Tagger tree, minus the excluded tags and everything below them. Weak tags give their role only when no other tag gives the card any role. Drafted from a Namor deck and checked card by card on its role sheet (2026-11-06). Role target counts live in role-targets.json.",
+  "roles": [
+    {
+      "role": "ramp",
+      "about": "Lasting extra mana: mana rocks, mana dorks, land ramp, extra land drops, mana doublers. One-shot rituals are left out. Tagger calls land theft and removal that hands an opponent a land 'land ramp', so land ramp is weak: it stands only when nothing else explains the card.",
+      "tags": ["ramp"],
+      "exclude": ["ritual"],
+      "weak": ["land ramp", "multi land ramp"]
+    },
+    {
+      "role": "card draw",
+      "about": "Puts more cards in your hand or in reach: draw spells, draw engines, impulse and play-from-the-top effects. Loots and rummages trade cards rather than add them, so they are card selection. A plain draw or a cantrip is weak: on Censor (cycling) or Remand it comes along with the counterspell, so it only counts when the card has no other role.",
+      "tags": ["card advantage"],
+      "exclude": ["loot", "loot to exile", "loot to library", "rummage", "rummage to library", "brainstorm", "regrowth"],
+      "weak": ["pure draw", "cantrip", "delayed cantrip"]
+    },
+    {
+      "role": "card selection",
+      "about": "Improves the cards you draw without adding cards: scry, surveil, top- and bottom-of-library manipulation, loot, rummage, Brainstorm. A tutor that puts the card on top is a tutor, and putting graveyard cards back into the library is not selection.",
+      "tags": ["library manipulation", "loot", "loot to exile", "loot to library", "rummage", "rummage to library", "brainstorm"],
+      "exclude": ["tutor-to-top", "restock-to-top", "restock-to-bottom"]
+    },
+    {
+      "role": "removal",
+      "about": "Answers one or a few opposing permanents: destroy, exile, bounce, tuck, or take control of it (Tagger tags some temporary steals theft-creature too). Board wipes are their own role.",
+      "tags": ["spot removal", "multi removal", "repeatable removal", "theft-permanent", "theft-creature"]
+    },
+    {
+      "role": "board wipe",
+      "about": "Answers every creature or permanent at once, one-sided or not: wraths, mass bounce.",
+      "tags": ["sweeper"]
+    },
+    {
+      "role": "counterspell",
+      "about": "Stops a spell or ability on the stack: hard and soft counters, counters for abilities, spells that pull a spell off the stack.",
+      "tags": ["counterspell", "remove-from-stack"]
+    },
+    {
+      "role": "protection",
+      "about": "Keeps your own permanents alive: hexproof, shroud, ward, indestructible, protection, and effects that save your board or you.",
+      "tags": ["protection"]
+    },
+    {
+      "role": "tutor",
+      "about": "Searches your library for a specific nonland card. Land searches are ramp, not tutors.",
+      "tags": ["tutor"],
+      "exclude": ["tutor-land", "tutor-to"]
+    },
+    {
+      "role": "recursion",
+      "about": "Gets cards back from the graveyard to use again: to hand, to the battlefield, or cast from there. Shuffling a graveyard into the library is left out.",
+      "tags": ["recursion"],
+      "exclude": ["restock"]
+    },
+    {
+      "role": "cost reducer",
+      "about": "Makes your other spells cost less: Medallions, cost reducers for a card type, convoke, affinity or improvise for others. Discounts on activated abilities are left out.",
+      "tags": ["cost reducer"],
+      "exclude": ["cost-reducer-activated-ability"]
+    }
+  ]
+}

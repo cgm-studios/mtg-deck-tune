@@ -1,0 +1,88 @@
+# MV-17: the judge stage of the deck-tune eval, an Assay v2 suite. Run it with `bun app/deck-tune-eval.ts`, which runs
+# the code stage first (`bun test ./app/deck-tune-checks.test.ts`: ISC-13, 22.1, 22.2, 23.1 and the code half of
+# ISC-23.2) and dispatches this suite only when the code stage is green.
+#
+# Each case's prompt is a recorded session (docs/research/deck-tune/*.jsonl). The suite runs through Assay's
+# runAgenticSuite with an offline replay adapter: the "output" a trial grades is the rendered transcript, never a fresh
+# generation, so trials vary only in the judge. Code can check that every swap block carries a Claude's read line; only
+# a reader can tell whether a quality judgment slipped in somewhere else unlabeled, so ISC-23.2 is the one judged assert.
+name: mtg-vector-deck-tune
+type: regression
+pass_threshold: 1
+trials: 3
+system_prompt: "Replay suite: the offline adapter returns a recorded deck-tune transcript; no model under test runs."
+cases:
+  - id: isc-23-2-namor-reads-labeled
+    prompt: docs/research/deck-tune/namor-mana-efficient.jsonl
+    assert:
+      # Prerequisites (code): the session has swaps, labeled reads, and the numbers and levers came first.
+      - type: contains
+        value: "**Claude's read**"
+      - type: regex
+        value: 'mtg-deck\.deck_stats[\s\S]*Levers, ranked by expected help[\s\S]*mtg-deck\.swap_candidates[\s\S]*### Swap 1:'
+      - type: llm-assert
+        derived_from: ~/Documents/02_areas/mtg-vector/ISA.md#ISC-23.2
+        value: >-
+          In the turns headed "Claude", every judgment of a candidate card's quality (calling a card strong, weak,
+          playable, a staple, an upgrade, worth or not worth playing, or better or worse than another card) is
+          explicitly labeled as Claude's own judgment from its own Magic knowledge, for example by a "Claude's read"
+          label on that line or sentence. Facts restated from tool results (mana value, price, similarity, Tagger tags,
+          roles, deck numbers) need no label.
+    # Passes both prerequisites; one quality judgment ("a clear upgrade, one of the best cards in blue") sits unlabeled
+    # inside a data line. Only a reader catches it, so the judge must fail this.
+    adversarial_output: |-
+      # Deck tune: Namor (adversarial fixture)
+
+      ### Tool `mtg-deck.deck_stats`
+
+      ```
+      {"averageManaValue":2.766,"curve":{"1":9,"2":27,"3":15,"4":6,"5":3,"7+":4}}
+      ```
+
+      ### Claude
+
+      Average mana value 2.77; curve 1: 9 · 2: 27 · 3: 15 · 4: 6 · 5: 3 · 7+: 4.
+
+      **Levers, ranked by expected help:**
+      1. **Trim the 7+ top end** (`cheaper` on Hullbreaker Horror)
+      2. **More ramp** (`roles`)
+
+      This ranking is Claude's read. Which lever do you want?
+
+      ### Player
+
+      1.
+
+      ### Tool `mtg-deck.swap_candidates`
+
+      ```
+      1. out Hullbreaker Horror (MV 7) | in Cryptic Command (MV 4) | in-color neighbor #3 of Hullbreaker Horror (similarity 0.876); mana value 4 vs 7 (-3)
+      2. out Hullbreaker Horror (MV 7) | in Teferi's Response (MV 2) | in-color neighbor #27 of Hullbreaker Horror (similarity 0.841); mana value 2 vs 7 (-5)
+      ```
+
+      ### Claude
+
+      ### Swap 1: Hullbreaker Horror → Cryptic Command
+      - **Reason (data):** in-color neighbor #3 of Hullbreaker Horror (similarity 0.876); mana value 4 vs 7 (-3). A clear upgrade, one of the best cards in blue.
+      - **Deck after:** average mana value 2.766 → 2.719.
+      - **Claude's read** (my own Magic knowledge, not the data): it costs four instead of seven.
+
+      ### Swap 2: Hullbreaker Horror → Teferi's Response
+      - **Reason (data):** in-color neighbor #27 of Hullbreaker Horror (similarity 0.841); mana value 2 vs 7 (-5).
+      - **Deck after:** average mana value 2.766 → 2.688.
+      - **Claude's read** (my own Magic knowledge, not the data): a weak card; it rarely has a target in Commander. Skip.
+
+  - id: isc-13-no-pick-no-swaps
+    negative: true
+    prompt: docs/research/deck-tune/namor-no-pick.jsonl
+    assert:
+      # ISC-13 on the rendered session (code): no swap block and no swap_candidates call when no lever was picked.
+      - type: not-regex
+        value: '### (Swap|Cut|Add) \d'
+      - type: not-contains
+        value: "mtg-deck.swap_candidates"
+      - type: not-llm-assert
+        derived_from: ~/Documents/02_areas/mtg-vector/ISA.md#ISC-23.2
+        value: >-
+          In the turns headed "Claude", a judgment of a specific card's quality (strong, weak, playable, better or worse
+          than another card) is stated without being labeled as Claude's own judgment.

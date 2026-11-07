@@ -1,0 +1,15 @@
+{
+  "about": "Default role targets for the roles and redundancy levers: a starting suggestion, not a rule. A role is under when the deck's count (roles.json, via deck_stats) is below its target, over when above. A swap_candidates call can replace any target with its own `targets` table. Ramp 10, card draw 10 and board wipe 3 follow the common community deckbuilding template; the rest are starting guesses for a 100-card deck.",
+  "targets": {
+    "ramp": 10,
+    "card draw": 10,
+    "card selection": 6,
+    "removal": 8,
+    "board wipe": 3,
+    "counterspell": 6,
+    "protection": 4,
+    "tutor": 2,
+    "recursion": 2,
+    "cost reducer": 2
+  }
+}

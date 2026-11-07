@@ -1,0 +1,12 @@
+{
+  "name": "cgm-studios",
+  "description": "Magic: The Gathering tools for Claude Code",
+  "owner": { "name": "cgm-studios", "url": "https://github.com/cgm-studios" },
+  "plugins": [
+    {
+      "name": "mtg-deck-tune",
+      "source": "./plugin",
+      "description": "Tune a Commander deck toward a goal with card data instead of memory."
+    }
+  ]
+}

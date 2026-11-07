@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mtg-deck": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["server/mcp.ts"],
+      "env": {}
+    }
+  }
+}
