@@ -15,6 +15,10 @@
 //   - The two selectors overlap (same kind of card, compatible controller and token-ness). A "Self"
 //     alternative is that one card: a nontoken with its own types and subtypes. So a card's "when this
 //     enters" is never fed by another card's tokens, and two different cards' Self sides never meet.
+//   - A mana value bound on one side ("a creature spell with mana value 4 or greater": Forge's cmcGE4) is checked
+//     against the card itself on the other side, as colors are: the face being cast or entering, or the card whose
+//     ability it is (DT-6.15, ISA ISC-94; new in this repo, the graph repo leaves cmc properties unread). A bound on a
+//     number fixed only in play (X, a chosen number) is left unread.
 import type { Closure } from "./closure";
 import type { CardGraph, RelationKind, Selector, SelectorAlt } from "./grammar";
 import supplyFile from "./mapping/supply.yaml";
@@ -34,6 +38,8 @@ export interface CardInfo {
   colors: string[];
   /** Colors of the mana symbols in the front face's cost (hybrid counts both), for ManaCostPartial conditions. */
   costColors: string[];
+  /** The front face's mana value (the card's, as the store holds it), for mana value conditions. */
+  manaValue: number;
   /** Changeling: every creature type. */
   anySubtype: boolean;
   /** The faces this card can be cast or played as: one for most cards, each half of a split, adventure or modal double-faced card. */
@@ -86,9 +92,24 @@ export function costColors(cost: string | undefined): string[] {
   return ["W", "U", "B", "R", "G"].filter((x) => out.has(x));
 }
 
-function faceOf(typeLine: string, colors: string[], cost: string | undefined, anySubtype: boolean): Me {
+/** The mana value of one face's cost: a number counts its amount, X and other symbols fixed only in play count 0, a half
+ * symbol 1/2, a generic hybrid ({2/W}) its number, and every other symbol 1 (CR 202.3). */
+export function costValue(cost: string | undefined): number {
+  let v = 0;
+  for (const m of (cost ?? "").matchAll(/\{([^}]+)\}/g)) {
+    const sym = m[1];
+    if (/^\d+$/.test(sym)) v += Number(sym);
+    else if (/^[XYZ]$/.test(sym)) continue;
+    else if (/^H/.test(sym)) v += 0.5;
+    else if (/^\d+\//.test(sym)) v += Number(sym.split("/")[0]);
+    else v += 1;
+  }
+  return v;
+}
+
+function faceOf(typeLine: string, colors: string[], cost: string | undefined, anySubtype: boolean, manaValue: number): Me {
   const [front, sub = ""] = typeLine.split("—");
-  return { types: CARD_TYPES.filter((t) => front.includes(t)), supertypes: SUPERTYPES.filter((t) => front.includes(t)), subtypes: sub.trim().split(/\s+/).filter(Boolean), colors, costColors: costColors(cost), anySubtype };
+  return { types: CARD_TYPES.filter((t) => front.includes(t)), supertypes: SUPERTYPES.filter((t) => front.includes(t)), subtypes: sub.trim().split(/\s+/).filter(Boolean), colors, costColors: costColors(cost), anySubtype, manaValue };
 }
 
 /** The Scryfall fields of one card the link rule reads, as the card store holds them (cards + card_scryfall). */
@@ -97,6 +118,8 @@ export interface CardFields {
   layout: string;
   typeLine: string;
   manaCost: string;
+  /** The card's mana value as the store holds it (Scryfall's cmc). */
+  manaValue: number;
   keywords: string[];
   colorIdentity: string[];
   /** Scryfall's top-level colors; null for a card whose faces carry them. */
@@ -110,8 +133,11 @@ export interface CardFields {
 export function cardInfo(g: CardGraph, c: CardFields): CardInfo {
   const anySubtype = c.keywords.includes("Changeling");
   const sides = c.faces?.length ? c.faces : [{ type_line: c.typeLine, colors: c.colors ?? undefined, mana_cost: c.manaCost }];
-  // A face without its own colors (split and adventure halves) takes them from its own mana cost.
-  const faces = sides.map((f) => faceOf(f.type_line ?? "", f.colors ?? (c.faces?.length ? costColors(f.mana_cost) : c.colors ?? []), f.mana_cost, anySubtype));
+  // A face without its own colors (split and adventure halves) takes them from its own mana cost. A face cast on its own
+  // (each half of a split, adventure or modal double-faced card) has its own cost's mana value; any other front face has
+  // the card's (a transform card's mana value is its front face's).
+  const ownCost = ALL_FACES_CAST.has(c.layout) && !!c.faces?.length;
+  const faces = sides.map((f) => faceOf(f.type_line ?? "", f.colors ?? (c.faces?.length ? costColors(f.mana_cost) : c.colors ?? []), f.mana_cost, anySubtype, ownCost ? costValue(f.mana_cost) : c.manaValue));
   const front = faces[0];
   return {
     id: c.id,
@@ -122,6 +148,7 @@ export function cardInfo(g: CardGraph, c: CardFields): CardInfo {
     supertypes: front.supertypes ?? [],
     colors: front.colors ?? [],
     costColors: front.costColors ?? [],
+    manaValue: front.manaValue ?? c.manaValue,
     anySubtype,
     faces: ALL_FACES_CAST.has(c.layout) ? faces : [front],
     colorIdentity: c.colorIdentity,
@@ -134,7 +161,7 @@ export function cardInfo(g: CardGraph, c: CardFields): CardInfo {
 const GENERIC = new Set(["Card", "Permanent", "Spell"]);
 
 /** The card a Self alternative stands for. */
-export interface Me { types: string[]; subtypes: string[]; supertypes?: string[]; colors?: string[]; costColors?: string[]; anySubtype?: boolean }
+export interface Me { types: string[]; subtypes: string[]; supertypes?: string[]; colors?: string[]; costColors?: string[]; anySubtype?: boolean; /** Absent: unknown, and no mana value condition is checked against it. */ manaValue?: number }
 
 /** creatureOnly: subtypes that only name creatures. landOnly: subtypes that only name lands (graph ISA ISC-52). known: every printed
  * subtype; anything else is a Forge reference word. */
@@ -142,7 +169,7 @@ export interface SubtypeFacts { creatureOnly: Set<string>; landOnly: Set<string>
 const NO_FACTS: SubtypeFacts = { creatureOnly: new Set(), landOnly: new Set(), known: new Set() };
 
 /** What an alternative concretely says, with Self resolved to the card itself (a nontoken). */
-interface Resolved { types: string[]; subtypes: string[]; supertypes: string[]; nonSupertypes: string[]; anySubtype?: boolean; excluded: string[]; me?: Me; color: ColorTest[]; controller: SelectorAlt["controller"]; token: boolean | null; self: boolean; player?: string }
+interface Resolved { types: string[]; subtypes: string[]; supertypes: string[]; nonSupertypes: string[]; anySubtype?: boolean; excluded: string[]; me?: Me; color: ColorTest[]; manaValue: ColorTest[]; controller: SelectorAlt["controller"]; token: boolean | null; self: boolean; player?: string }
 
 type ColorTest = (me: Me) => boolean;
 const COLOR: Record<string, string> = { White: "W", Blue: "U", Black: "B", Red: "R", Green: "G" };
@@ -155,6 +182,31 @@ function colorTests(props: string[]): ColorTest[] {
     const pick = (me: Me) => (m[2] ? me.costColors : me.colors) ?? [];
     const base: ColorTest = m[3] === "Colorless" ? (me) => pick(me).length === 0 : m[3] === "MonoColor" ? (me) => pick(me).length === 1 : m[3] === "Multicolor" ? (me) => pick(me).length > 1 : (me) => pick(me).includes(COLOR[m[3]]);
     out.push(m[1] ? (me) => !base(me) : base);
+  }
+  return out;
+}
+
+/** A card that accepts at least this share of the pool just for being cast or entering is not picky (graph ISA Decisions
+ * 2026-11-07, as in its rank.ts): a link into it is generic (diagnose.ts), and feeding it says nothing about a plan (profile.ts). */
+export const BROAD = 1 / 3;
+
+/** Forge's numeric mana value properties: cmcGE4 (4 or greater), cmcLE2, cmcLT3, cmcGT5, cmcEQ1. */
+const MANA_VALUE_PROP = /^cmc(GE|GT|LE|LT|EQ)(\d+)$/;
+
+/** True when an alternative of the selector bounds the mana value by a fixed number ("with mana value 4 or greater"). */
+export function boundsManaValue(sel: Selector): boolean {
+  return sel.any.some((a) => a.props.some((p) => MANA_VALUE_PROP.test(p)));
+}
+
+/** Mana value properties on a selector, as tests over a card; a card of unknown mana value passes them. */
+function manaValueTests(props: string[]): ColorTest[] {
+  const out: ColorTest[] = [];
+  for (const p of props) {
+    const m = MANA_VALUE_PROP.exec(p);
+    if (!m) continue;
+    const n = Number(m[2]);
+    const holds = { GE: (v: number) => v >= n, GT: (v: number) => v > n, LE: (v: number) => v <= n, LT: (v: number) => v < n, EQ: (v: number) => v === n }[m[1] as "GE" | "GT" | "LE" | "LT" | "EQ"];
+    out.push((me) => me.manaValue === undefined || holds(me.manaValue));
   }
   return out;
 }
@@ -179,7 +231,7 @@ function resolve(a: SelectorAlt, me: Me, facts: SubtypeFacts, hook?: string): Re
   // Equipment attaches only to creatures you control.
   // "This card" is yours unless the selector says otherwise or the event is it changing hands (graph ISA ISC-48).
   const controller = a.controller === "any" && (a.props.includes("EquippedBy") || (a.self && !CHANGES_HANDS.has(hook ?? ""))) ? "you" : a.controller;
-  return { types, subtypes, supertypes, nonSupertypes, ...(a.self && me.anySubtype ? { anySubtype: true } : {}), excluded, ...(a.self ? { me } : {}), color: colorTests(a.props), controller, token, self: a.self, player: a.player };
+  return { types, subtypes, supertypes, nonSupertypes, ...(a.self && me.anySubtype ? { anySubtype: true } : {}), excluded, ...(a.self ? { me } : {}), color: colorTests(a.props), manaValue: manaValueTests(a.props), controller, token, self: a.self, player: a.player };
 }
 
 function playerSide(p: string | undefined): "you" | "opponent" | "any" {
@@ -215,6 +267,9 @@ function overlap(a: Resolved, b: Resolved): boolean {
   // Colors are known only for a card itself; check them against the other side's color conditions.
   if (a.me && !b.color.every((t) => t(a.me!))) return false;
   if (b.me && !a.color.every((t) => t(b.me!))) return false;
+  // Mana value likewise: a bound is checked against the card itself ("a creature spell with mana value 4 or greater").
+  if (a.me && !b.manaValue.every((t) => t(a.me!))) return false;
+  if (b.me && !a.manaValue.every((t) => t(b.me!))) return false;
   return true;
 }
 

@@ -14,7 +14,7 @@ export type Graph = {
 };
 
 type Row = {
-  id: number; oracle_id: string; name: string; layout: string; type_line: string; mana_cost: string; keywords: string; color_identity: string;
+  id: number; oracle_id: string; name: string; layout: string; type_line: string; mana_cost: string; mana_value: number; keywords: string; color_identity: string;
   colors: string | null; card_faces: string | null; edhrec_rank: number | null; abilities: string;
 };
 
@@ -40,7 +40,7 @@ function subtypeFacts(db: Database): SubtypeFacts {
 /** Build the index from an open store. Prefer graphOf, which keeps one per store. */
 export function buildGraph(db: Database): Graph {
   checkMappingVersion(db);
-  const rows = db.query(`SELECT c.id, c.oracle_id, c.name, c.layout, c.type_line, c.mana_cost, c.keywords, c.color_identity,
+  const rows = db.query(`SELECT c.id, c.oracle_id, c.name, c.layout, c.type_line, c.mana_cost, c.mana_value, c.keywords, c.color_identity,
       s.colors, s.card_faces, s.edhrec_rank, g.abilities
     FROM card_graph g JOIN cards c ON c.id = g.card_id LEFT JOIN card_scryfall s ON s.card_id = c.id ORDER BY c.id`).all() as Row[];
   if (!rows.length) throw new Error("the card store has no card graph (card_graph is empty)");
@@ -49,7 +49,7 @@ export function buildGraph(db: Database): Graph {
     if (!Array.isArray(abilities)) throw new Error(`card_graph row for ${r.name} is not an ability list`);
     const graph: CardGraph = { name: r.name, oracleId: r.oracle_id, abilities };
     return cardInfo(graph, {
-      id: r.id, layout: r.layout, typeLine: r.type_line, manaCost: r.mana_cost, keywords: JSON.parse(r.keywords) as string[],
+      id: r.id, layout: r.layout, typeLine: r.type_line, manaCost: r.mana_cost, manaValue: r.mana_value, keywords: JSON.parse(r.keywords) as string[],
       colorIdentity: [...r.color_identity], colors: r.colors === null ? null : (JSON.parse(r.colors) as string[]),
       faces: r.card_faces === null ? null : (JSON.parse(r.card_faces) as NonNullable<CardFields["faces"]>), edhrecRank: r.edhrec_rank,
     });

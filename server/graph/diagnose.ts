@@ -7,7 +7,7 @@
 // tools answer the same on every machine); card names resolve through the store's index.
 import type { DeckGraph } from "./deck";
 import type { Selector } from "./grammar";
-import type { InteractionIndex, Link, Listen } from "./interact";
+import { BROAD, type InteractionIndex, type Link, type Listen } from "./interact";
 import map from "./mapping/forge-map.json";
 import { byteOrder, offProfile } from "./profile";
 
@@ -16,8 +16,6 @@ const GAME_FED = new Set<string>([
   ...Object.values((map as { phases: Record<string, string> }).phases),
   "Attacks", "AttackersDeclared", "BlockersDeclared", "Blocks", "BecomesBlocked", "CombatDamage", "Damage", "ExcessDamage", "CumulativeUpkeep",
 ]);
-/** A card that accepts at least this share of the pool just for being cast or entering is not picky (graph ISA Decisions 2026-11-07, as in its rank.ts). */
-const BROAD = 1 / 3;
 
 /** A role target table and a name for where it came from. */
 export interface RoleTargets { targets: Record<string, number>; source: string }

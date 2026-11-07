@@ -4,10 +4,12 @@
 // ISC-18). Card profiles: cardProfile (graph ISA ISC-16). Strategy profiles: strategy.ts (graph ISA ISC-17). The graph's
 // ranking (its src/rank.ts) is not ported; the diagnose and shortlist tools read a profile through profileMatcher and
 // profileFit. What changed in the port: names sort by byte order, not localeCompare (locale collation can differ between
-// machines, and the tools answer the same everywhere); Plan is declared here.
+// machines, and the tools answer the same everywhere); Plan is declared here. New in this repo (DT-6.15, ISA ISC-94): a
+// card's own casting or entering counts where it feeds a sized payoff (sizedPayoff), in a card profile and when a
+// profile is read against cards, so a plan and theme inference see "a creature spell with mana value 4 or greater".
 
 import type { Selector } from "./grammar";
-import type { Emit, InteractionIndex, Listen, Me } from "./interact";
+import { BROAD, boundsManaValue, type Emit, type InteractionIndex, type Listen, type Me } from "./interact";
 
 /** A card plan: the commander and its priority cards, by graph (store) card name. */
 export interface Plan { commander: string; priorities: string[] }
@@ -143,6 +145,22 @@ function touches(idx: InteractionIndex, i: number): Touch[] {
   return out;
 }
 
+/**
+ * A payoff that cares how big the card is (DT-6.15, ISA ISC-94): its selector bounds the mana value by a fixed number
+ * ("whenever you cast a creature spell with mana value 4 or greater") and it takes under BROAD of the pool just for being
+ * cast or entering. Casting any card says nothing about a plan, so a card's own casting and entering are left out of
+ * profiles; feeding a payoff like this does say something, so there they count. A payoff with no mana value bound keeps
+ * the old reading, however narrow its type condition (an open question for the ISA, not settled here).
+ */
+export function sizedPayoff(idx: InteractionIndex, l: Listen): boolean {
+  return boundsManaValue(l.sel) && idx.castFeederCount(l) / idx.cards.length < BROAD;
+}
+
+/** A card's own casting and entering (one per face it can be played as) as makes touches, source "own.<hook>". */
+function ownTouches(idx: InteractionIndex, i: number): Touch[] {
+  return idx.emitsOf(i).filter((e) => e.by === "card").map((e) => ({ card: i, hook: e.hook, side: "makes" as const, sel: e.sel, me: e.me ?? idx.cards[i], source: `own.${e.hook}`, emit: e }));
+}
+
 /** true when every alternative is a token, false when every one is a nontoken card (a Self side is), null otherwise. */
 function tokenness(sel: Selector): boolean | null {
   if (!sel.any.length) return null;
@@ -169,12 +187,23 @@ export function planCards(idx: InteractionIndex, plan: Plan): number[] {
  * outranks one only one card touches; a hook where one plan card's output is what another waits for counts double,
  * because that is the plan's engine. A hook named with [token] or [nontoken] is one the plan makes only that way
  * (Krenko makes Goblin tokens entering, so the plan's ETB reads "token ETB"). The plan cards' own casting and entering
- * are left out (incidental). Gaps: a hook the plan spends but nothing in it makes is "unmade", and the reverse "unspent".
+ * are left out (incidental), except where one feeds another plan card's sized payoff (sizedPayoff: a creature of mana
+ * value 7 being cast is what "a creature spell with mana value 4 or greater" waits on), which is the plan's engine.
+ * Gaps: a hook the plan spends but nothing in it makes is "unmade", and the reverse "unspent".
  */
 export function cardProfile(idx: InteractionIndex, plan: Plan): HookProfile {
   const planIdx = planCards(idx, plan);
   const byHook = new Map<string, Touch[]>();
   for (const p of planIdx) for (const t of touches(idx, p)) (byHook.get(t.hook) ?? byHook.set(t.hook, []).get(t.hook)!).push(t);
+  const sized = [...byHook.values()].flat().filter((t) => t.side === "spends").flatMap((s) => s.listens!.filter((l) => sizedPayoff(idx, l)).map((l) => ({ s, l })));
+  for (const p of planIdx) {
+    const seen = new Set<string>(); // one own touch per hook, whichever face feeds
+    for (const m of ownTouches(idx, p)) {
+      if (seen.has(m.hook) || !sized.some(({ s, l }) => s.card !== p && l.hook === m.hook && feeds(idx, m, s, l))) continue;
+      seen.add(m.hook);
+      (byHook.get(m.hook) ?? byHook.set(m.hook, []).get(m.hook)!).push(m);
+    }
+  }
   const planMakes = [...byHook.values()].flat().filter((t) => t.side === "makes");
   const entries: ProfileEntry[] = [];
   for (const [hook, ts] of byHook) {
@@ -182,7 +211,10 @@ export function cardProfile(idx: InteractionIndex, plan: Plan): HookProfile {
     // The plan's engine: another plan card makes what this hook's spender waits on (Krenko's tokens entering feed
     // Ashnod's Altar's Sacrifice cost, so Sacrifice is engine; Ashnod's sacrifice feeds Skullclamp, so Dies is).
     const engine = spenders.some((s) => s.listens!.some((l) => planMakes.some((m) => m.card !== s.card && m.hook === l.hook && feeds(idx, m, s, l))));
-    const deciding = (makers.length ? makers : spenders).map((t) => tokenness(t.sel));
+    // A card's own casting or entering is always a nontoken card, so it says nothing about the plan's token side: the
+    // hook's other makers decide it, or its payoffs when those are all there is.
+    const deciders = makers.filter((t) => !t.source.startsWith("own."));
+    const deciding = (deciders.length ? deciders : makers.length && !spenders.length ? makers : spenders).map((t) => tokenness(t.sel));
     const token = deciding.every((x) => x === true) ? true : deciding.every((x) => x === false) ? false : null;
     const key = profileHookKey(hook, token);
     for (const card of new Set(ts.map((t) => t.card))) {
@@ -219,7 +251,7 @@ export interface ProfileMatch {
   weight: number;
   /** The hook's evidence cards: for a card profile, the plan cards that run on it. */
   cards: string[];
-  /** The relation that matches ("ability.relation"); a card's own casting or entering is "own". Each counts once per side. */
+  /** The relation that matches ("ability.relation"); a card's own casting or entering is "own.<hook>" (only into a sized payoff). Each counts once per side. */
   source: string;
   /** The card's own reading of the hook when its token condition differs from the profile's: a maker of nontoken
    * creatures entering matches the plan's token ETB, because the plan's payoffs take any creature, and reads "ETB". */
@@ -230,24 +262,34 @@ export interface ProfileMatch {
  * Reads a profile against cards (graph ISA ISC-49): which of its main hooks a card's abilities make or spend. A card matches a
  * hook when it makes or waits on that grammar hook with a selector that meets what the hook's evidence cards do on it,
  * under the hook's token condition. Works the same for a card profile and a strategy profile, since both name their
- * evidence cards. Not matches: a card's own casting or entering, abilities only about itself ("when this enters",
- * "sacrifice this"), and selectors that could be anything.
+ * evidence cards. A card's own casting or entering matches only a sized payoff among the evidence (sizedPayoff: a
+ * creature of mana value 5 makes the hook "a creature spell with mana value 4 or greater" waits on), source "own.<hook>".
+ * Not matches: any other own casting or entering, abilities only about itself ("when this enters", "sacrifice this"), and
+ * selectors that could be anything.
  */
 export function profileMatcher(idx: InteractionIndex, profile: HookProfile): (i: number) => ProfileMatch[] {
   const main = profile.hooks.filter(isMainHook).map((h) => {
     const { hook, token } = parseProfileHook(h.hook);
-    const evidence: Record<Touch["side"], { sel: Selector; me: Me }[]> = { makes: [], spends: [] };
+    const evidence: Record<Touch["side"], { sel: Selector; me: Me; card: number; sized: boolean }[]> = { makes: [], spends: [] };
+    const cards: number[] = [];
     for (const name of h.evidence) {
       let j: number;
       try { j = idx.indexOf(name); } catch { continue; }
-      for (const t of touches(idx, j)) if (t.hook === hook) evidence[t.side].push({ sel: t.sel, me: t.me });
+      cards.push(j);
+      for (const t of touches(idx, j)) if (t.hook === hook) evidence[t.side].push({ sel: t.sel, me: t.me, card: j, sized: t.side === "spends" && t.listens!.some((l) => sizedPayoff(idx, l)) });
+    }
+    // An evidence card's own casting or entering is evidence it makes the hook when it feeds another evidence card's sized
+    // payoff, as cardProfile counts it.
+    const sizedEvidence = evidence.spends.filter((e) => e.sized);
+    for (const j of cards) for (const m of ownTouches(idx, j)) {
+      if (m.hook === hook && sizedEvidence.some((e) => e.card !== j && idx.selectorsMeet(m.sel, m.me, e.sel, e.me, hook))) evidence.makes.push({ sel: m.sel, me: m.me, card: j, sized: false });
     }
     // The token condition describes the side that set it: the plan's makers when it has any (cardProfile). A payoff
     // is held to it (Purphoros must take Krenko's tokens); a maker held to the plan's payoffs is held to what they take.
     const definer: Touch["side"] = evidence.makes.length ? "makes" : "spends";
     for (const side of ["makes", "spends"] as const) {
       if (side !== definer) continue;
-      evidence[side] = evidence[side].flatMap((e) => { const sel = onSide(e.sel, token); return sel ? [{ sel, me: e.me }] : []; });
+      evidence[side] = evidence[side].flatMap((e) => { const sel = onSide(e.sel, token); return sel ? [{ ...e, sel }] : []; });
     }
     // A card that makes the hook is held to what the evidence spends on it, and a card that spends it to what the
     // evidence makes (Purphoros wants creatures entering, and Krenko's Goblin tokens are that). On a one-sided hook it is
@@ -271,6 +313,16 @@ export function profileMatcher(idx: InteractionIndex, profile: HookProfile): (i:
       // Held to the side the token condition binds, the card meets it; otherwise say what the card itself makes.
       const own = qualified ? h.key : profileHookKey(h.hook, tokenness(sel));
       if (!out.has(k)) out.set(k, { hook: h.key, side: t.side, weight: h.weight, cards: h.cards, source: t.source, ...(own !== h.key ? { as: own } : {}) });
+    }
+    // The card's own casting or entering, held to the hook's sized payoffs only.
+    for (const t of ownTouches(idx, i)) for (const h of main) {
+      if (t.hook !== h.hook) continue;
+      const { envelope, qualified } = h.makes;
+      const sized = envelope.filter((e) => e.sized && e.card !== i);
+      if (!sized.length || (qualified && !onSide(t.sel, h.token))) continue;
+      if (!sized.some((e) => idx.selectorsMeet(t.sel, t.me, e.sel, e.me, h.hook))) continue;
+      const k = `${h.key}|makes|${t.source}`;
+      if (!out.has(k)) out.set(k, { hook: h.key, side: "makes", weight: h.weight, cards: h.cards, source: t.source });
     }
     return [...out.values()];
   };
