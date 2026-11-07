@@ -34967,7 +34967,7 @@ var MAX_PRIORITIES = 6;
 var MAX_AVOID = 5;
 var planShape = exports_external.object({
   themes: exports_external.array(exports_external.string().min(1)).max(MAX_THEMES).optional().describe(`EDHREC themes the deck is built around, by name (e.g. ["Aristocrats"]), at most ${MAX_THEMES}`),
-  priorities: exports_external.array(exports_external.string().min(1)).max(MAX_PRIORITIES).optional().describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}`),
+  priorities: exports_external.array(exports_external.string().min(1)).max(MAX_PRIORITIES).optional().describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}. With no theme, the plan is read under the usable theme these cards fit best, and the result names it`),
   avoid: exports_external.array(exports_external.string().min(1)).max(MAX_AVOID).optional().describe(`EDHREC themes the player does not want (e.g. ["Tokens"] for a deck that should not go wide), at most ${MAX_AVOID}`)
 }).strict().describe("The player's confirmed plan: at least one theme or one priority card");
 
@@ -38955,7 +38955,7 @@ class UnknownThemeError extends ToolInputError {
   }
 }
 
-class ThinThemeError extends ToolInputError {
+class ThinThemeError2 extends ToolInputError {
   theme;
   commanders;
   constructor(theme, commanders, detail) {
@@ -39042,9 +39042,9 @@ function themeCommanders(db, theme, opts = {}) {
     const rule = `at least ${o.minShare} of their theme tags and ${o.minThemeDecks}+ decks`;
     if (!chosen.length) {
       const best = data.pages.filter((p) => p.tags.has(slug)).sort((a, b) => share(b, slug) - share(a, slug) || byteOrder(a.slug, b.slug))[0];
-      throw new ThinThemeError(name, 0, `0 commanders play it as a main theme (${rule}; ${o.minCommanders} needed)` + (best ? `; the most devoted is ${best.name}, ${best.tags.get(slug)} decks, share ${share(best, slug).toFixed(2)}` : ""));
+      throw new ThinThemeError2(name, 0, `0 commanders play it as a main theme (${rule}; ${o.minCommanders} needed)` + (best ? `; the most devoted is ${best.name}, ${best.tags.get(slug)} decks, share ${share(best, slug).toFixed(2)}` : ""));
     }
-    throw new ThinThemeError(name, chosen.length, `only ${chosen.length} commander${chosen.length === 1 ? "" : "s"} play it as a main theme ` + `(${rule}; ${o.minCommanders} needed): ${chosen.map((p) => p.name).join("; ")}`);
+    throw new ThinThemeError2(name, chosen.length, `only ${chosen.length} commander${chosen.length === 1 ? "" : "s"} play it as a main theme ` + `(${rule}; ${o.minCommanders} needed): ${chosen.map((p) => p.name).join("; ")}`);
   }
   return { slug, name, chosen: chosen.map((page) => ({ page, share: share(page, slug) })) };
 }
@@ -39128,7 +39128,7 @@ function strategyProfile(db, graph, theme, opts = {}) {
     }
   }
   if (!(total > 0))
-    throw new ThinThemeError(name, chosen.length, `the ${chosen.length} commanders that play it have no positive-synergy cards in the card graph`);
+    throw new ThinThemeError2(name, chosen.length, `the ${chosen.length} commanders that play it have no positive-synergy cards in the card graph`);
   const entries = [];
   for (const [k, tMass] of [...mass.entries()].sort((a, b) => byteOrder(a[0], b[0]))) {
     const t = tMass / total, b = (m.baseline.get(k) ?? 0) / m.baselineMass;
@@ -39143,7 +39143,7 @@ function strategyProfile(db, graph, theme, opts = {}) {
       entries.push({ hook, side, weight: score * c / kept, card: idx.cards[i].name });
   }
   if (!entries.length)
-    throw new ThinThemeError(name, chosen.length, `no hook carried by ${o.minCards}+ of its cards is at least ${o.minLift}x as common there as across all commanders`);
+    throw new ThinThemeError2(name, chosen.length, `no hook carried by ${o.minCards}+ of its cards is at least ${o.minLift}x as common there as across all commanders`);
   return normalizeProfile({ kind: "strategy", theme: name, commanders: chosen.length }, entries, { top: o.top, gaps: false });
 }
 
@@ -39220,9 +39220,17 @@ function cardTags(store, ids) {
   });
   return topTags(store, sum);
 }
+var THEME_PROFILES = new WeakMap;
 function themeProfile(store, graph, theme) {
+  const slug = resolveTheme(store.db, theme);
+  const per = THEME_PROFILES.get(store) ?? THEME_PROFILES.set(store, new Map).get(store);
+  const hit = per.get(slug);
+  if (hit)
+    return hit;
   const hooks = strategyProfile(store.db, graph, theme);
-  return { ...hooks, tags: themeTags(store, themeCommanders(store.db, theme).chosen) };
+  const out = { ...hooks, tags: themeTags(store, themeCommanders(store.db, theme).chosen) };
+  per.set(slug, out);
+  return out;
 }
 function priorityCard(store, name) {
   const r = resolveCard(store, name);
@@ -39256,32 +39264,79 @@ function resolvePlan(store, input2) {
   const commander = { id: store.names.findIndex((n) => n.oracleId === card.id) + 1, name: card.name };
   const graph = graphOf(store.db);
   const priorities = names.map((n) => priorityCard(store, n));
-  return {
+  const out = {
     commander: { ...commander, colorIdentity: card.ci.join("") },
     themes: themes.map((t) => themeProfile(store, graph, t)),
     priorities: priorities.map((p) => p.name),
     cards: priorities.length ? cardsProfile(store, graph, commander, priorities) : null,
-    avoid: avoid.map((t) => themeProfile(store, graph, t))
+    avoid: avoid.map((t) => themeProfile(store, graph, t)),
+    inference: null
+  };
+  if (!themes.length) {
+    const { inference, profile } = inferTheme(store, { ...commander, ci: card.ci }, priorities, new Set(avoid.map((t) => resolveTheme(store.db, t))));
+    out.inference = inference;
+    if (profile)
+      out.themes = [profile];
+  }
+  return out;
+}
+var THEME_SCORERS = new WeakMap;
+function themeScorer(store, graph, profile) {
+  return THEME_SCORERS.get(profile) ?? THEME_SCORERS.set(profile, profileScorer(store, graph, [profile])).get(profile);
+}
+var THEME_COLORS = new WeakMap;
+function themeCommanderColors(store, slug) {
+  const per = THEME_COLORS.get(store) ?? THEME_COLORS.set(store, new Map).get(store);
+  const hit = per.get(slug);
+  if (hit)
+    return hit;
+  const out = qualifyingCommanders(store.db, slug).map(({ page }) => store.space.cards.get(store.names[page.cardId - 1].oracleId).ci);
+  per.set(slug, out);
+  return out;
+}
+function inferTheme(store, commander, priorities, avoid = new Set) {
+  const graph = graphOf(store.db);
+  const of = priorities.length;
+  const candidates = listThemes(store.db).filter((t) => t.usable && !avoid.has(t.slug)).filter((t) => !commander.ci.length || themeCommanderColors(store, t.slug).filter((ci) => ci.some((c) => commander.ci.includes(c))).length >= STRATEGY_DEFAULTS.minCommanders);
+  const measured = [];
+  for (const t of candidates) {
+    let profile;
+    try {
+      profile = themeProfile(store, graph, t.name);
+    } catch (e) {
+      if (e instanceof ThinThemeError)
+        continue;
+      throw e;
+    }
+    const score = themeScorer(store, graph, profile);
+    const scores = priorities.map((p) => score(p.id).score).sort((a, b) => a - b);
+    measured.push({ theme: t.name, profile, fit: Math.round(scores.reduce((s, x) => s + x, 0) / of * 1000) / 1000, fits: scores.filter((x) => x > 0).length });
+  }
+  measured.sort((a, b) => b.fit - a.fit || b.fits - a.fits || byteOrder(a.theme, b.theme));
+  const none = (note) => ({ inference: { theme: null, fit: 0, fits: 0, of, considered: measured.length, runnersUp: [], note }, profile: null });
+  if (!measured.length)
+    return none("no usable theme with data for the commander's colors is left to read the cards under");
+  const best = measured[0];
+  if (!(best.fit > 0))
+    return none(`none of the ${measured.length} usable themes with data for the commander's colors has a hook or tag any priority card carries`);
+  return {
+    inference: { theme: best.theme, fit: best.fit, fits: best.fits, of, considered: measured.length, runnersUp: measured.slice(1, 4).map((m) => ({ theme: m.theme, fit: m.fit })) },
+    profile: best.profile
   };
 }
 var MAIN = 0.5;
-function planScorer(store, plan) {
-  const graph = graphOf(store.db);
+function profileScorer(store, graph, plan) {
   const { labels } = tagData(store);
-  const profiles = [...plan.themes, ...plan.cards ? [plan.cards] : []].map((p) => ({
+  const profiles = plan.map((p) => ({
     match: profileMatcher(graph.index, p),
     tags: new Map(p.tags.filter((t) => t.weight > MAIN).map((t) => [t.tag, t.weight]))
   }));
   const vector = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?");
-  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
   const memo2 = new Map;
-  return (oracleId) => {
-    const hit = memo2.get(oracleId);
+  return (id) => {
+    const hit = memo2.get(id);
     if (hit)
       return hit;
-    const id = idOf.get(oracleId);
-    if (id === undefined)
-      throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
     const i = graph.positionOf.get(id);
     const row = vector.get(id);
     const cardTagSet = new Set((row ? unpack(row.vector) : []).map(([t]) => labels.get(t)));
@@ -39293,13 +39348,29 @@ function planScorer(store, plan) {
       if (score > best.score)
         best = { score, hooks: [...new Set(fit.counted.map((c) => `${c.side} ${hookWords(c.hook)}`))], tags: tags.map(([t]) => t) };
     }
-    memo2.set(oracleId, best);
+    memo2.set(id, best);
     return best;
+  };
+}
+function planScorer(store, plan) {
+  const graph = graphOf(store.db);
+  const score = profileScorer(store, graph, [...plan.themes, ...plan.cards ? [plan.cards] : []]);
+  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  return (oracleId) => {
+    const id = idOf.get(oracleId);
+    if (id === undefined)
+      throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
+    return score(id);
   };
 }
 var themeName = (p) => p.source.kind === "strategy" ? p.source.theme : p.source.commander;
 function planEcho(resolved) {
-  return { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) };
+  return {
+    themes: resolved.inference ? [] : resolved.themes.map(themeName),
+    priorities: resolved.priorities,
+    avoid: resolved.avoid.map(themeName),
+    ...resolved.inference ? { inferred: resolved.inference } : {}
+  };
 }
 function strongestTags(store, cardId, n) {
   const row = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(cardId);
@@ -40972,7 +41043,8 @@ function roleTargets(store, plan, deckCi, nonland) {
   return store.roles.roleNames.map((role) => {
     if (covered.length) {
       const expected = Math.round(covered.reduce((s, c) => s + c.expected.get(role), 0) / covered.length * 10) / 10;
-      const basis = covered.map((c) => `${c.name} decks (${c.sharing} of its ${c.of} commanders share a color with this deck)`).join("; ");
+      const inferred = plan.inference?.theme ? ", the theme inferred from the priority cards" : "";
+      const basis = covered.map((c) => `${c.name} decks${inferred} (${c.sharing} of its ${c.of} commanders share a color with this deck)`).join("; ");
       return { role, target: Math.round(expected), source: "plan", basis, expected };
     }
     const why = thin.length ? thin.join("; ") : "the plan names no theme";
@@ -40994,7 +41066,7 @@ function offPlanCards(store, plan, cards, leansOn) {
   const avoid = plan.avoid.map((p) => ({ name: p.source.kind === "strategy" ? p.source.theme : p.source.commander, fit: planScorer(store, { ...plan, themes: [p], cards: null }) }));
   const graph = graphOf(store.db);
   const name = planEcho(plan);
-  const planName = [...name.themes, ...name.priorities.length ? [`${plan.commander.name} with ${name.priorities.join(", ")}`] : []].join(" and ");
+  const planName = [...name.themes, ...name.priorities.length ? [`${plan.commander.name} with ${name.priorities.join(", ")}`] : []].join(" and ") + (name.inferred?.theme ? ` read under ${name.inferred.theme}, the theme those cards fit best` : "");
   const leaning = [...leansOn.hooks, ...leansOn.tags].slice(0, 6).join(", ");
   return cards.filter((c) => fit(c.oracleId).score === 0).map((c) => {
     const does = strategyFacts(graph, c.id).map((k) => {
