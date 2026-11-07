@@ -1,4 +1,4 @@
-// DT-6.5: the shortlist tool (ISA ISC-41, 45.2, 59 to 65, 67). For one diagnosed problem and the player's confirmed plan,
+// DT-6.5, DT-6.13: the shortlist tool (ISA ISC-41, 45.2, 59 to 65, 67, 86, 88). For one diagnosed problem and the player's confirmed plan,
 // about 30 in-color cards outside the deck, each labeled by where it came from and carrying its links into the deck and
 // the deck before and after it goes in. The data narrows ~31k cards to a shortlist with reasons; Claude judges it.
 //
@@ -9,8 +9,9 @@
 //   offPlan    nonland cards that fit the plan (plan.ts planScorer above 0): replacements for cards off the plan or doing
 //              the least
 // Every pool card is commander-legal (every store card is), inside the commander's color identity, not the commander, not
-// in the deck, and under the mana value and price ceilings when given. A card that fits a theme the plan avoids and does
-// not fit the plan is left out (the notes count them).
+// in the deck, and under the mana value and price ceilings when given. Left out, and counted in the notes: a card that
+// fits a theme the plan avoids and does not fit the plan, and a cost reducer whose discounts name only colors or types the
+// deck never casts (cost-reduction.ts, ISC-86).
 //
 // Four rankings of the pool, each the source of one label:
 //   fits this commander  commander synergy: the commander's EDHREC page weight, inclusion x max(0, synergy + offset)
@@ -18,20 +19,22 @@
 //   deeper cut           Tagger Deck fit: the card's Tagger Card vector against the commander's Tagger Deck vector (dot
 //                        product; the commander's own card vector when it has no page), above 0
 //   widely played        global EDHREC rank (Scryfall's), lowest first: popularity across all decks
-//   engine partner       the card graph: for an engine gap, payoffs fed (most first), an outlet that can fire again before
-//                        a one-shot; then, for every problem, links into the deck's on-plan cards (the commander counts as
-//                        on plan), then links into any deck card, then plan fit. Only cards with a link into the deck.
+//   engine partner       the card graph: links into the deck. First the cards linked to the plan's priority cards in the
+//                        deck (most priority cards linked first); then, for an engine gap, payoffs fed (most first), an
+//                        outlet that can fire again before a one-shot; then links into the deck's on-plan cards (the
+//                        commander counts as on plan), then links into any deck card, then plan fit.
 // Ties fall to the name in byte order, so the same deck, plan and problem give the same shortlist on every machine.
 //
-// The shortlist is the union of the first PER_SOURCE (10) of the first three rankings, then the engine ranking fills it to
-// SHORTLIST_MAX (30). That union is the one measured in mtg-graph-api's leave-one-out (synergy 10 + Tagger 10 + EDHREC 10
-// per role held the most of the player's real picks: 30 of 57 on Namor, 24 of 39 on Teysa; ISC-65), so it is kept whole;
-// the three overlap (a median of 24 distinct cards per role on those decks), and the slots left go to the engine partners,
-// where the plan and the deck's own engine choose. Popularity alone puts at most PER_SOURCE cards in (ISC-63). A card's
-// labels are every ranking whose taken part holds it.
+// The shortlist takes the first PER_SOURCE (10) of commander synergy and of Tagger Deck fit whole, then at most
+// POPULAR_ONLY (5) of the first 10 widely played cards not already in (ISC-63). The slots left, up to SHORTLIST_MAX (30),
+// go first to cards linked to a priority card (ISC-88), then to the other engine partners: a player's plan is usually a
+// few key cards and the interactions between them, not a list of staples. The 10 + 10 + 10 union measured in
+// mtg-graph-api's leave-one-out (30 of 57 on Namor, 24 of 39 on Teysa) is now a reported guard, not a floor (ISC-65).
+// A card's labels are every ranking whose taken part holds it.
 
 import { z } from "zod";
 import { fitsIdentity } from "./color-identity";
+import { discountUsable, spellDiscounts, type CastFacts } from "./cost-reduction";
 import { type DeckEntry, type SpaceCard } from "./deck-pool";
 import { deckNumbers, readDeck, resolveCard, resolveCommander, ToolInputError, unresolvedLines, type DeckStats, type Store } from "./deck-tools";
 import { deckLinks, deckOnGraph, type DeckLink, type DeckOnGraph } from "./diagnose";
@@ -50,6 +53,9 @@ export type SourceLabel = (typeof SHORTLIST_LABELS)[number];
 export const PER_SOURCE = 10;
 /** The most cards a shortlist holds: three sources of PER_SOURCE. */
 export const SHORTLIST_MAX = 30;
+/** The most cards popularity alone puts in (ISC-63, set 2026-11-07, reversible): widely played cards beyond this enter only
+ * when another source wants them too. */
+export const POPULAR_ONLY = 5;
 
 const problemShape = z.union([
   z.object({ role: z.string().min(1).describe("A deck role, as diagnose and deck_stats name it (ramp, card draw, card selection, removal, board wipe, counterspell, protection, tutor, recursion, cost reducer): cards that hold it") }).strict(),
@@ -91,6 +97,8 @@ export type ShortlistCard = {
     planPartners: number;
     /** Its fit to the plan (plan.ts planScorer): 0 is off the plan; what matched, heaviest first. */
     planFit: PlanFit;
+    /** The plan's priority cards in the deck it links to, over links that count; empty when none. */
+    priorityLinks: string[];
     /** Engine gap only: the deck's payoffs it would feed. */
     feeds?: string[];
   };
@@ -239,8 +247,12 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
     (f.maxManaValue === undefined || c.meta!.cmc <= f.maxManaValue) &&
     (f.maxPrice === undefined || (c.meta!.usd !== null && c.meta!.usd <= f.maxPrice));
   const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null, inference: null }));
-  let avoided = 0;
+  let avoided = 0, idleDiscounts = 0;
+  const casts = castFacts(store, [commander, ...entries.filter((e) => e.card && !e.card.land).map((e) => e.card!)]);
+  const subtypes = new Set(store.vocab.subtypes.keys());
   const keep = (c: SpaceCard): boolean => {
+    // a cost reducer whose discounts name only colors or types the deck never casts (cost-reduction.ts)
+    if (/\bless\b/i.test(c.meta!.text) && !discountUsable(spellDiscounts(c.meta!.text, subtypes), casts)) { idleDiscounts++; return false; }
     if (!avoid.length || fit(c.id).score > 0 || !avoid.some((a) => a(c.id).score > 0)) return true;
     avoided++;
     return false;
@@ -280,19 +292,23 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
     problem = { kind: "off plan" };
     pool = all().filter((c) => eligible(c, false) && fit(c.id).score > 0 && keep(c)).map(candidate);
   }
+  if (idleDiscounts) notes.push(`${idleDiscounts} cost reducer${idleDiscounts === 1 ? "" : "s"} left out: ${idleDiscounts === 1 ? "it only discounts" : "they only discount"} spells of a color or type the deck does not cast`);
   if (avoided) notes.push(`${avoided} card${avoided === 1 ? "" : "s"} left out: ${avoided === 1 ? "it fits" : "they fit"} a theme the plan avoids and not the plan`);
 
   // Links into the deck, and which deck cards carry the plan.
   const into = linksIntoDeck(store, d);
   const linksOf = (c: Candidate): Link[] => (c.pos === undefined ? [] : into(c.pos));
   const onPlanDeck = new Set(d.g.cards.filter((c) => c.name === idx.cards[d.commanderPos].name || fit(c.oracleId).score > 0).map((c) => c.name));
-  const partners = new Map<number, { all: number; plan: number }>();
+  // the plan's priority cards that are in the deck, by the index's spelling
+  const priorityDeck = new Set(resolved.priorities.map((n) => graph.positionOf.get(store.names.find((x) => x.name === n)!.id))
+    .filter((p): p is number => p !== undefined && ctx.members.has(p)).map((p) => idx.cards[p].name));
+  const partners = new Map<number, { all: number; plan: number; priority: string[] }>();
   const partnersOf = (c: Candidate) => {
     let p = partners.get(c.id);
     if (!p) {
       const name = c.pos === undefined ? "" : idx.cards[c.pos].name;
       const others = new Set(linksOf(c).filter(ctx.counts).map((l) => (l.from === name ? l.to : l.from)));
-      p = { all: others.size, plan: [...others].filter((n) => onPlanDeck.has(n)).length };
+      p = { all: others.size, plan: [...others].filter((n) => onPlanDeck.has(n)).length, priority: [...others].filter((n) => priorityDeck.has(n)).sort(byteOrder) };
       partners.set(c.id, p);
     }
     return p;
@@ -312,19 +328,29 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
     (b.feeds?.feeds.size ?? 0) - (a.feeds?.feeds.size ?? 0) || again(a) - again(b) ||
     partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName(a, b));
 
-  // The union, then the engine fill.
+  // Cards linked to the plan's priority cards in the deck: most priority cards linked, then the engine order's measures.
+  const byPriority = priorityDeck.size ? pool.filter((c) => partnersOf(c).priority.length > 0).sort((a, b) =>
+    partnersOf(b).priority.length - partnersOf(a).priority.length || partnersOf(b).plan - partnersOf(a).plan ||
+    partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName(a, b)) : [];
+
+  // The union: commander synergy and Tagger Deck fit whole, then at most POPULAR_ONLY cards popularity alone wants.
+  // Then the slots left go to cards linked to a priority card, then to engine partners.
   const chosen = new Map<number, Candidate>();
-  for (const list of [bySynergy, byTagger, byRank]) for (const c of list.slice(0, PER_SOURCE)) chosen.set(c.id, c);
-  let engineTaken = Math.min(PER_SOURCE, byEngine.length);
-  for (let k = 0; k < byEngine.length && chosen.size < SHORTLIST_MAX; k++) {
-    chosen.set(byEngine[k].id, byEngine[k]);
-    engineTaken = Math.max(engineTaken, k + 1);
+  for (const list of [bySynergy, byTagger]) for (const c of list.slice(0, PER_SOURCE)) chosen.set(c.id, c);
+  let popularOnly = 0;
+  for (const c of byRank.slice(0, PER_SOURCE)) if (!chosen.has(c.id) && popularOnly < POPULAR_ONLY) { chosen.set(c.id, c); popularOnly++; }
+  const viaEngine = new Set(byEngine.slice(0, PER_SOURCE).map((c) => c.id));
+  for (const list of [byPriority, byEngine]) for (const c of list) {
+    if (chosen.size >= SHORTLIST_MAX) break;
+    if (chosen.has(c.id)) continue;
+    chosen.set(c.id, c);
+    viaEngine.add(c.id);
   }
   const taken: Record<SourceLabel, Set<number>> = {
     "fits this commander": new Set(bySynergy.slice(0, PER_SOURCE).map((c) => c.id)),
     "deeper cut": new Set(byTagger.slice(0, PER_SOURCE).map((c) => c.id)),
     "widely played": new Set(byRank.slice(0, PER_SOURCE).map((c) => c.id)),
-    "engine partner": new Set(byEngine.slice(0, engineTaken).map((c) => c.id)),
+    "engine partner": viaEngine,
   };
   if (bySynergy.length < PER_SOURCE && synergy.size) notes.push(`the commander's page lists ${bySynergy.length} card${bySynergy.length === 1 ? "" : "s"} for this problem`);
 
@@ -354,7 +380,7 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
         commanderSynergy: synergy.has(c.id) ? round(synergy.get(c.id)!) : null,
         taggerFit: tagger.get(c.id)! > 0 ? round(tagger.get(c.id)!) : null,
         edhrecRank: edhrecRank.get(c.id) ?? null,
-        partners: p.all, planPartners: p.plan, planFit: c.fit,
+        partners: p.all, planPartners: p.plan, priorityLinks: p.priority, planFit: c.fit,
         ...(c.feeds ? { feeds: [...c.feeds.feeds].sort(byteOrder) } : {}),
       },
       links, genericLinks,
@@ -379,6 +405,19 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
     notes,
     unresolved: unresolvedLines(store, deck.unresolved),
   };
+}
+
+/** The cast facts of cards (types, colors, subtypes, supertypes, lower case), from the store's plain columns; a card's
+ * colors are Scryfall's, or its front face's cost symbols for a card with faces. */
+function castFacts(store: Store, cards: SpaceCard[]): CastFacts[] {
+  const q = store.db.query("SELECT c.types, c.subtypes, c.supertypes, c.mana_cost, s.colors FROM cards c LEFT JOIN card_scryfall s ON s.card_id = c.id WHERE c.oracle_id = ?");
+  const words = (x: string) => new Set(x.toLowerCase().split(/\s+/).filter(Boolean));
+  const COLOR: Record<string, string> = { W: "white", U: "blue", B: "black", R: "red", G: "green" };
+  return [...new Map(cards.map((c) => [c.id, c])).values()].map((c) => {
+    const r = q.get(c.id) as { types: string; subtypes: string; supertypes: string; mana_cost: string; colors: string | null };
+    const letters: string[] = r.colors !== null ? JSON.parse(r.colors) : [...new Set(r.mana_cost.match(/[WUBRG]/g) ?? [])];
+    return { types: words(r.types), subtypes: words(r.subtypes), supertypes: words(r.supertypes), colors: new Set(letters.map((l) => COLOR[l])) };
+  });
 }
 
 /** The deck card to swap out: an exact or front-face name of a card in the list. */

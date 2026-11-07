@@ -306,7 +306,11 @@ export function inferTheme(
 // score = hooks + tags, rounded to 3 places; a card with score 0 has no hook or tag in any plan profile (off plan).
 // This is the one plan fit the tools read (deck_stats planFit, the swap lever's plan gain); themes to avoid do not
 // enter it. Each part names what matched, heaviest first, for the reason text.
-export type PlanFit = { score: number; hooks: string[]; tags: string[] };
+// A priority card is on the plan by the player's word (ISC-85), whatever its hooks and tags read: its score is at least
+// 1, the weight of a profile's heaviest part (weights are scaled so the heaviest is 1), and `priority` says why. This
+// holds only while the plan carries its card profile; a partial plan built to score one theme (cards: null) scores
+// priority cards like any other card.
+export type PlanFit = { score: number; hooks: string[]; tags: string[]; priority?: true };
 /** A main tag weighs more than half the heaviest, as a main hook does (graph/profile.ts isMainHook). */
 const MAIN = 0.5;
 export type PlanScorer = (cardOracleId: string) => PlanFit;
@@ -342,10 +346,15 @@ export function planScorer(store: Store, plan: ResolvedPlan): PlanScorer {
   const graph = graphOf(store.db);
   const score = profileScorer(store, graph, [...plan.themes, ...(plan.cards ? [plan.cards] : [])]);
   const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  const priority = new Set(plan.cards ? plan.priorities.map((name) => store.names.find((n) => n.name === name)!.id) : []);
+  const lifted = new Map<number, PlanFit>();
   return (oracleId) => {
     const id = idOf.get(oracleId);
     if (id === undefined) throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
-    return score(id);
+    if (!priority.has(id)) return score(id);
+    let hit = lifted.get(id);
+    if (!hit) { const f = score(id); lifted.set(id, (hit = { ...f, score: Math.max(f.score, 1), priority: true })); }
+    return hit;
   };
 }
 

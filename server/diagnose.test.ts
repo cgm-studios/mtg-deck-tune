@@ -496,3 +496,45 @@ describe("the graph index's shortcuts give what the plain reads give (DT-6.5)", 
     expect(selfFed).toBe(20);
   }, 120_000);
 });
+
+describe("a priority card is never off the plan (ISC-85)", () => {
+  // A plan's priority cards are the player's own word for what the deck is about; the diagnosis must never name one off
+  // the plan, whatever its hooks and tags read (a cost reducer with trample, a colorless titan).
+  const MONO_GREEN = ["Eladamri, Korvecdal", "Elvish Piper", "Ghalta, Primal Hunger", "Ulamog, the Ceaseless Hunger", "Pathrazer of Ulamog", "Llanowar Elves",
+    "Fyndhorn Elves", "Elvish Mystic", "Cultivate", "Kodama's Reach", "Rampant Growth", "Harmonize", "Beast Within", "Craterhoof Behemoth", "Sol Ring"]
+    .map((n) => `1 ${n}`).concat(["24 Forest"]).join("\n");
+  const KEYS = ["Elvish Piper", "Ghalta, Primal Hunger", "Ulamog, the Ceaseless Hunger", "Pathrazer of Ulamog"];
+
+  test("ISC-85: Eladamri with Ghalta, Ulamog, Pathrazer and Elvish Piper as priorities names none of them off-plan, under Ramp or under the theme they infer", () => {
+    for (const plan of [{ themes: ["Ramp"], priorities: KEYS }, { priorities: KEYS }, { themes: ["Aggro"], priorities: KEYS }]) {
+      const d = diagnose(store, { commander: "Eladamri, Korvecdal", decklist: MONO_GREEN, plan });
+      expect([JSON.stringify(plan), d.offPlan.map((c) => c.name).filter((n) => KEYS.includes(n))]).toEqual([JSON.stringify(plan), []]);
+    }
+    // deck_stats reads the same plan fit: the priority cards count on plan
+    const s = deckStats(store, { commander: "Eladamri, Korvecdal", decklist: MONO_GREEN, plan: { themes: ["Ramp"], priorities: KEYS } });
+    for (const k of KEYS) expect(s.planFit!.offPlan).not.toContain(k);
+  }, 60_000);
+
+  test("ISC-85: for random decks and plans with priority cards, no priority card is in the diagnosis's off-plan list", async () => {
+    const fc = (await import("fast-check")).default;
+    const lists = (["namor.txt", "teysa.txt"] as const).map((f) => fixtureText(f).split("\n").map((l) => l.trim()).filter((l) => /^\d+ /.test(l)));
+    const commanders = ["Namor the Sub-Mariner", "Teysa Karlov"];
+    const THEMES = ["Aristocrats", "Tokens", "Spellslinger", "+1/+1 Counters", "Voltron", "Ramp"];
+    let checked = 0;
+    fc.assert(fc.property(fc.integer({ min: 0, max: 1 }).chain((k) => fc.record({
+      k: fc.constant(k),
+      lines: fc.subarray(lists[k], { minLength: 12, maxLength: lists[k].length }),
+      themes: fc.subarray(THEMES, { maxLength: 2 }),
+      pick: fc.array(fc.nat(), { minLength: 1, maxLength: 4 }),
+    })), (r) => {
+      const names = r.lines.map((l) => l.replace(/^\d+\s+/, "")).filter((n) => n !== commanders[r.k] && !/^(Island|Plains|Swamp|Forest|Mountain)$/.test(n));
+      const priorities = [...new Set(r.pick.map((p) => names[p % names.length]))];
+      let d;
+      try { d = diagnose(store, { commander: commanders[r.k], decklist: r.lines.join("\n"), plan: { ...(r.themes.length ? { themes: r.themes } : {}), priorities } }); }
+      catch (e) { if (!(e instanceof ToolInputError)) throw e; return; } // a priority card without graph data is the caller's to fix
+      checked++;
+      expect(d.offPlan.map((c) => c.name).filter((n) => priorities.includes(n))).toEqual([]);
+    }), { numRuns: 25, seed: 8501 });
+    expect(checked).toBeGreaterThan(15);
+  }, 240_000);
+});
