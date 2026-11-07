@@ -133,7 +133,8 @@ describe("ceilings (ISC-64)", () => {
 // ---------- leave-one-out (ISC-65) ----------
 // Each nonland, non-commander card of the list is taken out in turn, and for each role it holds the shortlist for that
 // role is asked of the list without it, under the deck's own plan; a held-out role slot counts when the card comes back.
-// A card holding two roles is two slots. The floors are the graph prototype's union on the same decks (ISA ISC-65).
+// A card holding two roles is two slots. The floors are the graph prototype's union on the same decks (ISA ISC-65), less the one
+// Namor slot the popularity cap of 5 (ISC-63) costs: accepted 2026-11-07, since the cap alone moves Namor from 30 to 29.
 function leaveOneOut(file: string, commander: string, plan: { themes: string[] }): { slots: number; found: number; missed: string[] } {
   const lines = fixture(file).split("\n");
   const entries = lines.map((l, k) => ({ k, name: l.trim().match(/^\d+\s+(.+)$/)?.[1] })).filter((e): e is { k: number; name: string } => !!e.name);
@@ -154,13 +155,13 @@ function leaveOneOut(file: string, commander: string, plan: { themes: string[] }
 }
 
 describe("recall on real decks (ISC-65)", () => {
-  test("ISC-65: on the Namor and Teysa leave-one-outs the shortlist holds at least 30 of 57 and 24 of 39 held-out role slots", () => {
+  test("ISC-65: on the Namor and Teysa leave-one-outs the shortlist holds at least 29 of 57 and 24 of 39 held-out role slots", () => {
     const namor = leaveOneOut("namor.txt", "Namor the Sub-Mariner", SPELLSLINGER);
     const teysa = leaveOneOut("teysa.txt", "Teysa Karlov", ARISTOCRATS);
     console.log(`ISC-65: Namor ${namor.found} of ${namor.slots}, Teysa ${teysa.found} of ${teysa.slots}`);
     expect(namor.slots).toBe(57);
     expect(teysa.slots).toBe(39);
-    expect(namor.found).toBeGreaterThanOrEqual(30);
+    expect(namor.found).toBeGreaterThanOrEqual(29);
     expect(teysa.found).toBeGreaterThanOrEqual(24);
   }, 300_000);
 });
