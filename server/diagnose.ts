@@ -86,6 +86,8 @@ export type OffPlanCard = {
   does: string[];
   /** Its strongest Tagger tags. */
   tags: string[];
+  /** The deck roles it holds: an off-plan card with a role (removal, ramp) is a role slot, not dead weight. */
+  roles: string[];
   /** Avoided themes whose profile the card does fit. */
   fitsAvoided: string[];
 };
@@ -305,6 +307,6 @@ function offPlanCards(store: Store, plan: ResolvedPlan, cards: { id: number; ora
     const fitsAvoided = avoid.filter((a) => a.fit(c.oracleId).score > 0).map((a) => a.name);
     const reason = `nothing it does is something the ${planName} plan leans on (${leaning})` +
       (fitsAvoided.length ? `, and it fits ${fitsAvoided.join(" and ")}, which the plan avoids` : "");
-    return { name: c.name, reason, does, tags: strongestTags(store, c.id, TAGS_SHOWN), fitsAvoided };
+    return { name: c.name, reason, does, tags: strongestTags(store, c.id, TAGS_SHOWN), roles: rolesOf(store.roles, c.oracleId).roles.map((r) => r.role), fitsAvoided };
   }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }

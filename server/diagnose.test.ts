@@ -341,6 +341,9 @@ describe("cards against the plan and the engine (ISC-53 to ISC-56)", () => {
     expect(myr).toBeDefined();
     expect(myr!.reason).toContain("Spellslinger");
     expect(myr!.does).toContain("makes happen: making a token");
+    // an off-plan card still says which roles it holds, so a removal spell off the plan reads as a role slot, not dead weight
+    for (const c of d.offPlan) expect([c.name, c.roles]).toEqual([c.name, d.cards.find((x) => x.name === c.name)?.roles ?? c.roles]);
+    expect(diagnose(store, { ...teysaDeck, plan: ARISTOCRATS }).offPlan.find((c) => c.name === "Swords to Plowshares")!.roles).toContain("removal");
     // the plan's main hooks and tags, the ones no off-plan card carries, are given once
     expect(d.plan.leansOn.hooks).toContain("casting a spell");
     expect(d.plan.leansOn.tags.length).toBeGreaterThan(0);
