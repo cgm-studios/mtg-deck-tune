@@ -107,3 +107,10 @@ describe("card plans (ISC-44)", () => {
     }
   }, 60_000);
 });
+
+test("the theme floor read from the store matches the graph's: every theme's deck count, commander count, qualifying count and usability", async () => {
+  const { listThemes } = await import("./graph/strategy");
+  const got = listThemes(store.db).map(({ slug, name, decks, commanders, qualifying, usable }) => ({ slug, name, decks, commanders, qualifying, usable }));
+  expect(got).toEqual(REC.themes as typeof got);
+  expect(got.filter((t) => t.usable).length).toBe(50);
+});

@@ -162,13 +162,24 @@ export function resolveTheme(db: Database, theme: string): string {
   throw new UnknownThemeError(theme, closestThemes(db, theme));
 }
 
+/**
+ * The commanders that play a theme (by slug) as a main theme: at least `minShare` of their tag mentions and
+ * `minThemeDecks` decks, each with its share, in the graph's page order. The one definition of the theme selection:
+ * the plan's theme profiles (below) and commander_profile's deck-vs-theme match (commander.ts) both read it, and both
+ * refuse a theme with fewer than STRATEGY_DEFAULTS.minCommanders of them.
+ */
+export function qualifyingCommanders(db: Database, slug: string, opts: Pick<StrategyOptions, "minShare" | "minThemeDecks"> = {}): { page: Page; share: number }[] {
+  const minShare = opts.minShare ?? STRATEGY_DEFAULTS.minShare, minThemeDecks = opts.minThemeDecks ?? STRATEGY_DEFAULTS.minThemeDecks;
+  return loadPages(db).pages.filter((p) => qualifies(p, slug, minShare, minThemeDecks)).map((page) => ({ page, share: share(page, slug) }));
+}
+
 /** The commanders a theme is mined from: each with its share of the theme. Throws ThinThemeError under `minCommanders`. */
 export function themeCommanders(db: Database, theme: string, opts: StrategyOptions = {}): { slug: string; name: string; chosen: { page: Page; share: number }[] } {
   const o = { ...STRATEGY_DEFAULTS, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) };
   const data = loadPages(db);
   const slug = resolveTheme(db, theme);
   const name = data.themeNames.get(slug) ?? slug;
-  const chosen = data.pages.filter((p) => qualifies(p, slug, o.minShare, o.minThemeDecks));
+  const chosen = qualifyingCommanders(db, slug, o).map((c) => c.page);
   if (chosen.length < Math.max(1, o.minCommanders)) {
     const rule = `at least ${o.minShare} of their theme tags and ${o.minThemeDecks}+ decks`;
     if (!chosen.length) {

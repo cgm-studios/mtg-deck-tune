@@ -12,8 +12,8 @@
 //
 // How a deck is matched to a theme. A theme's card profile is mined from the commander pages (the store's commander_cards),
 // the way mtg-graph-api's strategy.ts mines hooks, but over cards:
-//   1. The theme's commanders are those where the theme is at least MIN_SHARE of the commander's tag mentions and has
-//      MIN_THEME_DECKS decks. Fewer than MIN_COMMANDERS of them and the theme has no profile (a few commanders' lists
+//   1. The theme's commanders are graph/strategy.ts qualifyingCommanders: the theme is at least MIN_SHARE of the commander's tag mentions and has
+//      minThemeDecks decks. Fewer than MIN_COMMANDERS of them and the theme has no profile (a few commanders' lists
 //      are those commanders, not the theme).
 //   2. On each such commander's page a card counts with mass = the commander's theme share x the card's EDHREC synergy,
 //      when synergy is positive and the commander's decks run it in MIN_CARD_DECKS or more.
@@ -27,17 +27,16 @@ import { z } from "zod";
 import { fitsIdentity } from "./color-identity";
 import { parseDecklist } from "./deck-pool";
 import { type Store, ToolInputError, readDeck, resolveCommander, unresolvedLines } from "./deck-tools";
+import { qualifyingCommanders, STRATEGY_DEFAULTS } from "./graph/strategy";
 
 const THEME_LIMIT = 10;
 const TAG_LIMIT = 12;
 const MATCH_THEMES = 5;
 const NAMED = 5; // cards named per theme, held and missing
 
-const MIN_SHARE = 0.15;
-const MIN_THEME_DECKS = 20;
-const MIN_CARD_DECKS = 3;
-const MIN_LIFT = 1.25;
-const MIN_COMMANDERS = 10;
+// The theme floor and mining thresholds are the card graph's strategy defaults (graph/strategy.ts), one definition shared
+// with the player's plan (plan.ts), so a theme too thin to match here is the same theme the plan refuses (ISC-77).
+const { minShare: MIN_SHARE, minCardDecks: MIN_CARD_DECKS, minLift: MIN_LIFT, minCommanders: MIN_COMMANDERS } = STRATEGY_DEFAULTS;
 
 export const commanderProfileShape = {
   commander: z.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
@@ -96,20 +95,19 @@ function unpackVector(blob: Uint8Array): { tagId: number; weight: number }[] {
 
 // ---------- theme card profiles ----------
 type Profile = { weights: Map<number, number>; commanders: number }; // store card id -> weight
-type Mined = { mentions: Map<number, number>; baseline: Map<number, number>; baselineMass: number; profiles: Map<number, Profile> };
+type Mined = { baseline: Map<number, number>; baselineMass: number; profiles: Map<number, Profile> };
 const mined = new WeakMap<object, Mined>();
 
 function minedFor(store: Store): Mined {
   const hit = mined.get(store.db);
   if (hit) return hit;
-  const mentions = new Map((store.db.query("SELECT commander_id AS id, SUM(decks) AS n FROM commander_themes GROUP BY commander_id").all() as { id: number; n: number }[]).map((r) => [r.id, r.n]));
   const baseline = new Map<number, number>();
   let baselineMass = 0;
   for (const r of store.db.query("SELECT card_id AS id, SUM(synergy) AS s FROM commander_cards WHERE synergy > 0 AND decks >= ? GROUP BY card_id ORDER BY card_id").all(MIN_CARD_DECKS) as { id: number; s: number }[]) {
     baseline.set(r.id, r.s);
     baselineMass += r.s;
   }
-  const out = { mentions, baseline, baselineMass, profiles: new Map<number, Profile>() };
+  const out = { baseline, baselineMass, profiles: new Map<number, Profile>() };
   mined.set(store.db, out);
   return out;
 }
@@ -119,9 +117,9 @@ function themeProfile(store: Store, themeId: number): Profile {
   const m = minedFor(store);
   const hit = m.profiles.get(themeId);
   if (hit) return hit;
-  const chosen = (store.db.query("SELECT commander_id AS id, decks FROM commander_themes WHERE theme_id = ? AND decks >= ? ORDER BY commander_id").all(themeId, MIN_THEME_DECKS) as { id: number; decks: number }[])
-    .map((r) => ({ id: r.id, share: r.decks / m.mentions.get(r.id)! }))
-    .filter((r) => r.share >= MIN_SHARE);
+  const slug = (store.db.query("SELECT slug FROM themes WHERE id = ?").get(themeId) as { slug: string } | null)?.slug;
+  if (slug === undefined) throw new Error(`card store is inconsistent: theme id ${themeId} has no row`);
+  const chosen = qualifyingCommanders(store.db, slug).map((q) => ({ id: q.page.cardId, share: q.share })).sort((a, b) => a.id - b.id);
   const weights = new Map<number, number>();
   if (chosen.length >= MIN_COMMANDERS) {
     const mass = new Map<number, number>();
