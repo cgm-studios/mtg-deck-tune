@@ -273,3 +273,31 @@ describe("the plan's other parts", () => {
     expect(free.pool).toBeGreaterThan(r.pool);
   }, 60_000);
 });
+
+describe("commanders without a full page, and caller mistakes", () => {
+  test("a commander with no EDHREC page gets no commander-synergy cards, deeper cuts fit to its own card tags, and a note saying so", () => {
+    // any legendary creature the graph reads that has no page, chosen from the store, not by name
+    const row = store.db.query(`SELECT c.name FROM cards c JOIN card_graph g ON g.card_id = c.id JOIN card_tagger t ON t.card_id = c.id
+      WHERE c.type_line LIKE 'Legendary Creature%' AND c.color_identity <> '' AND c.id NOT IN (SELECT card_id FROM commanders) ORDER BY c.name LIMIT 1`).get() as { name: string };
+    const r = shortlist(store, { commander: row.name, decklist: `1 ${row.name}`, plan: { themes: ["Voltron"] }, problem: { role: "removal" } });
+    expect(r.notes.join(" ")).toMatch(/no EDHREC page/);
+    expect(r.cards.length).toBeGreaterThan(0);
+    for (const c of r.cards) { expect(c.labels).not.toContain("fits this commander"); expect(c.evidence.commanderSynergy).toBeNull(); }
+    expect(r.cards.some((c) => c.labels.includes("deeper cut"))).toBe(true);
+  }, 60_000);
+
+  test("a thin page says its deeper cuts are fit to the commander's own card tags", () => {
+    const row = store.db.query(`SELECT c.name FROM commanders m JOIN cards c ON c.id = m.card_id JOIN card_graph g ON g.card_id = c.id
+      WHERE m.tagger_deck_fallback = 'thin' AND c.color_identity <> '' ORDER BY c.name LIMIT 1`).get() as { name: string };
+    const r = shortlist(store, { commander: row.name, decklist: `1 ${row.name}`, plan: { themes: ["Voltron"] }, problem: { role: "removal" } });
+    expect(r.notes.join(" ")).toMatch(/thin \(under 20 decks\).*own card tags/);
+  }, 60_000);
+
+  test("an out card that is not an exact name, or not in the deck, is a tool error; a known role or event is matched whatever its capitals", () => {
+    expect(() => shortlist(store, { ...NAMOR, plan: SPELLSLINGER, problem: { role: "removal" }, out: "Counterspel" })).toThrow(/not an exact card name; candidates: Counterspell/);
+    expect(() => shortlist(store, { ...NAMOR, plan: SPELLSLINGER, problem: { role: "removal" }, out: "Swords to Plowshares" })).toThrow(/Swords to Plowshares is not in the deck/);
+    // roles and engine events match whatever the capitals
+    expect(shortlist(store, { ...NAMOR, plan: SPELLSLINGER, problem: { role: " Removal" } }).problem).toEqual({ kind: "role", role: "removal" });
+    expect(shortlist(store, { ...TEYSA, plan: ARISTOCRATS, problem: { engineGap: "A Creature Dying" } }).problem).toMatchObject({ mechanic: "a creature dying" });
+  }, 60_000);
+});

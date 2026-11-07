@@ -253,8 +253,9 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
   let pool: Candidate[];
   const all = () => store.names.map((n) => store.space.cards.get(n.oracleId)!);
   if ("role" in f.problem) {
-    const role = f.problem.role;
-    if (!store.roles.roleNames.includes(role)) throw new ToolInputError(`unknown role "${role}"; roles: ${store.roles.roleNames.join(", ")}`);
+    // matched whatever the capitals, as the engine gap's words are
+    const role = store.roles.roleNames.find((r) => r.toLowerCase() === f.problem.role.trim().toLowerCase());
+    if (role === undefined) throw new ToolInputError(`unknown role "${f.problem.role}"; roles: ${store.roles.roleNames.join(", ")}`);
     problem = { kind: "role", role };
     pool = all().filter((c) => eligible(c, false) && rolesOf(store.roles, c.id).roles.some((r) => r.role === role) && keep(c)).map(candidate);
   } else if ("engineGap" in f.problem) {
