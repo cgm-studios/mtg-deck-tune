@@ -100,14 +100,14 @@ export type DiagnoseResult = {
   engineGaps: EngineGap[];
   /** Every role, in the role map's order. */
   roles: RoleRead[];
-  /** Roles above target, with the role's own cards as trims, fewest links into the deck first. */
+  /** Roles above target, with the role's own cards as trims, fewest links into the deck first; never a priority card of the plan (ISC-99). */
   over: (RoleRead & { trims: { name: string; partners: number; /** Works through a static effect, so its partners undercount it. */ unread?: true }[] })[];
   /** Roles below target. */
   under: RoleRead[];
   /** Nonland cards other than the commander with no hook or tag in the plan's profile. */
   offPlan: OffPlanCard[];
   /** The cards doing the least: roleless, not the commander, at or below the lower quartile of partners, and none of
-   * unread, starved or mana-only; each with every link it has into the deck. */
+   * unread, starved or mana-only; each with every link it has into the deck. Never a priority card of the plan (ISC-99). */
   doingLeast: { name: string; partners: number; links: DeckLink[]; reason: string }[];
   /** Every nonland card working through a static effect on other cards (a lord, an anthem, a keyword grant, a cost or
    * trigger change), which the graph does not link: never judged by its links, whatever its bucket. */
@@ -190,6 +190,9 @@ export function diagnose(store: Store, input: DiagnoseInput): DiagnoseResult {
   const gapOf = new Map<string, string>();
   for (const s of d.starved) for (const name of s.payoffs) if (!gapOf.has(name)) gapOf.set(name, s.hook);
   const leansOn = mainParts([...plan.themes, ...(plan.cards ? [plan.cards] : [])]);
+  // The trims and the cards doing the least read as cuts, and a priority card is the player's word for what the deck is
+  // about, so neither names one (ISC-99), as offPlan never does (ISC-85). Graph names are store names.
+  const priority = new Set(plan.priorities);
 
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join("") },
@@ -204,10 +207,10 @@ export function diagnose(store: Store, input: DiagnoseInput): DiagnoseResult {
       waitingOnIt: d.engine.filter((e) => e.bucket === "starved" && gapOf.get(e.name) === s.hook).map((e) => e.name),
     })),
     roles,
-    over: (d.roles?.over ?? []).map((o) => ({ ...read.get(o.role)!, trims: (o.trims ?? []).map((t) => (isStatic(t.name) ? { ...t, unread: true as const } : t)) })),
+    over: (d.roles?.over ?? []).map((o) => ({ ...read.get(o.role)!, trims: (o.trims ?? []).filter((t) => !priority.has(t.name)).map((t) => (isStatic(t.name) ? { ...t, unread: true as const } : t)) })),
     under: (d.roles?.under ?? []).map((u) => read.get(u.role)!),
     offPlan: offPlanCards(store, plan, nonlandCards.filter((c) => c.id !== plan.commander.id), leansOn),
-    doingLeast: d.engine.filter((e) => e.bucket === "cut").map((e) => ({ name: e.name, partners: e.partners, links: linksOf(e.name), reason: e.reason! })),
+    doingLeast: d.engine.filter((e) => e.bucket === "cut" && !priority.has(e.name)).map((e) => ({ name: e.name, partners: e.partners, links: linksOf(e.name), reason: e.reason! })),
     unread: d.engine.filter((e) => isStatic(e.name)).map((e) => ({
       name: e.name,
       reason: "works through a static effect (a lord, an anthem, a keyword grant, a cost or trigger change) the graph does not link yet, so its links undercount it" +

@@ -538,3 +538,41 @@ describe("a priority card is never off the plan (ISC-85)", () => {
     expect(checked).toBeGreaterThan(15);
   }, 240_000);
 });
+
+describe("a priority card is never a trim or a card doing the least (ISC-99)", () => {
+  // The diagnosis's over-target trims and doing-least list read as cuts; a priority card is the player's word for what the
+  // deck is about, so neither list names one (as offPlan never does, ISC-85). Without the priorities in the plan, the same
+  // cards do appear there in some runs, so the property is not empty.
+  test("ISC-99: for random decks and plans with 1 to 4 in-deck priority cards, no priority card is in any over-target trim list or in doingLeast", async () => {
+    const fc = (await import("fast-check")).default;
+    const lists = (["namor.txt", "teysa.txt"] as const).map((f) => fixtureText(f).split("\n").map((l) => l.trim()).filter((l) => /^\d+ /.test(l)));
+    const commanders = ["Namor the Sub-Mariner", "Teysa Karlov"];
+    const THEMES = ["Aristocrats", "Tokens", "Spellslinger", "+1/+1 Counters", "Ramp"];
+    const named = (d: ReturnType<typeof diagnose>) => [...d.over.flatMap((o) => o.trims.map((t) => t.name)), ...d.doingLeast.map((c) => c.name)];
+    let checked = 0, overRuns = 0, exposed = 0;
+    fc.assert(fc.property(fc.integer({ min: 0, max: 1 }).chain((k) => fc.record({
+      k: fc.constant(k),
+      lines: fc.subarray(lists[k], { minLength: 20, maxLength: lists[k].length }),
+      themes: fc.subarray(THEMES, { minLength: 1, maxLength: 1 }),
+      withTheme: fc.boolean(),
+      pick: fc.array(fc.nat(), { minLength: 1, maxLength: 4 }),
+    })), (r) => {
+      const names = r.lines.map((l) => l.replace(/^\d+\s+/, "")).filter((n) => n !== commanders[r.k] && !/^(Island|Plains|Swamp|Forest|Mountain)$/.test(n));
+      const priorities = [...new Set(r.pick.map((p) => names[p % names.length]))];
+      const base = { commander: commanders[r.k], decklist: r.lines.join("\n") };
+      let d;
+      try { d = diagnose(store, { ...base, plan: { ...(r.withTheme ? { themes: r.themes } : {}), priorities } }); }
+      catch (e) { if (!(e instanceof ToolInputError)) throw e; return; } // a priority card without graph data is the caller's to fix
+      checked++;
+      if (d.over.length) overRuns++;
+      expect(named(d).filter((n) => priorities.includes(n))).toEqual([]);
+      // the same deck under the theme alone: how often a priority card would have been named
+      const without = diagnose(store, { ...base, plan: { themes: r.themes } });
+      if (named(without).some((n) => priorities.includes(n))) exposed++;
+    }), { numRuns: 30, seed: 9901 });
+    expect(checked).toBeGreaterThan(20);
+    expect(overRuns).toBeGreaterThan(10); // plans that put a role over target, so trims exist
+    expect(exposed).toBeGreaterThan(3);
+    console.log(`ISC-99: ${checked} runs, ${overRuns} with a role over target, ${exposed} where a priority card is a trim or doing least without the priorities`);
+  }, 400_000);
+});
