@@ -48,12 +48,12 @@ describe("one shortlist (ISC-59, ISC-60)", () => {
     expect(new Set(r.cards.map((c) => c.name)).size).toBe(r.cards.length);
   });
 
-  test("ISC-60: every card carries at least one known source label, and the four labels all occur", () => {
+  test("ISC-60: every card carries at least one known source label, and the four ranking labels all occur", () => {
     for (const c of r.cards) {
       expect(c.labels.length).toBeGreaterThan(0);
       for (const l of c.labels) expect(SHORTLIST_LABELS).toContain(l);
     }
-    expect(new Set(r.cards.flatMap((c) => c.labels))).toEqual(new Set(SHORTLIST_LABELS));
+    for (const l of ["fits this commander", "deeper cut", "widely played", "engine partner"] as const) expect(r.cards.flatMap((c) => c.labels)).toContain(l);
   });
 });
 
@@ -484,5 +484,159 @@ describe("the plan steers role shortlists on commanders the change was not built
     const median = [...diffs].sort((x, y) => x - y)[Math.floor(diffs.length / 2)];
     console.log(`ISC-88 plan sensitivity: ${diffs.length} role shortlists, median ${median} cards differ (was 2), ${diffs.filter((d) => d === 0).length} identical (was 10); ${diffs.join(",")}`);
     expect(median).toBeGreaterThan(2);
+  }, 300_000);
+});
+
+// ---------- named key cards and a named theme (ISC-89, ISC-90) ----------
+// Commanders other than Namor and Teysa: those with a full page and graph data, a fixed sample in name order, each on a
+// synthetic list drawn from its page's most-run cards. The link oracle is the graph's own primitives, as for ISC-88.
+async function otherCommanders(every: number) {
+  return (store.db.query(`SELECT c.id, c.name FROM commanders m JOIN cards c ON c.id = m.card_id JOIN card_graph g ON g.card_id = c.id
+    WHERE m.tagger_deck_fallback IS NULL ORDER BY c.name`).all() as { id: number; name: string }[]).filter((c, k) => k % every === 0 && !COMMANDERS.includes(c.name));
+}
+const pageCards = (commanderId: number) => (store.db.query(`SELECT n.name FROM commander_cards cc JOIN cards n ON n.id = cc.card_id JOIN card_graph g ON g.card_id = n.id
+  WHERE cc.commander_id = ? AND n.is_land = 0 ORDER BY cc.decks DESC, n.name LIMIT 90`).all(commanderId) as { name: string }[]).map((r) => r.name);
+
+describe("a key card the player names but the deck lacks (ISC-89)", () => {
+  test("ISC-89: for random plans naming 1 to 3 in-color priority cards absent from the deck, each is on the shortlist labeled as named by the player, and cards linked to it carry priorityLinks to it", async () => {
+    const fc = (await import("fast-check")).default;
+    const { graphOf } = await import("./graph/store-graph");
+    const { deckGraph } = await import("./graph/deck");
+    const { deckContext } = await import("./graph/diagnose");
+    const { offProfile } = await import("./graph/profile");
+    const { ToolInputError } = await import("./deck-tools");
+    const { index: idx, positionOf } = graphOf(store.db);
+    const idOf = new Map(store.names.map((n) => [n.name, n.id]));
+    const commanders = await otherCommanders(53);
+    let runs = 0, named = 0, linkedChecked = 0;
+    fc.assert(fc.property(fc.constantFrom(...commanders), fc.integer({ min: 0, max: 1_000_000 }), fc.integer({ min: 1, max: 3 }), fc.constantFrom(...store.roles.roleNames), fc.option(fc.constantFrom(...THEMES), { nil: undefined }),
+      (cmd, seed, k, role, theme) => {
+        const page = pageCards(cmd.id).filter((n) => n !== cmd.name);
+        const inDeck = page.filter((_, i) => ((i * 2654435761 + seed) >>> 0) % 3 !== 0).slice(0, 40);
+        const absent = page.filter((n) => !inDeck.includes(n)).slice(seed % 5, seed % 5 + k);
+        if (absent.length < k) return;
+        const plan = { ...(theme ? { themes: [theme] } : {}), priorities: absent };
+        const decklist = [cmd.name, ...inDeck].map((n) => `1 ${n}`).join("\n");
+        let r: ShortlistResult;
+        try { r = shortlist(store, { commander: cmd.name, decklist, plan, problem: { role } }); }
+        catch (e) { if (!(e instanceof ToolInputError)) throw e; return; }
+        runs++;
+        for (const n of absent) {
+          const c = r.cards.find((x) => x.name === n);
+          expect([cmd.name, n, c?.labels]).toEqual([cmd.name, n, expect.arrayContaining(["named by the player"])]);
+          named++;
+        }
+        // the oracle: which shortlist cards link to an absent priority card, over links that count
+        const members = [cmd.name, ...inDeck].map((n) => positionOf.get(idOf.get(n)!)!).filter((p) => p !== undefined);
+        const g = deckGraph(idx, members.map((p) => ({ name: idx.cards[p].name, count: 1 })), [idx.cards[positionOf.get(idOf.get(cmd.name)!)!].name], store.roles);
+        const ctx = deckContext(idx, g);
+        const absentPos = new Set(absent.map((n) => positionOf.get(idOf.get(n)!)!));
+        const absentNames = new Set([...absentPos].map((p) => idx.cards[p].name));
+        for (const c of r.cards) {
+          const p = positionOf.get(idOf.get(c.name)!);
+          if (p === undefined) continue;
+          const me = idx.cards[p].name;
+          const want = [...new Set(idx.linksWith(p, absentPos).filter((l) => !offProfile(l.hook) && !ctx.generic(l)).map((l) => (l.from === me ? l.to : l.from)).filter((n) => absentNames.has(n) && n !== me))].sort();
+          linkedChecked += want.length;
+          expect([cmd.name, c.name, c.evidence.priorityLinks.filter((n) => absentNames.has(n))]).toEqual([cmd.name, c.name, want]);
+        }
+      }), { numRuns: 25, seed: 8901 });
+    console.log(`ISC-89: ${runs} shortlists, ${named} absent named cards placed, ${linkedChecked} links to them checked`);
+    expect(runs).toBeGreaterThan(15);
+    expect(linkedChecked).toBeGreaterThan(0);
+  }, 300_000);
+
+  test("ISC-89: a named card outside a mana value ceiling stays out, and the notes say so", () => {
+    const r = shortlist(store, { commander: "Eladamri, Korvecdal", decklist: MONO_GREEN.replace("1 Ghalta, Primal Hunger\n", ""), plan: { themes: ["Ramp"], priorities: ["Ghalta, Primal Hunger"] }, problem: { role: "ramp" }, maxManaValue: 4 });
+    expect(r.cards.map((c) => c.name)).not.toContain("Ghalta, Primal Hunger");
+    expect(r.notes.join(" ")).toMatch(/Ghalta, Primal Hunger.*ceiling/);
+    const free = shortlist(store, { commander: "Eladamri, Korvecdal", decklist: MONO_GREEN.replace("1 Ghalta, Primal Hunger\n", ""), plan: { themes: ["Ramp"], priorities: ["Ghalta, Primal Hunger"] }, problem: { role: "ramp" } });
+    expect(free.cards.find((c) => c.name === "Ghalta, Primal Hunger")?.labels).toContain("named by the player");
+  }, 60_000);
+});
+
+describe("a theme the player names keeps a few slots (ISC-90)", () => {
+  // a card the theme brought in: the theme's label and none of the sources taken before it (popularity comes after)
+  const UNION = ["named by the player", "fits this commander", "deeper cut"];
+  const themePicks = (r: ShortlistResult) => r.cards.filter((c) => c.labels.includes("fits the named theme") && !c.labels.some((l) => UNION.includes(l))).length;
+
+  test("ISC-90: with a named theme plus priority cards, 2 or 3 cards come in only as the theme's picks; with the theme inferred from the same cards, none", async () => {
+    const fc = (await import("fast-check")).default;
+    const { ToolInputError } = await import("./deck-tools");
+    const { resolvePlan, planScorer } = await import("./plan");
+    const { rolesOf } = await import("./roles");
+    const lists = (["namor.txt", "teysa.txt"] as const).map((f) => fixture(f).split("\n").map((l) => l.trim()).filter((l) => /^\d+ /.test(l)));
+    let named = 0, inferred = 0;
+    fc.assert(fc.property(fc.integer({ min: 0, max: 1 }).chain((k) => fc.record({
+      k: fc.constant(k),
+      lines: fc.subarray(lists[k], { minLength: 20, maxLength: lists[k].length }),
+      pick: fc.array(fc.nat(), { minLength: 1, maxLength: 3 }),
+      theme: fc.constantFrom(...THEMES),
+      role: fc.constantFrom(...store.roles.roleNames),
+    })), (r) => {
+      const commander = COMMANDERS[r.k];
+      const names = r.lines.map((l) => l.replace(/^\d+\s+/, "")).filter((n) => n !== commander && !/^(Island|Plains|Swamp|Forest|Mountain)$/.test(n));
+      const priorities = [...new Set(r.pick.map((p) => names[p % names.length]))];
+      const decklist = r.lines.join("\n");
+      let a: ShortlistResult, b: ShortlistResult;
+      try {
+        a = shortlist(store, { commander, decklist, plan: { themes: [r.theme], priorities }, problem: { role: r.role } });
+        b = shortlist(store, { commander, decklist, plan: { priorities }, problem: { role: r.role } });
+      } catch (e) { if (!(e instanceof ToolInputError)) throw e; return; }
+      // the oracle: role cards outside the deck that fit the named theme alone (the plan module's scorer for that theme),
+      // and not already in through an earlier source
+      const themeFit = planScorer(store, resolvePlan(store, { commander, plan: { themes: [r.theme] } }));
+      const inDeck = new Set([commander, ...names].map(front));
+      const earlier = new Set(a.cards.filter((c) => c.labels.some((l) => UNION.includes(l))).map((c) => c.name));
+      const ci = facts.get(commander)!.ci;
+      const availableCards = store.names.filter((n) => {
+        const c = store.space.cards.get(n.oracleId)!;
+        return !c.land && !inDeck.has(front(n.name)) && !earlier.has(n.name) && inside(facts.get(n.name)!.ci, ci) && rolesOf(store.roles, n.oracleId).roles.some((x) => x.role === r.role) &&
+          !/spells?\b.*\bcosts?\s+(\{[^}]*\})+\s+less/i.test(c.meta!.text) && themeFit(n.oracleId).score > 0;
+      });
+      const available = availableCards.length;
+      const picks = themePicks(a);
+      // the theme's picks are its best fits: no card left out fits the named theme better than a card it brought in
+      const fitOf = (name: string) => themeFit(store.names.find((x) => x.name === name)!.oracleId).score;
+      const brought = a.cards.filter((c) => c.labels.includes("fits the named theme") && !c.labels.some((l) => UNION.includes(l)));
+      if (brought.length) {
+        const worst = Math.min(...brought.map((c) => fitOf(c.name)));
+        const have = new Set(a.cards.map((c) => c.name));
+        expect([commander, r.theme, r.role, availableCards.filter((n) => !have.has(n.name) && themeFit(n.oracleId).score > worst).map((n) => n.name)]).toEqual([commander, r.theme, r.role, []]);
+      }
+      expect([commander, r.theme, r.role, picks <= 3]).toEqual([commander, r.theme, r.role, true]);
+      if (available >= 3) { named++; expect([commander, r.theme, r.role, picks >= 2]).toEqual([commander, r.theme, r.role, true]); }
+      expect(b.plan.inferred).toBeDefined();
+      inferred++;
+      expect(b.cards.filter((c) => c.labels.includes("fits the named theme"))).toEqual([]);
+      // without priority cards a named theme reserves no slots: its pull comes through the engine order
+      const c = shortlist(store, { commander, decklist, plan: { themes: [r.theme] }, problem: { role: r.role } });
+      expect(c.cards.filter((x) => x.labels.includes("fits the named theme"))).toEqual([]);
+    }), { numRuns: 20, seed: 9001 });
+    expect(named).toBeGreaterThan(10);
+    expect(inferred).toBeGreaterThan(10);
+  }, 300_000);
+
+  test("ISC-90: on 10 commanders other than Namor and Teysa, role shortlists under two named themes with the same priority cards now differ (median reported; was 0)", async () => {
+    const { listThemes } = await import("./graph/strategy");
+    const usable = new Set(listThemes(store.db).filter((t) => t.usable).map((t) => t.slug));
+    const rows = store.db.query(`SELECT c.card_id AS id, n.name, n.color_identity AS ci FROM commanders c JOIN cards n ON n.id = c.card_id
+      WHERE c.tagger_deck_fallback IS NULL ORDER BY c.decks DESC LIMIT 400`).all() as { id: number; name: string; ci: string }[];
+    const seen = new Set<string>();
+    const picked = rows.filter((c) => !COMMANDERS.includes(c.name) && !seen.has(c.ci) && !!seen.add(c.ci)).slice(0, 10);
+    const diffs: number[] = [];
+    for (const c of picked) {
+      const themes = (store.db.query(`SELECT t.name, t.slug FROM commander_themes ct JOIN themes t ON t.id = ct.theme_id WHERE ct.commander_id = ? ORDER BY ct.decks DESC`).all(c.id) as { name: string; slug: string }[]).filter((t) => usable.has(t.slug)).slice(0, 2);
+      const deck = pageCards(c.id).slice(0, 60);
+      const priorities = (store.db.query(`SELECT n.name FROM commander_cards cc JOIN cards n ON n.id = cc.card_id JOIN card_graph g ON g.card_id = n.id WHERE cc.commander_id = ? AND n.is_land = 0 ORDER BY cc.synergy DESC, n.name LIMIT 90`).all(c.id) as { name: string }[]).map((r) => r.name).filter((n) => deck.includes(n)).slice(0, 3);
+      const decklist = [`1 ${c.name}`, ...deck.map((n) => `1 ${n}`)].join("\n");
+      for (const role of ["removal", "ramp", "card draw"]) {
+        const [a, b] = themes.map((t) => new Set(shortlist(store, { commander: c.name, decklist, plan: { themes: [t.name], priorities }, problem: { role } }).cards.map((x) => x.name)));
+        diffs.push([...a].filter((n) => !b.has(n)).length);
+      }
+    }
+    const median = [...diffs].sort((x, y) => x - y)[Math.floor(diffs.length / 2)];
+    console.log(`ISC-90 plan sensitivity, same priorities, two named themes: ${diffs.length} role shortlists, median ${median} cards differ (was 0), ${diffs.filter((d) => d === 0).length} identical; ${diffs.join(",")}`);
+    expect(median).toBeGreaterThan(0);
   }, 300_000);
 });

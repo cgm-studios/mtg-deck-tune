@@ -102,7 +102,9 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
       "cards off it or doing the least). Every card is commander-legal, inside the commander's color identity and outside the deck, " +
       "and at or under `maxManaValue` and `maxPrice` when given. Each card is labeled by where it came from, with the evidence: " +
       "fits this commander (the commander's EDHREC synergy), deeper cut (fit to the tags of the commander's decks), widely played " +
-      "(global EDHREC rank; at most 5 cards come in on popularity alone), engine partner (card graph links into the deck: first to the " +
+      "(global EDHREC rank; at most 5 cards come in on popularity alone), named by the player (a priority card the deck lacks; it also " +
+      "counts as a deck card for links), fits the named theme (3 picks for a theme the player named beside priority cards), " +
+      "engine partner (card graph links into the deck: first to the " +
       "plan's priority cards, then to its cards that fit the plan). Cost reducers that discount only spells the deck does not cast are " +
       "left out. Each also carries its links into the deck by event, the priority cards it links to, its plan fit, and what adding it changes in the deck's " +
       "numbers; with `out` (a card in the deck), what swapping it in for that card changes, with the numbers after (`before` is " +

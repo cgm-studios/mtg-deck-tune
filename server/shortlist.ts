@@ -1,4 +1,4 @@
-// DT-6.5, DT-6.13: the shortlist tool (ISA ISC-41, 45.2, 59 to 65, 67, 86, 88). For one diagnosed problem and the player's confirmed plan,
+// DT-6.5, 6.13, 6.14: the shortlist tool (ISA ISC-41, 45.2, 59 to 65, 67, 86, 88 to 90). For one diagnosed problem and the player's confirmed plan,
 // about 30 in-color cards outside the deck, each labeled by where it came from and carrying its links into the deck and
 // the deck before and after it goes in. The data narrows ~31k cards to a shortlist with reasons; Claude judges it.
 //
@@ -13,24 +13,30 @@
 // fits a theme the plan avoids and does not fit the plan, and a cost reducer whose discounts name only colors or types the
 // deck never casts (cost-reduction.ts, ISC-86).
 //
-// Four rankings of the pool, each the source of one label:
+// The plan's priority cards the deck lacks are offered whatever the problem (label: named by the player), unless a mana
+// value or price ceiling rules one out (the notes say so), and count as deck cards for links (ISC-89).
+//
+// Rankings of the pool, each the source of one label:
 //   fits this commander  commander synergy: the commander's EDHREC page weight, inclusion x max(0, synergy + offset)
 //                        (the graph's synergy ranking; only cards the page lists with a weight above 0)
 //   deeper cut           Tagger Deck fit: the card's Tagger Card vector against the commander's Tagger Deck vector (dot
 //                        product; the commander's own card vector when it has no page), above 0
 //   widely played        global EDHREC rank (Scryfall's), lowest first: popularity across all decks
+//   fits the named theme only when the player named a theme and priority cards: fit to the named themes alone (plan.ts
+//                        planScorer without the priority cards' profile), then the engine order's measures
 //   engine partner       the card graph: links into the deck. First the cards linked to the plan's priority cards in the
 //                        deck (most priority cards linked first); then, for an engine gap, payoffs fed (most first), an
 //                        outlet that can fire again before a one-shot; then links into the deck's on-plan cards (the
 //                        commander counts as on plan), then links into any deck card, then plan fit.
 // Ties fall to the name in byte order, so the same deck, plan and problem give the same shortlist on every machine.
 //
-// The shortlist takes the first PER_SOURCE (10) of commander synergy and of Tagger Deck fit whole, then at most
-// POPULAR_ONLY (5) of the first 10 widely played cards not already in (ISC-63). The slots left, up to SHORTLIST_MAX (30),
-// go first to cards linked to a priority card (ISC-88), then to the other engine partners: a player's plan is usually a
-// few key cards and the interactions between them, not a list of staples. The 10 + 10 + 10 union measured in
-// mtg-graph-api's leave-one-out (30 of 57 on Namor, 24 of 39 on Teysa) is now a reported guard, not a floor (ISC-65).
-// A card's labels are every ranking whose taken part holds it.
+// The shortlist fills in this order, never past SHORTLIST_MAX (30): the named cards the deck lacks; the first PER_SOURCE
+// (10) of commander synergy and of Tagger Deck fit; THEME_SLOTS (3) picks of a theme the player named beside priority
+// cards (ISC-90; an inferred theme keeps none); at most POPULAR_ONLY (5) of the first 10 widely played cards not already
+// in (ISC-63); then cards linked to a priority card (ISC-88), then the other engine partners. A player's plan is usually
+// a few key cards and the interactions between them, not a list of staples. The 10 + 10 + 10 union measured in
+// mtg-graph-api's leave-one-out (30 of 57 on Namor, 24 of 39 on Teysa) is the recall check (ISC-65). A card's labels
+// are every ranking whose taken part holds it.
 
 import { z } from "zod";
 import { fitsIdentity } from "./color-identity";
@@ -47,7 +53,7 @@ import { planShape } from "./plan-input";
 import { rolesOf } from "./roles";
 import { applySwap, statsDelta, swapStats, type StatsDelta, type SwapStats } from "./swap-tools";
 
-export const SHORTLIST_LABELS = ["fits this commander", "deeper cut", "widely played", "engine partner"] as const;
+export const SHORTLIST_LABELS = ["named by the player", "fits this commander", "deeper cut", "widely played", "fits the named theme", "engine partner"] as const;
 export type SourceLabel = (typeof SHORTLIST_LABELS)[number];
 /** Cards each of the first three rankings puts in: the measured union's 10 per source. */
 export const PER_SOURCE = 10;
@@ -56,6 +62,9 @@ export const SHORTLIST_MAX = 30;
 /** The most cards popularity alone puts in (ISC-63, set 2026-11-07, reversible): widely played cards beyond this enter only
  * when another source wants them too. */
 export const POPULAR_ONLY = 5;
+/** Slots a theme the player named keeps once priority cards are named too (ISC-90, set 2026-11-07, reversible); an
+ * inferred theme keeps none. */
+export const THEME_SLOTS = 3;
 
 const problemShape = z.union([
   z.object({ role: z.string().min(1).describe("A deck role, as diagnose and deck_stats name it (ramp, card draw, card selection, removal, board wipe, counterspell, protection, tutor, recursion, cost reducer): cards that hold it") }).strict(),
@@ -202,13 +211,13 @@ const RECENT_DECKS = 4;
 type DeckLinks = { linker: (pos: number) => Link[]; links: Map<number, Link[]> };
 const LINKS = new WeakMap<Store, Map<string, DeckLinks>>();
 
-function linksIntoDeck(store: Store, d: DeckOnGraph): (pos: number) => Link[] {
+function linksIntoDeck(store: Store, members: ReadonlySet<number>): (pos: number) => Link[] {
   let byDeck = LINKS.get(store);
   if (!byDeck) LINKS.set(store, (byDeck = new Map()));
-  const key = [...d.ctx.members].sort((a, b) => a - b).join(",");
+  const key = [...members].sort((a, b) => a - b).join(",");
   let memo = byDeck.get(key);
   if (memo) byDeck.delete(key); // re-inserted below as the most recent
-  else memo = { linker: graphOf(store.db).index.linkerFor(d.ctx.members), links: new Map() };
+  else memo = { linker: graphOf(store.db).index.linkerFor(members), links: new Map() };
   byDeck.set(key, memo);
   while (byDeck.size > RECENT_DECKS) byDeck.delete(byDeck.keys().next().value!);
   const { linker, links } = memo;
@@ -239,6 +248,9 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
   const entries = deck.entries;
 
   const out = f.out === undefined ? null : outCard(store, f.out, entries);
+  // The plan's priority cards the deck lacks (ISC-89): each is offered, and counts as a deck card for links.
+  const named = resolved.priorities.map((n) => store.space.cards.get(store.names.find((x) => x.name === n)!.oracleId)!);
+  const absentNamed = named.filter((c) => !inDeck.has(c.id) && c.id !== commander.id);
 
   // The pool.
   const notes: string[] = [];
@@ -295,13 +307,15 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
   if (idleDiscounts) notes.push(`${idleDiscounts} cost reducer${idleDiscounts === 1 ? "" : "s"} left out: ${idleDiscounts === 1 ? "it only discounts" : "they only discount"} spells of a color or type the deck does not cast`);
   if (avoided) notes.push(`${avoided} card${avoided === 1 ? "" : "s"} left out: ${avoided === 1 ? "it fits" : "they fit"} a theme the plan avoids and not the plan`);
 
-  // Links into the deck, and which deck cards carry the plan.
-  const into = linksIntoDeck(store, d);
+  // Links into the deck, the named cards it lacks counted as deck cards, and which of those cards carry the plan.
+  const absentPos = absentNamed.map((c) => graph.positionOf.get(idOf.get(c.id)!)).filter((p): p is number => p !== undefined);
+  const into = linksIntoDeck(store, new Set([...ctx.members, ...absentPos]));
   const linksOf = (c: Candidate): Link[] => (c.pos === undefined ? [] : into(c.pos));
-  const onPlanDeck = new Set(d.g.cards.filter((c) => c.name === idx.cards[d.commanderPos].name || fit(c.oracleId).score > 0).map((c) => c.name));
-  // the plan's priority cards that are in the deck, by the index's spelling
-  const priorityDeck = new Set(resolved.priorities.map((n) => graph.positionOf.get(store.names.find((x) => x.name === n)!.id))
-    .filter((p): p is number => p !== undefined && ctx.members.has(p)).map((p) => idx.cards[p].name));
+  const absentGraphNames = absentPos.map((p) => idx.cards[p].name);
+  const onPlanDeck = new Set([...d.g.cards.filter((c) => c.name === idx.cards[d.commanderPos].name || fit(c.oracleId).score > 0).map((c) => c.name), ...absentGraphNames]);
+  // the plan's priority cards, in the deck or named and lacking, by the index's spelling
+  const priorityDeck = new Set([...resolved.priorities.map((n) => graph.positionOf.get(store.names.find((x) => x.name === n)!.id))
+    .filter((p): p is number => p !== undefined && ctx.members.has(p)).map((p) => idx.cards[p].name), ...absentGraphNames]);
   const partners = new Map<number, { all: number; plan: number; priority: string[] }>();
   const partnersOf = (c: Candidate) => {
     let p = partners.get(c.id);
@@ -333,23 +347,39 @@ export function shortlist(store: Store, input: ShortlistInput): ShortlistResult 
     partnersOf(b).priority.length - partnersOf(a).priority.length || partnersOf(b).plan - partnersOf(a).plan ||
     partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName(a, b)) : [];
 
-  // The union: commander synergy and Tagger Deck fit whole, then at most POPULAR_ONLY cards popularity alone wants.
-  // Then the slots left go to cards linked to a priority card, then to engine partners.
+  // A theme the player named, beside priority cards, keeps THEME_SLOTS picks of its own (ISC-90): the pool by fit to the
+  // named themes alone (not the priority cards' profile), then the engine order's measures. An inferred theme keeps none.
+  const themeOwn = resolved.inference === null && resolved.themes.length > 0 && resolved.priorities.length > 0
+    ? planScorer(store, { ...resolved, cards: null, inference: null }) : null;
+  const byTheme = themeOwn ? pool.filter((c) => themeOwn(c.card.id).score > 0).sort((a, b) =>
+    themeOwn(b.card.id).score - themeOwn(a.card.id).score || partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || byName(a, b)) : [];
+
+  // The shortlist, in order, never past SHORTLIST_MAX: the named cards the deck lacks; commander synergy and Tagger Deck
+  // fit whole; the named theme's picks; at most POPULAR_ONLY cards popularity alone wants; then cards linked to a
+  // priority card, then the other engine partners.
   const chosen = new Map<number, Candidate>();
-  for (const list of [bySynergy, byTagger]) for (const c of list.slice(0, PER_SOURCE)) chosen.set(c.id, c);
-  let popularOnly = 0;
-  for (const c of byRank.slice(0, PER_SOURCE)) if (!chosen.has(c.id) && popularOnly < POPULAR_ONLY) { chosen.set(c.id, c); popularOnly++; }
-  const viaEngine = new Set(byEngine.slice(0, PER_SOURCE).map((c) => c.id));
-  for (const list of [byPriority, byEngine]) for (const c of list) {
-    if (chosen.size >= SHORTLIST_MAX) break;
-    if (chosen.has(c.id)) continue;
-    chosen.set(c.id, c);
-    viaEngine.add(c.id);
+  const add = (c: Candidate) => { if (chosen.size < SHORTLIST_MAX && !chosen.has(c.id)) { chosen.set(c.id, c); return true; } return false; };
+  const viaNamed = new Set<number>();
+  for (const c of absentNamed) {
+    const over = f.maxManaValue !== undefined && c.meta!.cmc > f.maxManaValue ? "mana value" : f.maxPrice !== undefined && !(c.meta!.usd !== null && c.meta!.usd <= f.maxPrice) ? "price" : null;
+    if (over) { notes.push(`${c.name}, named in the plan and not in the deck, is over the ${over} ceiling, so it is left out`); continue; }
+    const cand = pool.find((x) => x.card.id === c.id) ?? candidate(c);
+    if (add(cand)) viaNamed.add(cand.id);
   }
+  for (const list of [bySynergy, byTagger]) for (const c of list.slice(0, PER_SOURCE)) add(c);
+  const viaTheme = new Set<number>();
+  let themeTaken = 0;
+  for (const c of byTheme) { if (themeTaken >= THEME_SLOTS || chosen.size >= SHORTLIST_MAX) break; viaTheme.add(c.id); if (add(c)) themeTaken++; }
+  let popularOnly = 0;
+  for (const c of byRank.slice(0, PER_SOURCE)) if (!chosen.has(c.id) && popularOnly < POPULAR_ONLY && add(c)) popularOnly++;
+  const viaEngine = new Set(byEngine.slice(0, PER_SOURCE).map((c) => c.id));
+  for (const list of [byPriority, byEngine]) for (const c of list) if (add(c)) viaEngine.add(c.id);
   const taken: Record<SourceLabel, Set<number>> = {
+    "named by the player": viaNamed,
     "fits this commander": new Set(bySynergy.slice(0, PER_SOURCE).map((c) => c.id)),
     "deeper cut": new Set(byTagger.slice(0, PER_SOURCE).map((c) => c.id)),
     "widely played": new Set(byRank.slice(0, PER_SOURCE).map((c) => c.id)),
+    "fits the named theme": viaTheme,
     "engine partner": viaEngine,
   };
   if (bySynergy.length < PER_SOURCE && synergy.size) notes.push(`the commander's page lists ${bySynergy.length} card${bySynergy.length === 1 ? "" : "s"} for this problem`);
