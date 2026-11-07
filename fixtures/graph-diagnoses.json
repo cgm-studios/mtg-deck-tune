@@ -1,0 +1,3754 @@
+{
+ "about": "Recorded from mtg-graph-api (branch dt-6.1-store; diagnose.ts, deck.ts, roles.ts unchanged from the port source rework/ts-card-graph a000f59) on the card store's inputs: the corpus, Scryfall oracle file and subtype facts cards.db was built from, mtg-vector's Tagger file, and this repo's roles.json and role-targets.json. Short-role adds are left out (the shortlist's work). Card order in the graph follows the corpus; the port's follows store ids, so compare by card name.",
+ "corpusSha256": "0f747833042b9813b6813df9001e1cea99a6a293efa21add18ecc37b935e3812",
+ "decks": {
+  "namor": {
+   "roleCounts": {
+    "ramp": 8,
+    "card draw": 12,
+    "card selection": 8,
+    "removal": 5,
+    "board wipe": 3,
+    "counterspell": 11,
+    "protection": 6,
+    "tutor": 1,
+    "recursion": 1,
+    "cost reducer": 2
+   },
+   "unresolved": [],
+   "diagnosis": {
+    "commanders": [
+     "Namor the Sub-Mariner"
+    ],
+    "colorIdentity": [
+     "U"
+    ],
+    "mechanics": [
+     {
+      "hook": "SpellCast",
+      "payoffs": [
+       "Archmage of Runes",
+       "Brineborn Cutthroat",
+       "Deeproot Waters",
+       "Emperor Mihail II",
+       "Hullbreaker Horror",
+       "Ledger Shredder",
+       "Merrow Reejerey",
+       "Namor the Sub-Mariner",
+       "Talrand, Sky Summoner"
+      ],
+      "enablers": [
+       "Aetherize",
+       "Aquitect's Will",
+       "Archmage of Runes",
+       "Blatant Thievery",
+       "Blink of an Eye",
+       "Brineborn Cutthroat",
+       "Censor",
+       "Chasm Skulker",
+       "Commander's Sphere",
+       "Consider",
+       "Coralhelm Commander",
+       "Curiosity",
+       "Deep Analysis",
+       "Deeproot Pilgrimage",
+       "Deeproot Waters",
+       "Dig Through Time",
+       "Disdainful Stroke",
+       "Emperor Mihail II",
+       "Essence Capture",
+       "Essence Scatter",
+       "Evacuation",
+       "Finale of Revelation",
+       "Frantic Search",
+       "Harbinger of the Tides",
+       "High Tide",
+       "Hullbreaker Horror",
+       "Imprisoned in the Moon",
+       "Kopala, Warden of Waves",
+       "Ledger Shredder",
+       "Leyline of Transformation",
+       "Lightning Greaves",
+       "Magic Damper",
+       "Master of the Pearl Trident",
+       "Merfolk Looter",
+       "Merfolk Sovereign",
+       "Merrow Reejerey",
+       "Mind Stone",
+       "Mission Briefing",
+       "Mist Dancer",
+       "Namor the Sub-Mariner",
+       "Narset, Parter of Veils",
+       "Negate",
+       "Opt",
+       "Remand",
+       "Sapphire Medallion",
+       "Seafloor Oracle",
+       "Shore Up",
+       "Sinister Sabotage",
+       "Sky Diamond",
+       "Slinn Voda, the Rising Deep",
+       "Sol Ring",
+       "Solve the Equation",
+       "Svyelun of Sea and Sky",
+       "Swiftfoot Boots",
+       "Talrand, Sky Summoner",
+       "Tempest Caller",
+       "The Reality Chip",
+       "Think Twice",
+       "Thought Vessel",
+       "Twist Reality",
+       "Vodalian Arcanist",
+       "Vodalian Hexcatcher",
+       "Volshe Tideturner",
+       "Wash Away"
+      ]
+     },
+     {
+      "hook": "CardDrawn",
+      "payoffs": [
+       "Chasm Skulker"
+      ],
+      "enablers": [
+       "Aquitect's Will",
+       "Archmage of Runes",
+       "Blink of an Eye",
+       "Censor",
+       "Commander's Sphere",
+       "Consider",
+       "Curiosity",
+       "Deep Analysis",
+       "Finale of Revelation",
+       "Frantic Search",
+       "Ledger Shredder",
+       "Merfolk Looter",
+       "Mind Stone",
+       "Opt",
+       "Remand",
+       "Seafloor Oracle",
+       "Svyelun of Sea and Sky",
+       "Think Twice"
+      ]
+     },
+     {
+      "hook": "Discard",
+      "payoffs": [
+       "Dig Through Time"
+      ],
+      "enablers": [
+       "Censor",
+       "Frantic Search",
+       "Ledger Shredder",
+       "Merfolk Looter"
+      ]
+     },
+     {
+      "hook": "ETB",
+      "payoffs": [
+       "Vodalian Hexcatcher"
+      ],
+      "enablers": [
+       "Brineborn Cutthroat",
+       "Coralhelm Commander",
+       "Deeproot Pilgrimage",
+       "Deeproot Waters",
+       "Emperor Mihail II",
+       "Harbinger of the Tides",
+       "Kopala, Warden of Waves",
+       "Master of the Pearl Trident",
+       "Merfolk Looter",
+       "Merfolk Sovereign",
+       "Merrow Reejerey",
+       "Mist Dancer",
+       "Namor the Sub-Mariner",
+       "Seafloor Oracle",
+       "Svyelun of Sea and Sky",
+       "Talrand, Sky Summoner",
+       "Tempest Caller",
+       "Vodalian Arcanist",
+       "Volshe Tideturner"
+      ]
+     },
+     {
+      "hook": "Mill",
+      "payoffs": [
+       "Dig Through Time"
+      ],
+      "enablers": []
+     },
+     {
+      "hook": "PutIntoGraveyard",
+      "payoffs": [
+       "Dig Through Time"
+      ],
+      "enablers": [
+       "Commander's Sphere",
+       "Mind Stone",
+       "Vodalian Hexcatcher"
+      ]
+     },
+     {
+      "hook": "SpellMoved",
+      "payoffs": [
+       "Mission Briefing"
+      ],
+      "enablers": [
+       "Finale of Revelation"
+      ]
+     },
+     {
+      "hook": "Tap",
+      "payoffs": [
+       "Deeproot Pilgrimage"
+      ],
+      "enablers": [
+       "Merfolk Looter",
+       "Merfolk Sovereign",
+       "Vodalian Arcanist",
+       "Volshe Tideturner"
+      ]
+     },
+     {
+      "hook": "TapForMana",
+      "payoffs": [
+       "High Tide"
+      ],
+      "enablers": []
+     }
+    ],
+    "starved": [],
+    "engine": [
+     {
+      "name": "Namor the Sub-Mariner",
+      "partners": 35,
+      "degree": 40,
+      "roles": [],
+      "bucket": "commander"
+     },
+     {
+      "name": "Talrand, Sky Summoner",
+      "partners": 30,
+      "degree": 33,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Archmage of Runes",
+      "partners": 27,
+      "degree": 30,
+      "roles": [
+       "card draw",
+       "cost reducer"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Merrow Reejerey",
+      "partners": 27,
+      "degree": 36,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Vodalian Hexcatcher",
+      "partners": 21,
+      "degree": 30,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Chasm Skulker",
+      "partners": 18,
+      "degree": 21,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Deeproot Waters",
+      "partners": 18,
+      "degree": 23,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Emperor Mihail II",
+      "partners": 18,
+      "degree": 24,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Dig Through Time",
+      "partners": 10,
+      "degree": 13,
+      "roles": [
+       "card draw",
+       "card selection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Hullbreaker Horror",
+      "partners": 9,
+      "degree": 74,
+      "roles": [
+       "removal",
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Merfolk Looter",
+      "partners": 9,
+      "degree": 13,
+      "roles": [
+       "card selection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Censor",
+      "partners": 7,
+      "degree": 10,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Deeproot Pilgrimage",
+      "partners": 7,
+      "degree": 10,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Magic Damper",
+      "partners": 7,
+      "degree": 10,
+      "roles": [
+       "protection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Merfolk Sovereign",
+      "partners": 7,
+      "degree": 11,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Shore Up",
+      "partners": 7,
+      "degree": 10,
+      "roles": [
+       "protection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Vodalian Arcanist",
+      "partners": 7,
+      "degree": 11,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Volshe Tideturner",
+      "partners": 7,
+      "degree": 11,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Remand",
+      "partners": 6,
+      "degree": 9,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Disdainful Stroke",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Essence Capture",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Essence Scatter",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Finale of Revelation",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Frantic Search",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "card selection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Mission Briefing",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "card selection",
+       "recursion"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Seafloor Oracle",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Sinister Sabotage",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "card selection",
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Svyelun of Sea and Sky",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "card draw",
+       "protection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Twist Reality",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Wash Away",
+      "partners": 5,
+      "degree": 8,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Aquitect's Will",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Blink of an Eye",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Brineborn Cutthroat",
+      "partners": 4,
+      "degree": 69,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Consider",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "card selection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Coralhelm Commander",
+      "partners": 4,
+      "degree": 7,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Deep Analysis",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Harbinger of the Tides",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Kopala, Warden of Waves",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "protection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Master of the Pearl Trident",
+      "partners": 4,
+      "degree": 7,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Mist Dancer",
+      "partners": 4,
+      "degree": 8,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Negate",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "counterspell"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Opt",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "card selection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Tempest Caller",
+      "partners": 4,
+      "degree": 7,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Think Twice",
+      "partners": 4,
+      "degree": 7,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Aetherize",
+      "partners": 3,
+      "degree": 6,
+      "roles": [
+       "board wipe"
+      ],
+      "bucket": "utility",
+      "reason": "fills board wipe, so few links is fine"
+     },
+     {
+      "name": "Blatant Thievery",
+      "partners": 3,
+      "degree": 6,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "utility",
+      "reason": "fills removal, so few links is fine"
+     },
+     {
+      "name": "Commander's Sphere",
+      "partners": 3,
+      "degree": 6,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Evacuation",
+      "partners": 3,
+      "degree": 6,
+      "roles": [
+       "board wipe"
+      ],
+      "bucket": "utility",
+      "reason": "fills board wipe, so few links is fine"
+     },
+     {
+      "name": "High Tide",
+      "partners": 3,
+      "degree": 6,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Mind Stone",
+      "partners": 3,
+      "degree": 6,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Solve the Equation",
+      "partners": 3,
+      "degree": 6,
+      "roles": [
+       "tutor"
+      ],
+      "bucket": "utility",
+      "reason": "fills tutor, so few links is fine"
+     },
+     {
+      "name": "Curiosity",
+      "partners": 2,
+      "degree": 5,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     },
+     {
+      "name": "Imprisoned in the Moon",
+      "partners": 2,
+      "degree": 5,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "utility",
+      "reason": "fills removal, so few links is fine"
+     },
+     {
+      "name": "Ledger Shredder",
+      "partners": 2,
+      "degree": 5,
+      "roles": [
+       "card selection"
+      ],
+      "bucket": "utility",
+      "reason": "fills card selection, so few links is fine"
+     },
+     {
+      "name": "Leyline of Transformation",
+      "partners": 1,
+      "degree": 4,
+      "roles": [],
+      "bucket": "unread",
+      "reason": "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet"
+     },
+     {
+      "name": "Narset, Parter of Veils",
+      "partners": 1,
+      "degree": 4,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     },
+     {
+      "name": "Sky Diamond",
+      "partners": 1,
+      "degree": 4,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Sol Ring",
+      "partners": 1,
+      "degree": 4,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Thought Vessel",
+      "partners": 1,
+      "degree": 4,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Lightning Greaves",
+      "partners": 0,
+      "degree": 3,
+      "roles": [
+       "protection"
+      ],
+      "bucket": "utility",
+      "reason": "fills protection, so few links is fine"
+     },
+     {
+      "name": "Sapphire Medallion",
+      "partners": 0,
+      "degree": 3,
+      "roles": [
+       "cost reducer"
+      ],
+      "bucket": "utility",
+      "reason": "fills cost reducer, so few links is fine"
+     },
+     {
+      "name": "Slinn Voda, the Rising Deep",
+      "partners": 0,
+      "degree": 3,
+      "roles": [
+       "board wipe"
+      ],
+      "bucket": "utility",
+      "reason": "fills board wipe, so few links is fine"
+     },
+     {
+      "name": "Swiftfoot Boots",
+      "partners": 0,
+      "degree": 3,
+      "roles": [
+       "protection"
+      ],
+      "bucket": "utility",
+      "reason": "fills protection, so few links is fine"
+     },
+     {
+      "name": "The Reality Chip",
+      "partners": 0,
+      "degree": 3,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     }
+    ],
+    "lowPartners": 3,
+    "roles": {
+     "over": [
+      {
+       "role": "card draw",
+       "count": 12,
+       "target": 10,
+       "trims": [
+        {
+         "name": "The Reality Chip",
+         "partners": 0
+        },
+        {
+         "name": "Narset, Parter of Veils",
+         "partners": 1
+        },
+        {
+         "name": "Curiosity",
+         "partners": 2
+        },
+        {
+         "name": "Aquitect's Will",
+         "partners": 4
+        },
+        {
+         "name": "Deep Analysis",
+         "partners": 4
+        },
+        {
+         "name": "Think Twice",
+         "partners": 4
+        },
+        {
+         "name": "Finale of Revelation",
+         "partners": 5
+        },
+        {
+         "name": "Seafloor Oracle",
+         "partners": 5
+        },
+        {
+         "name": "Svyelun of Sea and Sky",
+         "partners": 5
+        },
+        {
+         "name": "Dig Through Time",
+         "partners": 10
+        },
+        {
+         "name": "Emperor Mihail II",
+         "partners": 18
+        },
+        {
+         "name": "Archmage of Runes",
+         "partners": 27
+        }
+       ]
+      },
+      {
+       "role": "card selection",
+       "count": 8,
+       "target": 6,
+       "trims": [
+        {
+         "name": "Ledger Shredder",
+         "partners": 2
+        },
+        {
+         "name": "Consider",
+         "partners": 4
+        },
+        {
+         "name": "Opt",
+         "partners": 4
+        },
+        {
+         "name": "Frantic Search",
+         "partners": 5
+        },
+        {
+         "name": "Mission Briefing",
+         "partners": 5
+        },
+        {
+         "name": "Sinister Sabotage",
+         "partners": 5
+        },
+        {
+         "name": "Merfolk Looter",
+         "partners": 9
+        },
+        {
+         "name": "Dig Through Time",
+         "partners": 10
+        }
+       ]
+      },
+      {
+       "role": "counterspell",
+       "count": 11,
+       "target": 6,
+       "trims": [
+        {
+         "name": "Negate",
+         "partners": 4
+        },
+        {
+         "name": "Disdainful Stroke",
+         "partners": 5
+        },
+        {
+         "name": "Essence Capture",
+         "partners": 5
+        },
+        {
+         "name": "Essence Scatter",
+         "partners": 5
+        },
+        {
+         "name": "Sinister Sabotage",
+         "partners": 5
+        },
+        {
+         "name": "Twist Reality",
+         "partners": 5
+        },
+        {
+         "name": "Wash Away",
+         "partners": 5
+        },
+        {
+         "name": "Remand",
+         "partners": 6
+        },
+        {
+         "name": "Censor",
+         "partners": 7
+        },
+        {
+         "name": "Hullbreaker Horror",
+         "partners": 9
+        },
+        {
+         "name": "Vodalian Hexcatcher",
+         "partners": 21
+        }
+       ]
+      },
+      {
+       "role": "protection",
+       "count": 6,
+       "target": 4,
+       "trims": [
+        {
+         "name": "Lightning Greaves",
+         "partners": 0
+        },
+        {
+         "name": "Swiftfoot Boots",
+         "partners": 0
+        },
+        {
+         "name": "Kopala, Warden of Waves",
+         "partners": 4
+        },
+        {
+         "name": "Svyelun of Sea and Sky",
+         "partners": 5
+        },
+        {
+         "name": "Magic Damper",
+         "partners": 7
+        },
+        {
+         "name": "Shore Up",
+         "partners": 7
+        }
+       ]
+      }
+     ],
+     "under": [
+      {
+       "role": "ramp",
+       "count": 8,
+       "target": 10
+      },
+      {
+       "role": "removal",
+       "count": 5,
+       "target": 8
+      },
+      {
+       "role": "tutor",
+       "count": 1,
+       "target": 2
+      },
+      {
+       "role": "recursion",
+       "count": 1,
+       "target": 2
+      }
+     ]
+    }
+   }
+  },
+  "teysa": {
+   "roleCounts": {
+    "ramp": 9,
+    "card draw": 11,
+    "card selection": 1,
+    "removal": 6,
+    "board wipe": 2,
+    "counterspell": 0,
+    "protection": 3,
+    "tutor": 1,
+    "recursion": 6,
+    "cost reducer": 0
+   },
+   "unresolved": [],
+   "diagnosis": {
+    "commanders": [
+     "Teysa Karlov"
+    ],
+    "colorIdentity": [
+     "W",
+     "B"
+    ],
+    "mechanics": [
+     {
+      "hook": "Dies",
+      "payoffs": [
+       "Athreos, God of Passage",
+       "Bastion of Remembrance",
+       "Blade of the Bloodchief",
+       "Blood Artist",
+       "Butcher of Malakir",
+       "Cordial Vampire",
+       "Cruel Celebrant",
+       "Elas il-Kor, Sadistic Pilgrim",
+       "Elenda, the Dusk Rose",
+       "Falkenrath Noble",
+       "Funeral Room // Awakening Hall",
+       "High-Society Hunter",
+       "Pitiless Plunderer",
+       "Skullclamp",
+       "Syr Konrad, the Grim",
+       "Vein Ripper"
+      ],
+      "enablers": [
+       "Ashnod's Altar",
+       "Viscera Seer",
+       "Yahenni, Undying Partisan"
+      ]
+     },
+     {
+      "hook": "ETB",
+      "payoffs": [
+       "Ashnod's Altar",
+       "Elas il-Kor, Sadistic Pilgrim",
+       "Kambal, Profiteering Mayor",
+       "Viscera Seer",
+       "Welcoming Vampire",
+       "Yahenni, Undying Partisan"
+      ],
+      "enablers": [
+       "Athreos, God of Passage",
+       "Bastion of Remembrance",
+       "Blood Artist",
+       "Bloodline Keeper // Lord of Lineage",
+       "Bloodthirsty Conqueror",
+       "Butcher of Malakir",
+       "Clavileño, First of the Blessed",
+       "Cordial Vampire",
+       "Cruel Celebrant",
+       "Crypt Ghast",
+       "Doomed Traveler",
+       "Elas il-Kor, Sadistic Pilgrim",
+       "Elenda's Hierophant",
+       "Elenda, the Dusk Rose",
+       "Falkenrath Noble",
+       "Funeral Room // Awakening Hall",
+       "Hallowed Spiritkeeper",
+       "High-Society Hunter",
+       "Kambal, Profiteering Mayor",
+       "March of the Canonized",
+       "Martyr of Dusk",
+       "Ophiomancer",
+       "Pitiless Plunderer",
+       "Promise of Aclazotz // Foul Rebirth",
+       "Reanimate",
+       "Reassembling Skeleton",
+       "Sangromancer",
+       "Shadow Summoning",
+       "Sorin of House Markov // Sorin, Ravenous Neonate",
+       "Syr Konrad, the Grim",
+       "Teysa Karlov",
+       "Twilight Prophet",
+       "Unholy Annex // Ritual Chamber",
+       "Valgavoth, Terror Eater",
+       "Vein Ripper",
+       "Veinwitch Coven",
+       "Victimize",
+       "Viscera Seer",
+       "Vito, Thorn of the Dusk Rose",
+       "Welcoming Vampire",
+       "Yahenni, Undying Partisan"
+      ]
+     },
+     {
+      "hook": "LifeGain",
+      "payoffs": [
+       "Elenda's Hierophant",
+       "Sanguine Bond",
+       "Veinwitch Coven",
+       "Vito, Thorn of the Dusk Rose"
+      ],
+      "enablers": [
+       "Bastion of Remembrance",
+       "Blood Artist",
+       "Bloodthirsty Conqueror",
+       "Cruel Celebrant",
+       "Crypt Ghast",
+       "Elas il-Kor, Sadistic Pilgrim",
+       "Elenda, the Dusk Rose",
+       "Exsanguinate",
+       "Falkenrath Noble",
+       "Funeral Room // Awakening Hall",
+       "Kambal, Profiteering Mayor",
+       "Sangromancer",
+       "Scoured Barrens",
+       "Sorin of House Markov // Sorin, Ravenous Neonate",
+       "Swords to Plowshares",
+       "Twilight Prophet",
+       "Unholy Annex // Ritual Chamber",
+       "Valgavoth, Terror Eater",
+       "Vein Ripper"
+      ]
+     },
+     {
+      "hook": "Discard",
+      "payoffs": [
+       "Sangromancer",
+       "Syr Konrad, the Grim"
+      ],
+      "enablers": []
+     },
+     {
+      "hook": "SpellCast",
+      "payoffs": [
+       "Crypt Ghast",
+       "Sorin of House Markov // Sorin, Ravenous Neonate"
+      ],
+      "enablers": [
+       "Anguished Unmaking",
+       "Ashnod's Altar",
+       "Athreos, God of Passage",
+       "Austere Command",
+       "Bastion of Remembrance",
+       "Blade of the Bloodchief",
+       "Blood Artist",
+       "Bloodline Keeper // Lord of Lineage",
+       "Bloodthirsty Conqueror",
+       "Butcher of Malakir",
+       "Clavileño, First of the Blessed",
+       "Cordial Vampire",
+       "Cruel Celebrant",
+       "Crypt Ghast",
+       "Dark Ritual",
+       "Dark Tutelage",
+       "Doomed Traveler",
+       "Elas il-Kor, Sadistic Pilgrim",
+       "Elenda's Hierophant",
+       "Elenda, the Dusk Rose",
+       "Exsanguinate",
+       "Fake Your Own Death",
+       "Falkenrath Noble",
+       "Flare of Fortitude",
+       "Funeral Room // Awakening Hall",
+       "Hallowed Spiritkeeper",
+       "High-Society Hunter",
+       "Insatiable Avarice",
+       "Kambal, Profiteering Mayor",
+       "March of the Canonized",
+       "Martyr of Dusk",
+       "Mind Stone",
+       "Ophiomancer",
+       "Orzhov Signet",
+       "Path to Exile",
+       "Phyrexian Arena",
+       "Pitiless Plunderer",
+       "Promise of Aclazotz // Foul Rebirth",
+       "Reanimate",
+       "Reassembling Skeleton",
+       "Sangromancer",
+       "Sanguine Bond",
+       "Shadow Summoning",
+       "Skullclamp",
+       "Sol Ring",
+       "Sorin of House Markov // Sorin, Ravenous Neonate",
+       "Swiftfoot Boots",
+       "Swords to Plowshares",
+       "Syr Konrad, the Grim",
+       "Talisman of Hierarchy",
+       "Teysa Karlov",
+       "Toxic Deluge",
+       "Twilight Prophet",
+       "Unholy Annex // Ritual Chamber",
+       "Valgavoth, Terror Eater",
+       "Vein Ripper",
+       "Veinwitch Coven",
+       "Victimize",
+       "Viscera Seer",
+       "Vito, Thorn of the Dusk Rose",
+       "Welcoming Vampire",
+       "Worn Powerstone",
+       "Yahenni, Undying Partisan"
+      ]
+     },
+     {
+      "hook": "ExileToGraveyard",
+      "payoffs": [
+       "Syr Konrad, the Grim"
+      ],
+      "enablers": []
+     },
+     {
+      "hook": "LifeLoss",
+      "payoffs": [
+       "Bloodthirsty Conqueror"
+      ],
+      "enablers": [
+       "Bastion of Remembrance",
+       "Blood Artist",
+       "Cruel Celebrant",
+       "Crypt Ghast",
+       "Elas il-Kor, Sadistic Pilgrim",
+       "Exsanguinate",
+       "Falkenrath Noble",
+       "Funeral Room // Awakening Hall",
+       "Insatiable Avarice",
+       "Kambal, Profiteering Mayor",
+       "Sanguine Bond",
+       "Sorin of House Markov // Sorin, Ravenous Neonate",
+       "Twilight Prophet",
+       "Unholy Annex // Ritual Chamber",
+       "Vein Ripper",
+       "Vito, Thorn of the Dusk Rose"
+      ]
+     },
+     {
+      "hook": "Mill",
+      "payoffs": [
+       "Syr Konrad, the Grim"
+      ],
+      "enablers": []
+     },
+     {
+      "hook": "PutIntoGraveyard",
+      "payoffs": [
+       "Syr Konrad, the Grim"
+      ],
+      "enablers": [
+       "Ashnod's Altar",
+       "Viscera Seer",
+       "Yahenni, Undying Partisan"
+      ]
+     },
+     {
+      "hook": "SpellMoved",
+      "payoffs": [
+       "Syr Konrad, the Grim"
+      ],
+      "enablers": []
+     },
+     {
+      "hook": "TapForMana",
+      "payoffs": [
+       "Crypt Ghast"
+      ],
+      "enablers": []
+     },
+     {
+      "hook": "ZoneChange",
+      "payoffs": [
+       "Syr Konrad, the Grim"
+      ],
+      "enablers": []
+     }
+    ],
+    "starved": [
+     {
+      "hook": "Dies",
+      "payoffs": [
+       "Athreos, God of Passage",
+       "Bastion of Remembrance",
+       "Blade of the Bloodchief",
+       "Blood Artist",
+       "Butcher of Malakir",
+       "Cordial Vampire",
+       "Cruel Celebrant",
+       "Elas il-Kor, Sadistic Pilgrim",
+       "Elenda, the Dusk Rose",
+       "Falkenrath Noble",
+       "Funeral Room // Awakening Hall",
+       "High-Society Hunter",
+       "Pitiless Plunderer",
+       "Skullclamp",
+       "Syr Konrad, the Grim",
+       "Vein Ripper"
+      ],
+      "enablers": [
+       "Ashnod's Altar",
+       "Viscera Seer",
+       "Yahenni, Undying Partisan"
+      ],
+      "ratio": "16:3",
+      "candidates": [
+       {
+        "name": "Phyrexian Tower",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Bolas's Citadel",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Phyrexian Altar",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Warren Soultrader",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "High Market",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Carrion Feeder",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Altar of Dementia",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Ayara, First of Locthwain",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Yawgmoth, Thran Physician",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Umbral Collar Zealot",
+        "feeds": [
+         "Athreos, God of Passage",
+         "Bastion of Remembrance",
+         "Blade of the Bloodchief",
+         "Blood Artist",
+         "Butcher of Malakir",
+         "Cordial Vampire",
+         "Cruel Celebrant",
+         "Elas il-Kor, Sadistic Pilgrim",
+         "Elenda, the Dusk Rose",
+         "Falkenrath Noble",
+         "Funeral Room // Awakening Hall",
+         "High-Society Hunter",
+         "Pitiless Plunderer",
+         "Skullclamp",
+         "Syr Konrad, the Grim",
+         "Vein Ripper"
+        ],
+        "repeatable": true
+       }
+      ]
+     },
+     {
+      "hook": "Discard",
+      "payoffs": [
+       "Sangromancer",
+       "Syr Konrad, the Grim"
+      ],
+      "enablers": [],
+      "ratio": "2:0",
+      "candidates": [
+       {
+        "name": "Earsplitting Rats",
+        "feeds": [
+         "Sangromancer",
+         "Syr Konrad, the Grim"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Ghost-Lit Stalker",
+        "feeds": [
+         "Sangromancer",
+         "Syr Konrad, the Grim"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Greel, Mind Raker",
+        "feeds": [
+         "Sangromancer",
+         "Syr Konrad, the Grim"
+        ],
+        "repeatable": true
+       },
+       {
+        "name": "Malboro",
+        "feeds": [
+         "Sangromancer",
+         "Syr Konrad, the Grim"
+        ],
+        "repeatable": false
+       },
+       {
+        "name": "Abandon Hope",
+        "feeds": [
+         "Sangromancer",
+         "Syr Konrad, the Grim"
+        ],
+        "repeatable": false
+       }
+      ]
+     }
+    ],
+    "engine": [
+     {
+      "name": "Yahenni, Undying Partisan",
+      "partners": 31,
+      "degree": 79,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Ashnod's Altar",
+      "partners": 30,
+      "degree": 75,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Viscera Seer",
+      "partners": 30,
+      "degree": 78,
+      "roles": [
+       "card selection"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Elas il-Kor, Sadistic Pilgrim",
+      "partners": 26,
+      "degree": 67,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Elenda's Hierophant",
+      "partners": 24,
+      "degree": 36,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Kambal, Profiteering Mayor",
+      "partners": 24,
+      "degree": 38,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Austere Command",
+      "partners": 23,
+      "degree": 26,
+      "roles": [
+       "board wipe"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Bloodthirsty Conqueror",
+      "partners": 19,
+      "degree": 28,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Sanguine Bond",
+      "partners": 19,
+      "degree": 22,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Toxic Deluge",
+      "partners": 19,
+      "degree": 21,
+      "roles": [
+       "board wipe"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Veinwitch Coven",
+      "partners": 19,
+      "degree": 26,
+      "roles": [
+       "card draw",
+       "recursion"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Vito, Thorn of the Dusk Rose",
+      "partners": 19,
+      "degree": 27,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Welcoming Vampire",
+      "partners": 17,
+      "degree": 57,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Bastion of Remembrance",
+      "partners": 13,
+      "degree": 18,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Elenda, the Dusk Rose",
+      "partners": 12,
+      "degree": 22,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Funeral Room // Awakening Hall",
+      "partners": 12,
+      "degree": 17,
+      "roles": [
+       "recursion"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Unholy Annex // Ritual Chamber",
+      "partners": 12,
+      "degree": 14,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Blood Artist",
+      "partners": 10,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Cruel Celebrant",
+      "partners": 10,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Falkenrath Noble",
+      "partners": 10,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Vein Ripper",
+      "partners": 10,
+      "degree": 17,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Doomed Traveler",
+      "partners": 7,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Hallowed Spiritkeeper",
+      "partners": 7,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Martyr of Dusk",
+      "partners": 7,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Sorin of House Markov // Sorin, Ravenous Neonate",
+      "partners": 7,
+      "degree": 75,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Valgavoth, Terror Eater",
+      "partners": 7,
+      "degree": 14,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Bloodline Keeper // Lord of Lineage",
+      "partners": 6,
+      "degree": 13,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Crypt Ghast",
+      "partners": 6,
+      "degree": 74,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Exsanguinate",
+      "partners": 6,
+      "degree": 8,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "March of the Canonized",
+      "partners": 6,
+      "degree": 8,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Ophiomancer",
+      "partners": 6,
+      "degree": 13,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Promise of Aclazotz // Foul Rebirth",
+      "partners": 6,
+      "degree": 14,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Sangromancer",
+      "partners": 6,
+      "degree": 13,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Shadow Summoning",
+      "partners": 6,
+      "degree": 8,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Twilight Prophet",
+      "partners": 6,
+      "degree": 13,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Butcher of Malakir",
+      "partners": 5,
+      "degree": 12,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Pitiless Plunderer",
+      "partners": 5,
+      "degree": 12,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Reanimate",
+      "partners": 5,
+      "degree": 7,
+      "roles": [
+       "recursion"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Reassembling Skeleton",
+      "partners": 5,
+      "degree": 12,
+      "roles": [
+       "recursion"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Swords to Plowshares",
+      "partners": 5,
+      "degree": 7,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Victimize",
+      "partners": 5,
+      "degree": 7,
+      "roles": [
+       "recursion"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Athreos, God of Passage",
+      "partners": 4,
+      "degree": 11,
+      "roles": [
+       "card draw",
+       "recursion"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw and recursion, so few links is fine"
+     },
+     {
+      "name": "Blade of the Bloodchief",
+      "partners": 4,
+      "degree": 6,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "Cordial Vampire",
+      "partners": 4,
+      "degree": 11,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "High-Society Hunter",
+      "partners": 4,
+      "degree": 11,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     },
+     {
+      "name": "Skullclamp",
+      "partners": 4,
+      "degree": 6,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     },
+     {
+      "name": "Syr Konrad, the Grim",
+      "partners": 4,
+      "degree": 15,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "Insatiable Avarice",
+      "partners": 1,
+      "degree": 3,
+      "roles": [
+       "card draw",
+       "tutor"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw and tutor, so few links is fine"
+     },
+     {
+      "name": "Anguished Unmaking",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "utility",
+      "reason": "fills removal, so few links is fine"
+     },
+     {
+      "name": "Clavileño, First of the Blessed",
+      "partners": 0,
+      "degree": 7,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     },
+     {
+      "name": "Dark Ritual",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "utility",
+      "reason": "only makes mana: a ramp slot, not a plan card"
+     },
+     {
+      "name": "Dark Tutelage",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     },
+     {
+      "name": "Fake Your Own Death",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "ramp",
+       "protection"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp and protection, so few links is fine"
+     },
+     {
+      "name": "Flare of Fortitude",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "protection"
+      ],
+      "bucket": "utility",
+      "reason": "fills protection, so few links is fine"
+     },
+     {
+      "name": "Mind Stone",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Orzhov Signet",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Path to Exile",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "utility",
+      "reason": "fills removal, so few links is fine"
+     },
+     {
+      "name": "Phyrexian Arena",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "utility",
+      "reason": "fills card draw, so few links is fine"
+     },
+     {
+      "name": "Sol Ring",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Swiftfoot Boots",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "protection"
+      ],
+      "bucket": "utility",
+      "reason": "fills protection, so few links is fine"
+     },
+     {
+      "name": "Talisman of Hierarchy",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     },
+     {
+      "name": "Teysa Karlov",
+      "partners": 0,
+      "degree": 7,
+      "roles": [],
+      "bucket": "commander"
+     },
+     {
+      "name": "Worn Powerstone",
+      "partners": 0,
+      "degree": 2,
+      "roles": [
+       "ramp"
+      ],
+      "bucket": "utility",
+      "reason": "fills ramp, so few links is fine"
+     }
+    ],
+    "lowPartners": 4,
+    "roles": {
+     "over": [
+      {
+       "role": "card draw",
+       "count": 11,
+       "target": 10,
+       "trims": [
+        {
+         "name": "Clavileño, First of the Blessed",
+         "partners": 0
+        },
+        {
+         "name": "Dark Tutelage",
+         "partners": 0
+        },
+        {
+         "name": "Phyrexian Arena",
+         "partners": 0
+        },
+        {
+         "name": "Insatiable Avarice",
+         "partners": 1
+        },
+        {
+         "name": "Athreos, God of Passage",
+         "partners": 4
+        },
+        {
+         "name": "High-Society Hunter",
+         "partners": 4
+        },
+        {
+         "name": "Skullclamp",
+         "partners": 4
+        },
+        {
+         "name": "Twilight Prophet",
+         "partners": 6
+        },
+        {
+         "name": "Unholy Annex // Ritual Chamber",
+         "partners": 12
+        },
+        {
+         "name": "Welcoming Vampire",
+         "partners": 17
+        },
+        {
+         "name": "Veinwitch Coven",
+         "partners": 19
+        }
+       ]
+      },
+      {
+       "role": "recursion",
+       "count": 6,
+       "target": 2,
+       "trims": [
+        {
+         "name": "Athreos, God of Passage",
+         "partners": 4
+        },
+        {
+         "name": "Reanimate",
+         "partners": 5
+        },
+        {
+         "name": "Reassembling Skeleton",
+         "partners": 5
+        },
+        {
+         "name": "Victimize",
+         "partners": 5
+        },
+        {
+         "name": "Funeral Room // Awakening Hall",
+         "partners": 12
+        },
+        {
+         "name": "Veinwitch Coven",
+         "partners": 19
+        }
+       ]
+      }
+     ],
+     "under": [
+      {
+       "role": "ramp",
+       "count": 9,
+       "target": 10
+      },
+      {
+       "role": "card selection",
+       "count": 1,
+       "target": 6
+      },
+      {
+       "role": "removal",
+       "count": 6,
+       "target": 8
+      },
+      {
+       "role": "board wipe",
+       "count": 2,
+       "target": 3
+      },
+      {
+       "role": "counterspell",
+       "count": 0,
+       "target": 6
+      },
+      {
+       "role": "protection",
+       "count": 3,
+       "target": 4
+      },
+      {
+       "role": "tutor",
+       "count": 1,
+       "target": 2
+      },
+      {
+       "role": "cost reducer",
+       "count": 0,
+       "target": 2
+      }
+     ]
+    }
+   }
+  },
+  "krenko": {
+   "roleCounts": {
+    "ramp": 0,
+    "card draw": 1,
+    "card selection": 0,
+    "removal": 4,
+    "board wipe": 0,
+    "counterspell": 0,
+    "protection": 0,
+    "tutor": 0,
+    "recursion": 0,
+    "cost reducer": 0
+   },
+   "unresolved": [],
+   "diagnosis": {
+    "commanders": [
+     "Krenko, Mob Boss"
+    ],
+    "colorIdentity": [
+     "R"
+    ],
+    "mechanics": [
+     {
+      "hook": "ETB",
+      "payoffs": [
+       "Goblin Bombardment",
+       "Goblin Warrens",
+       "Impact Tremors",
+       "Pashalik Mons",
+       "Siege-Gang Commander"
+      ],
+      "enablers": [
+       "Beetleback Chief",
+       "Goblin Instigator",
+       "Goblin Warrens",
+       "Gray Ogre",
+       "Krenko, Mob Boss",
+       "Mogg War Marshal",
+       "Pashalik Mons",
+       "Siege-Gang Commander"
+      ]
+     },
+     {
+      "hook": "Dies",
+      "payoffs": [
+       "Pashalik Mons",
+       "Skullclamp"
+      ],
+      "enablers": [
+       "Goblin Bombardment",
+       "Goblin Warrens",
+       "Pashalik Mons",
+       "Siege-Gang Commander"
+      ]
+     }
+    ],
+    "starved": [],
+    "engine": [
+     {
+      "name": "Goblin Warrens",
+      "partners": 9,
+      "degree": 19,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Pashalik Mons",
+      "partners": 9,
+      "degree": 24,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Siege-Gang Commander",
+      "partners": 9,
+      "degree": 22,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Goblin Bombardment",
+      "partners": 8,
+      "degree": 17,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Impact Tremors",
+      "partners": 7,
+      "degree": 14,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Beetleback Chief",
+      "partners": 5,
+      "degree": 10,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Goblin Instigator",
+      "partners": 5,
+      "degree": 10,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Krenko, Mob Boss",
+      "partners": 5,
+      "degree": 10,
+      "roles": [],
+      "bucket": "commander"
+     },
+     {
+      "name": "Mogg War Marshal",
+      "partners": 5,
+      "degree": 14,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Skullclamp",
+      "partners": 4,
+      "degree": 4,
+      "roles": [
+       "card draw"
+      ],
+      "bucket": "core"
+     },
+     {
+      "name": "Fervor",
+      "partners": 0,
+      "degree": 0,
+      "roles": [],
+      "bucket": "unread",
+      "reason": "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet"
+     },
+     {
+      "name": "Glorious Anthem",
+      "partners": 0,
+      "degree": 0,
+      "roles": [],
+      "bucket": "unread",
+      "reason": "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet"
+     },
+     {
+      "name": "Gray Ogre",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "cut",
+      "reason": "its 2 links all come from cards that care about any spell or any creature, so any card would make them, and it fills none of the roles"
+     },
+     {
+      "name": "Lightning Bolt",
+      "partners": 0,
+      "degree": 0,
+      "roles": [
+       "removal"
+      ],
+      "bucket": "utility",
+      "reason": "fills removal, so few links is fine"
+     },
+     {
+      "name": "Mass Hysteria",
+      "partners": 0,
+      "degree": 0,
+      "roles": [],
+      "bucket": "unread",
+      "reason": "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet"
+     }
+    ],
+    "lowPartners": 0,
+    "roles": {
+     "over": [],
+     "under": [
+      {
+       "role": "ramp",
+       "count": 0,
+       "target": 10
+      },
+      {
+       "role": "card draw",
+       "count": 1,
+       "target": 10
+      },
+      {
+       "role": "card selection",
+       "count": 0,
+       "target": 6
+      },
+      {
+       "role": "removal",
+       "count": 4,
+       "target": 8
+      },
+      {
+       "role": "board wipe",
+       "count": 0,
+       "target": 3
+      },
+      {
+       "role": "counterspell",
+       "count": 0,
+       "target": 6
+      },
+      {
+       "role": "protection",
+       "count": 0,
+       "target": 4
+      },
+      {
+       "role": "tutor",
+       "count": 0,
+       "target": 2
+      },
+      {
+       "role": "recursion",
+       "count": 0,
+       "target": 2
+      },
+      {
+       "role": "cost reducer",
+       "count": 0,
+       "target": 2
+      }
+     ]
+    }
+   }
+  },
+  "small": {
+   "roleCounts": null,
+   "unresolved": [],
+   "diagnosis": {
+    "commanders": [],
+    "colorIdentity": [
+     "U",
+     "B"
+    ],
+    "mechanics": [
+     {
+      "hook": "Dies",
+      "payoffs": [
+       "Blood Artist",
+       "Zulaport Cutthroat"
+      ],
+      "enablers": [
+       "Carrion Feeder",
+       "Viscera Seer"
+      ]
+     },
+     {
+      "hook": "ETB",
+      "payoffs": [
+       "Carrion Feeder",
+       "Viscera Seer"
+      ],
+      "enablers": [
+       "Blood Artist",
+       "Carrion Feeder",
+       "Viscera Seer",
+       "Zulaport Cutthroat"
+      ]
+     },
+     {
+      "hook": "LifeLoss",
+      "payoffs": [
+       "Mindcrank"
+      ],
+      "enablers": [
+       "Blood Artist",
+       "Zulaport Cutthroat"
+      ]
+     }
+    ],
+    "starved": [],
+    "engine": [
+     {
+      "name": "Blood Artist",
+      "partners": 4,
+      "degree": 6,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Zulaport Cutthroat",
+      "partners": 4,
+      "degree": 6,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Carrion Feeder",
+      "partners": 2,
+      "degree": 6,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Mindcrank",
+      "partners": 2,
+      "degree": 2,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Toxic Deluge",
+      "partners": 2,
+      "degree": 2,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Viscera Seer",
+      "partners": 2,
+      "degree": 6,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Opt",
+      "partners": 0,
+      "degree": 0,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Rhystic Study",
+      "partners": 0,
+      "degree": 0,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     }
+    ],
+    "lowPartners": 0
+   }
+  },
+  "teysaNoRoles": {
+   "roleCounts": null,
+   "unresolved": [],
+   "diagnosis": {
+    "commanders": [
+     "Teysa Karlov"
+    ],
+    "colorIdentity": [
+     "W",
+     "B"
+    ],
+    "engine": [
+     {
+      "name": "Yahenni, Undying Partisan",
+      "partners": 31,
+      "degree": 79,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Ashnod's Altar",
+      "partners": 30,
+      "degree": 75,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Viscera Seer",
+      "partners": 30,
+      "degree": 78,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Elas il-Kor, Sadistic Pilgrim",
+      "partners": 26,
+      "degree": 67,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Elenda's Hierophant",
+      "partners": 24,
+      "degree": 36,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Kambal, Profiteering Mayor",
+      "partners": 24,
+      "degree": 38,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Austere Command",
+      "partners": 23,
+      "degree": 26,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Bloodthirsty Conqueror",
+      "partners": 19,
+      "degree": 28,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Sanguine Bond",
+      "partners": 19,
+      "degree": 22,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Toxic Deluge",
+      "partners": 19,
+      "degree": 21,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Veinwitch Coven",
+      "partners": 19,
+      "degree": 26,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Vito, Thorn of the Dusk Rose",
+      "partners": 19,
+      "degree": 27,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Welcoming Vampire",
+      "partners": 17,
+      "degree": 57,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Bastion of Remembrance",
+      "partners": 13,
+      "degree": 18,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Elenda, the Dusk Rose",
+      "partners": 12,
+      "degree": 22,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Funeral Room // Awakening Hall",
+      "partners": 12,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Unholy Annex // Ritual Chamber",
+      "partners": 12,
+      "degree": 14,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Blood Artist",
+      "partners": 10,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Cruel Celebrant",
+      "partners": 10,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Falkenrath Noble",
+      "partners": 10,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Vein Ripper",
+      "partners": 10,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Doomed Traveler",
+      "partners": 7,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Hallowed Spiritkeeper",
+      "partners": 7,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Martyr of Dusk",
+      "partners": 7,
+      "degree": 17,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Sorin of House Markov // Sorin, Ravenous Neonate",
+      "partners": 7,
+      "degree": 75,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Valgavoth, Terror Eater",
+      "partners": 7,
+      "degree": 14,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Bloodline Keeper // Lord of Lineage",
+      "partners": 6,
+      "degree": 13,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Crypt Ghast",
+      "partners": 6,
+      "degree": 74,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Exsanguinate",
+      "partners": 6,
+      "degree": 8,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "March of the Canonized",
+      "partners": 6,
+      "degree": 8,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Ophiomancer",
+      "partners": 6,
+      "degree": 13,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Promise of Aclazotz // Foul Rebirth",
+      "partners": 6,
+      "degree": 14,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Sangromancer",
+      "partners": 6,
+      "degree": 13,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Shadow Summoning",
+      "partners": 6,
+      "degree": 8,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Twilight Prophet",
+      "partners": 6,
+      "degree": 13,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Butcher of Malakir",
+      "partners": 5,
+      "degree": 12,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Pitiless Plunderer",
+      "partners": 5,
+      "degree": 12,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Reanimate",
+      "partners": 5,
+      "degree": 7,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Reassembling Skeleton",
+      "partners": 5,
+      "degree": 12,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Swords to Plowshares",
+      "partners": 5,
+      "degree": 7,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Victimize",
+      "partners": 5,
+      "degree": 7,
+      "roles": [],
+      "bucket": "engine"
+     },
+     {
+      "name": "Athreos, God of Passage",
+      "partners": 4,
+      "degree": 11,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "Blade of the Bloodchief",
+      "partners": 4,
+      "degree": 6,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "Cordial Vampire",
+      "partners": 4,
+      "degree": 11,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "High-Society Hunter",
+      "partners": 4,
+      "degree": 11,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "Skullclamp",
+      "partners": 4,
+      "degree": 6,
+      "roles": [],
+      "bucket": "unread",
+      "reason": "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet"
+     },
+     {
+      "name": "Syr Konrad, the Grim",
+      "partners": 4,
+      "degree": 15,
+      "roles": [],
+      "bucket": "starved",
+      "reason": "waits on a creature dying, which only 3 cards in the deck make happen"
+     },
+     {
+      "name": "Insatiable Avarice",
+      "partners": 1,
+      "degree": 3,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Anguished Unmaking",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Clavileño, First of the Blessed",
+      "partners": 0,
+      "degree": 7,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Dark Ritual",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "utility",
+      "reason": "only makes mana: a ramp slot, not a plan card"
+     },
+     {
+      "name": "Dark Tutelage",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Fake Your Own Death",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Flare of Fortitude",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unread",
+      "reason": "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet"
+     },
+     {
+      "name": "Mind Stone",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Orzhov Signet",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "utility",
+      "reason": "only makes mana: a ramp slot, not a plan card"
+     },
+     {
+      "name": "Path to Exile",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Phyrexian Arena",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Sol Ring",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "utility",
+      "reason": "only makes mana: a ramp slot, not a plan card"
+     },
+     {
+      "name": "Swiftfoot Boots",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unread",
+      "reason": "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet"
+     },
+     {
+      "name": "Talisman of Hierarchy",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     },
+     {
+      "name": "Teysa Karlov",
+      "partners": 0,
+      "degree": 7,
+      "roles": [],
+      "bucket": "commander"
+     },
+     {
+      "name": "Worn Powerstone",
+      "partners": 0,
+      "degree": 2,
+      "roles": [],
+      "bucket": "unjudged",
+      "reason": "loosely linked, but there is no role data, so it may fill a role this run cannot see"
+     }
+    ],
+    "lowPartners": 4
+   }
+  },
+  "teysaAll": {
+   "about": "every in-color card outside the deck feeding at least two payoffs of each starved hook, as [name, payoffs fed, repeatable 1/0], in the graph order",
+   "starved": [
+    {
+     "hook": "Dies",
+     "candidates": [
+      ["Phyrexian Tower", 16, 1],
+      ["Bolas's Citadel", 16, 1],
+      ["Phyrexian Altar", 16, 1],
+      ["Warren Soultrader", 16, 1],
+      ["High Market", 16, 1],
+      ["Carrion Feeder", 16, 1],
+      ["Altar of Dementia", 16, 1],
+      ["Ayara, First of Locthwain", 16, 1],
+      ["Yawgmoth, Thran Physician", 16, 1],
+      ["Umbral Collar Zealot", 16, 1],
+      ["Staff of Compleation", 16, 1],
+      ["Priest of Forgotten Gods", 16, 1],
+      ["Vampiric Rites", 16, 1],
+      ["Westvale Abbey // Ormendahl, Profane Prince", 16, 1],
+      ["Woe Strider", 16, 1],
+      ["Susur Secundi, Void Altar", 16, 1],
+      ["Bartolomé del Presidio", 16, 1],
+      ["Lazotep Quarry", 16, 1],
+      ["Razaketh, the Foulblooded", 16, 1],
+      ["Trading Post", 16, 1],
+      ["Chthonian Nightmare", 16, 1],
+      ["Ghoulcaller Gisa", 16, 1],
+      ["Indulgent Aristocrat", 16, 1],
+      ["Master of Dark Rites", 16, 1],
+      ["Syr Ginger, the Meal Ender", 16, 1],
+      ["Piper of the Swarm", 16, 1],
+      ["Witch's Oven", 16, 1],
+      ["Marrow-Gnawer", 16, 1],
+      ["Etchings of the Chosen", 16, 1],
+      ["Chittering Witch", 16, 1],
+      ["Fain, the Broker", 16, 1],
+      ["Dockside Chef", 16, 1],
+      ["Blasting Station", 16, 1],
+      ["Shadowheart, Dark Justiciar", 16, 1],
+      ["Commissar Severina Raine", 16, 1],
+      ["Preston, the Vanisher", 16, 1],
+      ["Tarrian's Journal // The Tomb of Aclazotz", 16, 1],
+      ["Elesh Norn // The Argent Etchings", 16, 1],
+      ["Spawning Pit", 16, 1],
+      ["Erebos, Bleak-Hearted", 16, 1],
+      ["Teysa, Orzhov Scion", 16, 1],
+      ["Retrofitter Foundry", 16, 1],
+      ["Baron Bertram Graywater", 16, 1],
+      ["The Golden Throne", 16, 1],
+      ["Gollum, Patient Plotter", 16, 1],
+      ["Pyre of Heroes", 16, 1],
+      ["Attrition", 16, 1],
+      ["Illuminor Szeras", 16, 1],
+      ["Dimir House Guard", 16, 1],
+      ["Tomb Tyrant", 16, 1],
+      ["Ayli, Eternal Pilgrim", 16, 1],
+      ["Soldevi Adnate", 16, 1],
+      ["Sling-Gang Lieutenant", 16, 1],
+      ["Fanatical Devotion", 16, 1],
+      ["Sidisi, Regent of the Mire", 16, 1],
+      ["Whisper, Blood Liturgist", 16, 1],
+      ["Jirina, Dauntless General", 16, 1],
+      ["Kalitas, Traitor of Ghet", 16, 1],
+      ["Ravenous Amulet", 16, 1],
+      ["Skullport Merchant", 16, 1],
+      ["Claws of Gix", 16, 1],
+      ["Denethor, Ruling Steward", 16, 1],
+      ["Rat King, Verminister", 16, 1],
+      ["Shilgengar, Sire of Famine", 16, 1],
+      ["Culling Dais", 16, 1],
+      ["Aron, Benalia's Ruin", 16, 1],
+      ["Plague Reaver", 16, 1],
+      ["Martyr's Cause", 16, 1],
+      ["Eradicator Valkyrie", 16, 1],
+      ["Miren, the Moaning Well", 16, 1],
+      ["Hidden Stockpile", 16, 1],
+      ["Fallen Ideal", 16, 1],
+      ["Bloodflow Connoisseur", 16, 1],
+      ["Arguel's Blood Fast // Temple of Aclazotz", 16, 1],
+      ["Scarecrone", 16, 1],
+      ["Deathspore Thallid", 16, 1],
+      ["Bloodthrone Vampire", 16, 1],
+      ["Lena, Selfless Champion", 16, 1],
+      ["Nantuko Husk", 16, 1],
+      ["Elder Arthur Maxson", 16, 1],
+      ["Old Flitterfang", 16, 1],
+      ["Grafted Butcher", 16, 1],
+      ["Gríma Wormtongue", 16, 1],
+      ["Jinxed Idol", 16, 1],
+      ["Ruthless Knave", 16, 1],
+      ["Lord of the Forsaken", 16, 1],
+      ["Hell's Caretaker", 16, 1],
+      ["ED-E, Lonesome Eyebot", 16, 1],
+      ["Knight-Captain of Eos", 16, 1],
+      ["Sivriss, Nightmare Speaker", 16, 1],
+      ["Eldrazi Ravager", 16, 1],
+      ["Bontu the Glorified", 16, 1],
+      ["Fleshtaker", 16, 1],
+      ["Krav, the Unredeemed", 16, 1],
+      ["Witch's Cauldron", 16, 1],
+      ["Citizen's Crowbar", 16, 1],
+      ["General Kudro of Drannith", 16, 1],
+      ["Zahur, Glory's Past", 16, 1],
+      ["Hostile Hostel // Creeping Inn", 16, 1],
+      ["Shadowborn Apostle", 16, 1],
+      ["Relic Vial", 16, 1],
+      ["Catapult Fodder // Catapult Captain", 16, 1],
+      ["Transmogrant Altar", 16, 1],
+      ["Ahriman", 16, 1],
+      ["Flesh-Eater Imp", 16, 1],
+      ["Pentavus", 16, 1],
+      ["Acolyte of Aclazotz", 16, 1],
+      ["Shadow-Rite Priest", 16, 1],
+      ["Sadistic Hypnotist", 16, 1],
+      ["Bloated Processor", 16, 1],
+      ["Stronghold Assassin", 16, 1],
+      ["Dark Privilege", 16, 1],
+      ["Starlit Sanctum", 16, 1],
+      ["Devouring Swarm", 16, 1],
+      ["Cartel Aristocrat", 16, 1],
+      ["Compleated Huntmaster", 16, 1],
+      ["Corpse Harvester", 16, 1],
+      ["Disciple of Griselbrand", 16, 1],
+      ["Voldaren Pariah // Abolisher of Bloodlines", 16, 1],
+      ["Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark", 16, 1],
+      ["Despotic Scepter", 16, 1],
+      ["Spirit Bonds", 16, 1],
+      ["Popular Egotist", 16, 1],
+      ["Springjack Pasture", 16, 1],
+      ["Lampad of Death's Vigil", 16, 1],
+      ["Undercity Informer", 16, 1],
+      ["Hellcarver Demon", 16, 1],
+      ["Phyrexian Ghoul", 16, 1],
+      ["Jinxed Ring", 16, 1],
+      ["Jerren, Corrupted Bishop // Ormendahl, the Corrupter", 16, 1],
+      ["Sanguine Spy", 16, 1],
+      ["Thallid Soothsayer", 16, 1],
+      ["Phyrexian Plaguelord", 16, 1],
+      ["Hungry Ghoul", 16, 1],
+      ["June, Bounty Hunter", 16, 1],
+      ["Chittering Skitterling", 16, 1],
+      ["Vermin Gorger", 16, 1],
+      ["Skyclave Shadowcat", 16, 1],
+      ["Champion of Stray Souls", 16, 1],
+      ["Sloppity Bilepiper", 16, 1],
+      ["Skeletal Vampire", 16, 1],
+      ["Helm of Possession", 16, 1],
+      ["Cirith Ungol Patrol", 16, 1],
+      ["Titan Hunter", 16, 1],
+      ["Spark Reaper", 16, 1],
+      ["Dross Hopper", 16, 1],
+      ["Bushmeat Poacher", 16, 1],
+      ["Gate to Phyrexia", 16, 1],
+      ["Carnage Altar", 16, 1],
+      ["Mind Slash", 16, 1],
+      ["Great Hall of Starnheim", 16, 1],
+      ["Nezumi Bone-Reader", 16, 1],
+      ["Dreg Recycler", 16, 1],
+      ["Vish Kal, Blood Arbiter", 16, 1],
+      ["Thopter Squadron", 16, 1],
+      ["Marsh Flitter", 16, 1],
+      ["Deconstruction Hammer", 16, 1],
+      ["Boneyard Desecrator", 16, 1],
+      ["Bubbling Cauldron", 16, 1],
+      ["Ecstatic Awakener // Awoken Demon", 16, 1],
+      ["Hammerhead, Maggia Boss", 16, 1],
+      ["Diamond Valley", 16, 1],
+      ["Thoughtpicker Witch", 16, 1],
+      ["Grim Reaper's Scythe", 16, 1],
+      ["Fiend of the Shadows", 16, 1],
+      ["Eater of Hope", 16, 1],
+      ["Bound by Moonsilver", 16, 1],
+      ["Dreadmalkin", 16, 1],
+      ["Kagemaro, First to Suffer", 16, 1],
+      ["Legion Vanguard", 16, 1],
+      ["Lunarch Mantle", 16, 1],
+      ["He Who Hungers", 16, 1],
+      ["Thallid Omnivore", 16, 1],
+      ["Blood Bairn", 16, 1],
+      ["Vito's Inquisitor", 16, 1],
+      ["Mold Folk", 16, 1],
+      ["Pitiless Pontiff", 16, 1],
+      ["Soulreaper of Mogis", 16, 1],
+      ["Ghost Council of Orzhova", 16, 1],
+      ["Defiant Salvager", 16, 1],
+      ["Phyrexian Vault", 16, 1],
+      ["Gollum the Abandoned", 16, 1],
+      ["Mycologist", 16, 1],
+      ["Pallid Mycoderm", 16, 1],
+      ["Plagued Rusalka", 16, 1],
+      ["Nita, Forum Conciliator", 16, 1],
+      ["Fallen Angel", 16, 1],
+      ["Animal Boneyard", 16, 1],
+      ["Bloodsoaked Altar", 16, 1],
+      ["Pious Evangel // Wayward Disciple", 16, 1],
+      ["Corpse Blockade", 16, 1],
+      ["Infernal Tribute", 16, 1],
+      ["Edgar, Ancient Bloodlord", 16, 1],
+      ["Gibbering Barricade", 16, 1],
+      ["Flesh Carver", 16, 1],
+      ["Gnawing Zombie", 16, 1],
+      ["Deathless Behemoth", 16, 1],
+      ["Ninja's Kunai", 16, 1],
+      ["Kingpin's Enforcers", 16, 1],
+      ["Falkenrath Torturer", 16, 1],
+      ["Devouring Strossus", 16, 1],
+      ["Martyred Rusalka", 16, 1],
+      ["Blood-Chin Fanatic", 16, 1],
+      ["Vampire Aristocrat", 16, 1],
+      ["Malevolent Awakening", 16, 1],
+      ["Thalia's Geistcaller", 16, 1],
+      ["Maw of the Obzedat", 16, 1],
+      ["Unburied Earthcarver", 16, 1],
+      ["Cabal Archon", 16, 1],
+      ["Blazing Torch", 16, 1],
+      ["Loot, the Anomaly", 16, 1],
+      ["Kheru Bloodsucker", 16, 1],
+      ["Gutless Ghoul", 16, 1],
+      ["Weirding Shaman", 16, 1],
+      ["Defiant Vanguard", 16, 1],
+      ["Cutthroat Centurion", 16, 1],
+      ["Consecrated by Blood", 16, 1],
+      ["Vanguard of the Rose", 16, 1],
+      ["Qarsi High Priest", 16, 1],
+      ["Circle of Despair", 16, 1],
+      ["Knight of the Last Breath", 16, 1],
+      ["Dark Supplicant", 16, 1],
+      ["Sepulcher Ghoul", 16, 1],
+      ["Life Chisel", 16, 1],
+      ["Extricator of Sin // Extricator of Flesh", 16, 1],
+      ["Unrooted Ancestor", 16, 1],
+      ["Novice Dissector", 16, 1],
+      ["Ravenous Demon // Archdemon of Greed", 16, 1],
+      ["Rats of Rath", 16, 1],
+      ["Voracious Null", 16, 1],
+      ["Skirsdag Flayer", 16, 1],
+      ["Blood Host", 16, 1],
+      ["Fell Shepherd", 16, 1],
+      ["Corpse Traders", 16, 1],
+      ["Sword of the Ages", 16, 1],
+      ["Skull Catapult", 16, 1],
+      ["Goblin Turncoat", 16, 1],
+      ["Facevaulter", 16, 1],
+      ["Agency Coroner", 16, 1],
+      ["Fodder Cannon", 16, 1],
+      ["Necrosavant", 16, 1],
+      ["Malevolent Noble", 16, 1],
+      ["Cabal Patriarch", 16, 1],
+      ["Krovikan Horror", 16, 1],
+      ["Doom Cannon", 16, 1],
+      ["Undercity Necrolisk", 16, 1],
+      ["Dai Li Censor", 16, 1],
+      ["Sheltered Valley", 16, 1],
+      ["Sanguine Praetor", 16, 1],
+      ["Deathmark Prelate", 16, 1],
+      ["Angel's Herald", 16, 1],
+      ["Caregiver", 16, 1],
+      ["Vampire Warlord", 16, 1],
+      ["Reaper of Flight Moonsilver", 16, 1],
+      ["Phyrexian Broodlings", 16, 1],
+      ["Demon's Herald", 16, 1],
+      ["Cateran Overlord", 16, 1],
+      ["Phyrexian Warhorse", 16, 1],
+      ["Ravenous Harpy", 16, 1],
+      ["Blighted Shaman", 16, 1],
+      ["Ebon Praetor", 16, 1],
+      ["Eye of Yawgmoth", 16, 1],
+      ["Urborg Panther", 16, 1],
+      ["Skeletal Kathari", 16, 1],
+      ["Ragamuffyn", 16, 1],
+      ["Nim Shambler", 16, 1],
+      ["Corrupted Harvester", 16, 1],
+      ["Black Carriage", 16, 1],
+      ["Earthblighter", 16, 1],
+      ["Tourach's Gate", 16, 1],
+      ["Wake of Vultures", 16, 1],
+      ["Deadly Dispute", 16, 0],
+      ["Village Rites", 16, 0],
+      ["Diabolic Intent", 16, 0],
+      ["Braids, Arisen Nightmare", 16, 0],
+      ["Dauthi Voidwalker", 16, 0],
+      ["Culling the Weak", 16, 0],
+      ["Burnished Hart", 16, 0],
+      ["Selfless Spirit", 16, 0],
+      ["Corrupted Conviction", 16, 0],
+      ["Ranger-Captain of Eos", 16, 0],
+      ["Beseech the Mirror", 16, 0],
+      ["Boromir, Warden of the Tower", 16, 0],
+      ["Plumb the Forbidden", 16, 0],
+      ["Cathar Commando", 16, 0],
+      ["Disciple of Bolas", 16, 0],
+      ["Shriekmaw", 16, 0],
+      ["Gingerbrute", 16, 0],
+      ["Solitude", 16, 0],
+      ["Nasty End", 16, 0],
+      ["Ainok Strike Leader", 16, 0],
+      ["Duty Beyond Death", 16, 0],
+      ["Emrakul, the World Anew", 16, 0],
+      ["Priest of Fell Rites", 16, 0],
+      ["Blood Pet", 16, 0],
+      ["Zack Fair", 16, 0],
+      ["Sacrifice", 16, 0],
+      ["Alseid of Life's Bounty", 16, 0],
+      ["Sidisi, Undead Vizier", 16, 0],
+      ["Spectacular Spider-Man", 16, 0],
+      ["Rottenmouth Viper", 16, 0],
+      ["Selfless Savior", 16, 0],
+      ["Endrek Sahr, Master Breeder", 16, 0],
+      ["Hope of Ghirapur", 16, 0],
+      ["Costly Plunder", 16, 0],
+      ["Frontline Medic", 16, 0],
+      ["Reveillark", 16, 0],
+      ["Papalymo Totolymo", 16, 0],
+      ["Reckoner's Bargain", 16, 0],
+      ["Eviscerator's Insight", 16, 0],
+      ["Rite of Oblivion", 16, 0],
+      ["Doomed Necromancer", 16, 0],
+      ["Children of Korlis", 16, 0],
+      ["Dauntless Dismantler", 16, 0],
+      ["Hakoda, Selfless Commander", 16, 0],
+      ["Altar's Reap", 16, 0],
+      ["Fanatical Offering", 16, 0],
+      ["Apprentice Necromancer", 16, 0],
+      ["My Precious // Allure of Power", 16, 0],
+      ["Troop of Ponies", 16, 0],
+      ["Necrotic Sliver", 16, 0],
+      ["Remorseful Cleric", 16, 0],
+      ["Kami of False Hope", 16, 0],
+      ["Final Vengeance", 16, 0],
+      ["Coretapper", 16, 0],
+      ["Worthy Cost", 16, 0],
+      ["Benevolent Bodyguard", 16, 0],
+      ["Bone Splinters", 16, 0],
+      ["Fell Stinger", 16, 0],
+      ["Rot-Curse Rakshasa", 16, 0],
+      ["Grief", 16, 0],
+      ["Vile Mutilator", 16, 0],
+      ["Crabomination", 16, 0],
+      ["Werefox Bodyguard", 16, 0],
+      ["Bulwark Ox", 16, 0],
+      ["Bounty Agent", 16, 0],
+      ["Selfless Samurai", 16, 0],
+      ["Blood for Bones", 16, 0],
+      ["Westfold Rider", 16, 0],
+      ["Valgavoth's Faithful", 16, 0],
+      ["Dusk Legion Sergeant", 16, 0],
+      ["Back for Seconds", 16, 0],
+      ["Rite of Consumption", 16, 0],
+      ["Rowan's Grim Search", 16, 0],
+      ["Colonel Autumn", 16, 0],
+      ["Resolute Watchdog", 16, 0],
+      ["Morbid Curiosity", 16, 0],
+      ["Basal Sliver", 16, 0],
+      ["Vampire Hexmage", 16, 0],
+      ["Curious Farm Animals", 16, 0],
+      ["Earth Kingdom Protectors", 16, 0],
+      ["Scorn-Blade Berserker", 16, 0],
+      ["Myr Scrapling", 16, 0],
+      ["Phyrexian Dreadnought", 16, 0],
+      ["Fell Beast of Mordor", 16, 0],
+      ["Kataki, War's Wage", 16, 0],
+      ["Arbiter of Woe", 16, 0],
+      ["Dauntless Bodyguard", 16, 0],
+      ["Felidar Cub", 16, 0],
+      ["Loyal Retainers", 16, 0],
+      ["Wave of Rats", 16, 0],
+      ["Draco", 16, 0],
+      ["Bronze Bombshell", 16, 0],
+      ["Argentum Masticore", 16, 0],
+      ["Illicit Shipment", 16, 0],
+      ["Phyrexian Negator", 16, 0],
+      ["Desperate Plea", 16, 0],
+      ["Survey Mechan", 16, 0],
+      ["Eliminate the Competition", 16, 0],
+      ["Dimension X Pizzasaur", 16, 0],
+      ["Diamond Lion", 16, 0],
+      ["Silversmote Ghoul", 16, 0],
+      ["Wild-Field Scarecrow", 16, 0],
+      ["Fume Spitter", 16, 0],
+      ["Banewhip Punisher", 16, 0],
+      ["Nettle Guard", 16, 0],
+      ["Treacherous Greed", 16, 0],
+      ["Egon, God of Death // Throne of Death", 16, 0],
+      ["Myriad Construct", 16, 0],
+      ["Tenacious Underdog", 16, 0],
+      ["Embrace Oblivion", 16, 0],
+      ["Desecration Elemental", 16, 0],
+      ["Stirge", 16, 0],
+      ["Wall of Limbs", 16, 0],
+      ["Scrounge for Eternity", 16, 0],
+      ["Cut of the Profits", 16, 0],
+      ["Torgaar, Famine Incarnate", 16, 0],
+      ["Ginger, Queen of Sweets", 16, 0],
+      ["Fleshwrither", 16, 0],
+      ["Magus of the Mirror", 16, 0],
+      ["Basal Thrull", 16, 0],
+      ["Angelic Purge", 16, 0],
+      ["Rescue from the Underworld", 16, 0],
+      ["Stalactite Stalker", 16, 0],
+      ["Reno and Rude", 16, 0],
+      ["Bankrupt in Blood", 16, 0],
+      ["Bonecaller Cleric", 16, 0],
+      ["Infernal Offering", 16, 0],
+      ["Heap Doll", 16, 0],
+      ["Shattered Acolyte", 16, 0],
+      ["Severed Strands", 16, 0],
+      ["Emptiness", 16, 0],
+      ["Cliffside Rescuer", 16, 0],
+      ["Overeager Apprentice", 16, 0],
+      ["Honored Knight-Captain", 16, 0],
+      ["Dreadfeast Demon", 16, 0],
+      ["Ronom Unicorn", 16, 0],
+      ["Aetherjacket", 16, 0],
+      ["Tragedy Feaster", 16, 0],
+      ["Restoration Specialist", 16, 0],
+      ["Goremand", 16, 0],
+      ["Kami of Ancient Law", 16, 0],
+      ["Night Clubber", 16, 0],
+      ["Priest of the Haunted Edge", 16, 0],
+      ["Phyrexian Devourer", 16, 0],
+      ["Lychguard", 16, 0],
+      ["Bottle Gnomes", 16, 0],
+      ["Scapegoat", 16, 0],
+      ["Demon of Catastrophes", 16, 0],
+      ["Icatian Moneychanger", 16, 0],
+      ["Blood Divination", 16, 0],
+      ["Dora Milaje Elite", 16, 0],
+      ["Martyr of Sands", 16, 0],
+      ["Salvager of Ruin", 16, 0],
+      ["Wispmare", 16, 0],
+      ["Ollenbock Escort", 16, 0],
+      ["Peacekeeper", 16, 0],
+      ["Lieutenant Kirtar", 16, 0],
+      ["Inspired Insurgent", 16, 0],
+      ["Lethal Throwdown", 16, 0],
+      ["Dig Up the Body", 16, 0],
+      ["Night Incarnate", 16, 0],
+      ["Carrion", 16, 0],
+      ["Candy Grapple", 16, 0],
+      ["Tragic Poet", 16, 0],
+      ["Pilfering Imp", 16, 0],
+      ["Rot-Tide Gargantua", 16, 0],
+      ["Blood Vassal", 16, 0],
+      ["Devouring Greed", 16, 0],
+      ["Death Cultist", 16, 0],
+      ["Vesperlark", 16, 0],
+      ["Xander's Pact", 16, 0],
+      ["Blight Keeper", 16, 0],
+      ["Tormod's Cryptkeeper", 16, 0],
+      ["Soulcoil Viper", 16, 0],
+      ["Magus of the Tabernacle", 16, 0],
+      ["Yukora, the Prisoner", 16, 0],
+      ["Phylactery Lich", 16, 0],
+      ["Kuro, Pitlord", 16, 0],
+      ["Hellish Sideswipe", 16, 0],
+      ["Adipose Offspring", 16, 0],
+      ["Xiahou Dun, the One-Eyed", 16, 0],
+      ["Liliana's Steward", 16, 0],
+      ["Ritual of the Machine", 16, 0],
+      ["Volatile Rig", 16, 0],
+      ["Capashen Unicorn", 16, 0],
+      ["Augur of Skulls", 16, 0],
+      ["Patron of the Nezumi", 16, 0],
+      ["Salvage Scout", 16, 0],
+      ["High Fae Negotiator", 16, 0],
+      ["Mindlash Sliver", 16, 0],
+      ["Magus of the Balance", 16, 0],
+      ["Morkrut Necropod", 16, 0],
+      ["Merciless Resolve", 16, 0],
+      ["Skulltap", 16, 0],
+      ["Garza's Assassin", 16, 0],
+      ["Priest of the Wakening Sun", 16, 0],
+      ["Archon's Glory", 16, 0],
+      ["Powerstone Fracture", 16, 0],
+      ["Distended Mindbender", 16, 0],
+      ["Patron of the Kitsune", 16, 0],
+      ["Keening Apparition", 16, 0],
+      ["Digsite Conservator", 16, 0],
+      ["Kithkin Spellduster", 16, 0],
+      ["Copper Gnomes", 16, 0],
+      ["Mindleech Ghoul", 16, 0],
+      ["Meadowboon", 16, 0],
+      ["Offalsnout", 16, 0],
+      ["Augur il-Vec", 16, 0],
+      ["Vigilant Martyr", 16, 0],
+      ["Fodder Launch", 16, 0],
+      ["Mutual Destruction", 16, 0],
+      ["Silverchase Fox", 16, 0],
+      ["Feaster of Fools", 16, 0],
+      ["Ultimate Nullification", 16, 0],
+      ["Lurebound Scarecrow", 16, 0],
+      ["Dauthi Jackal", 16, 0],
+      ["Soul of Migration", 16, 0],
+      ["Glint Hawk", 16, 0],
+      ["Abundant Maw", 16, 0],
+      ["Woebringer Demon", 16, 0],
+      ["Phyrexian Tribute", 16, 0],
+      ["Bile Urchin", 16, 0],
+      ["Vulturous Aven", 16, 0],
+      ["Worthy Cause", 16, 0],
+      ["Moriok Replica", 16, 0],
+      ["Graf Reaver", 16, 0],
+      ["Nova Cleric", 16, 0],
+      ["Encampment Keeper", 16, 0],
+      ["Ichorid", 16, 0],
+      ["Brain Weevil", 16, 0],
+      ["Corpse Hauler", 16, 0],
+      ["Silumgar Scavenger", 16, 0],
+      ["Tormented Thoughts", 16, 0],
+      ["Loathsome Curator", 16, 0],
+      ["Kellan's Lightblades", 16, 0],
+      ["Girder Goons", 16, 0],
+      ["Burrenton Forge-Tender", 16, 0],
+      ["Kaervek's Spite", 16, 0],
+      ["Crumbling Colossus", 16, 0],
+      ["Start // Finish", 16, 0],
+      ["Death Pit Offering", 16, 0],
+      ["Daraja Griffin", 16, 0],
+      ["Qarsi Sadist", 16, 0],
+      ["Rakshasa Gravecaller", 16, 0],
+      ["Lightbringer", 16, 0],
+      ["Lightning-Core Excavator", 16, 0],
+      ["Unyaro Griffin", 16, 0],
+      ["Lawbringer", 16, 0],
+      ["Pus Kami", 16, 0],
+      ["Grisly Sigil", 16, 0],
+      ["Major Teroh", 16, 0],
+      ["Shield Mate", 16, 0],
+      ["Mournwhelk", 16, 0],
+      ["Wall of Corpses", 16, 0],
+      ["Masticore", 16, 0],
+      ["Moonlit Strider", 16, 0],
+      ["Tar Fiend", 16, 0],
+      ["Ruthless Disposal", 16, 0],
+      ["Crypt Creeper", 16, 0],
+      ["Dawnfluke", 16, 0],
+      ["Auriok Replica", 16, 0],
+      ["Remove Enchantments", 16, 0],
+      ["Final Strike", 16, 0],
+      ["Nezumi Shadow-Watcher", 16, 0],
+      ["Gangrenous Zombies", 16, 0],
+      ["Join the Maestros", 16, 0],
+      ["Cabal Trainee", 16, 0],
+      ["Circling Vultures", 16, 0],
+      ["Launch Party", 16, 0],
+      ["Vebulid", 16, 0],
+      ["Mindwhip Sliver", 16, 0],
+      ["Minister of Pain", 16, 0],
+      ["Living Library", 16, 0],
+      ["Caprichrome", 16, 0],
+      ["Selfless Cathar", 16, 0],
+      ["Tendrils of Despair", 16, 0],
+      ["Crovax the Cursed", 16, 0],
+      ["Armor Thrull", 16, 0],
+      ["Razormane Masticore", 16, 0],
+      ["Pteron Ghost", 16, 0],
+      ["Odunos River Trawler", 16, 0],
+      ["Thrull Surgeon", 16, 0],
+      ["Morgue Thrull", 16, 0],
+      ["Flesh Allergy", 16, 0],
+      ["Resistance Fighter", 16, 0],
+      ["Tethered Griffin", 16, 0],
+      ["Stoic Ephemera", 16, 0],
+      ["Scuttling Death", 16, 0],
+      ["Brass Secretary", 16, 0],
+      ["Dementia Bat", 16, 0],
+      ["Aurora Eidolon", 16, 0],
+      ["Mind Extraction", 16, 0],
+      ["Ichor Explosion", 16, 0],
+      ["Keldon Battlewagon", 16, 0],
+      ["Runaway Carriage", 16, 0],
+      ["Divebomber Griffin", 16, 0],
+      ["Entropic Eidolon", 16, 0],
+      ["Boggart Loggers", 16, 0],
+      ["Barrow Ghoul", 16, 0],
+      ["Ticking Gnomes", 16, 0],
+      ["Cosmic Horror", 16, 0],
+      ["Endemic Plague", 16, 0],
+      ["Vicious Betrayal", 16, 0],
+      ["Death Bomb", 16, 0],
+      ["Sacred Guide", 16, 0],
+      ["Yawgmoth Demon", 16, 0],
+      ["Arrogant Bloodlord", 16, 0],
+      ["Phyrexian War Beast", 16, 0],
+      ["Silumgar Butcher", 16, 0],
+      ["Gore Vassal", 16, 0],
+      ["Boneshard Slasher", 16, 0],
+      ["Call for Blood", 16, 0],
+      ["Phyrexian Debaser", 16, 0],
+      ["Pit Spawn", 16, 0],
+      ["Mine Bearer", 16, 0],
+      ["Hidden Horror", 16, 0],
+      ["Dedicated Martyr", 16, 0],
+      ["Stenchskipper", 16, 0],
+      ["Sanctum Guardian", 16, 0],
+      ["Disciple of Tevesh Szat", 16, 0],
+      ["Molten-Tail Masticore", 16, 0],
+      ["Haazda Shield Mate", 16, 0],
+      ["Phyrexian Defiler", 16, 0],
+      ["Wicked Reward", 16, 0],
+      ["Gustrider Exuberant", 16, 0],
+      ["Plague Dogs", 16, 0],
+      ["Junk Golem", 16, 0],
+      ["Straw Golem", 16, 0],
+      ["Samite Censer-Bearer", 16, 0],
+      ["Mercenary Knight", 16, 0],
+      ["Prowling Pangolin", 16, 0],
+      ["Bog Elemental", 16, 0],
+      ["Iron-Heart Chimera", 16, 0],
+      ["Lead-Belly Chimera", 16, 0],
+      ["Tin-Wing Chimera", 16, 0],
+      ["Brass-Talon Chimera", 16, 0],
+      ["Bog Serpent", 16, 0],
+      ["Skulking Knight", 16, 0],
+      ["Skulking Ghost", 16, 0],
+      ["Urborg Mindsucker", 16, 0],
+      ["Phyrexian Denouncer", 16, 0],
+      ["Haazda Exonerator", 16, 0],
+      ["Limestone Golem", 16, 0],
+      ["Martyr of Bones", 16, 0],
+      ["Pilgrim of Virtue", 16, 0],
+      ["Sewerdreg", 16, 0],
+      ["Servant of Volrath", 16, 0],
+      ["Molting Harpy", 16, 0],
+      ["Dive Bomber", 16, 0],
+      ["Synod Centurion", 16, 0],
+      ["Skittering Skirge", 16, 0],
+      ["Drekavac", 16, 0],
+      ["Rotting Giant", 16, 0],
+      ["Pilgrim of Justice", 16, 0],
+      ["Expendable Troops", 16, 0],
+      ["Reclusive Wight", 16, 0],
+      ["Mold Demon", 16, 0],
+      ["Slinking Skirge", 16, 0],
+      ["Soldier Replica", 16, 0],
+      ["Pit Raptor", 16, 0],
+      ["Ravenous Vampire", 16, 0],
+      ["Famished Ghoul", 16, 0],
+      ["Nim Replica", 16, 0],
+      ["Skittering Horror", 16, 0],
+      ["Skulking Fugitive", 16, 0],
+      ["Foul Spirit", 16, 0],
+      ["Whipstitched Zombie", 16, 0],
+      ["Treacherous Vampire", 16, 0],
+      ["Junún Efreet", 16, 0],
+      ["Cursed Monstrosity", 16, 0],
+      ["Tar Pit Warrior", 16, 0],
+      ["Skittering Monstrosity", 16, 0],
+      ["Fountainport", 15, 1],
+      ["Hardened Tactician", 15, 1],
+      ["Arcade Cabinet", 15, 1],
+      ["Rat King, Pale Piper", 15, 1],
+      ["Prosperity Tycoon", 15, 1],
+      ["Diamond Kaleidoscope", 15, 1],
+      ["Caribou Range", 15, 1],
+      ["Tevesh Szat, Doom of Fools", 2, 0]
+     ]
+    },
+    {
+     "hook": "Discard",
+     "candidates": [
+      ["Earsplitting Rats", 2, 1],
+      ["Ghost-Lit Stalker", 2, 1],
+      ["Greel, Mind Raker", 2, 1],
+      ["Malboro", 2, 0],
+      ["Abandon Hope", 2, 0]
+     ]
+    }
+   ]
+  }
+ }
+}

@@ -235,12 +235,21 @@ export type PlanContext = { plan: PlanEcho; fit: PlanScorer };
 
 const themeName = (p: PlanProfile) => (p.source.kind === "strategy" ? p.source.theme : p.source.commander);
 
+/** A resolved plan as the tools echo it back. */
+export function planEcho(resolved: ResolvedPlan): PlanEcho {
+  return { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) };
+}
+
+/** A card's strongest Tagger tags (its Tagger Card vector, strongest first), at most n; none for a card with no kept tags. */
+export function strongestTags(store: Store, cardId: number, n: number): string[] {
+  const row = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(cardId) as { vector: Uint8Array } | null;
+  const { labels } = tagData(store);
+  return (row ? unpack(row.vector) : []).slice(0, n).map(([t]) => labels.get(t) ?? String(t));
+}
+
 /** The plan context for a tool call, or null when the call carries no plan. Throws the plan's ToolInputErrors. */
 export function planContext(store: Store, commander: string, plan: PlanInput | undefined): PlanContext | null {
   if (plan === undefined) return null;
   const resolved = resolvePlan(store, { commander, plan });
-  return {
-    plan: { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) },
-    fit: planScorer(store, resolved),
-  };
+  return { plan: planEcho(resolved), fit: planScorer(store, resolved) };
 }

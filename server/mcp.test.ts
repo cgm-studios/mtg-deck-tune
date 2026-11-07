@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { loadSpace, normName as normNameOf, parseDecklist, resolveName } from "./deck-pool";
 import { cardDetails, deckStats, findCards, findTags, neighbors, openStore, ToolInputError, type FindCardsInput, type FoundCard, type Store } from "./deck-tools";
 import { acceptSwap, LABELS_PATH, rejectSwap, swapCandidates } from "./swap-tools";
+import { diagnose } from "./diagnose";
 import { createDeckServer } from "./mcp";
 import { loadRoleIndex, roleSheet } from "./roles";
 
@@ -302,6 +303,12 @@ const DATA_STRINGS: Record<string, string> = {
   "deck_stats.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
   "deck_stats.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
   "deck_stats.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "diagnose.commander": "a card name, resolved in TypeScript (exact or front face only)",
+  "diagnose.deckFile": "a file path, read from disk",
+  "diagnose.decklist": "decklist text, parsed in TypeScript",
+  "diagnose.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "diagnose.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "diagnose.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
   "swap_candidates.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
   "swap_candidates.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
   "swap_candidates.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
@@ -327,9 +334,9 @@ const DATA_STRINGS: Record<string, string> = {
 };
 const SQLISH = /sql|query|where|statement|clause|expr|order_?by|raw/i;
 
-test("no raw sql: the MCP has exactly its nine tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
+test("no raw sql: the MCP has exactly its ten tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
   const { tools } = await client.listTools();
-  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
   const strings: string[] = [];
   const walk = (s: JsonSchema & { enum?: unknown[]; propertyNames?: JsonSchema; additionalProperties?: JsonSchema | boolean }, path: string) => {
     if (s.type === "string" && !s.enum) strings.push(path);
@@ -381,7 +388,7 @@ test("stdio smoke: .mcp.json registers mtg-deck, and the registered command answ
   await stdio.connect(new StdioClientTransport({ command: entry.command, args: entry.args, cwd: root, stderr: "pipe" }));
   try {
     const { tools } = await stdio.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
     const res = await stdio.callTool({ name: "find_cards", arguments: { colorIdentity: "U", types: ["Legendary", "Creature"], subtypes: ["Merfolk"], keywords: ["Flying"], manaValue: { max: 3 } } });
     expect(res.isError).toBeFalsy();
     const out = res.structuredContent as { cards: { name: string }[] };
@@ -929,3 +936,28 @@ test("verdict labels: every accept and every reject appends one label row with i
     rmSync(dir, { recursive: true });
   }
 });
+
+// ---------- diagnose (DT-6.4) ----------
+
+test("ISC-41: the diagnose tool's input schema takes the plan (themes, priority cards, themes to avoid), and a call without it is refused", async () => {
+  const schema = (await toolSchema("diagnose")) as JsonSchema & { required?: string[] };
+  expect(schema.required).toEqual(expect.arrayContaining(["commander", "plan"]));
+  const plan = schema.properties!.plan as JsonSchema & { anyOf?: unknown };
+  expect(Object.keys(plan.properties ?? {}).sort()).toEqual(["avoid", "priorities", "themes"]);
+  for (const k of ["avoid", "priorities", "themes"]) expect(plan.properties![k].type).toBe("array");
+  const noPlan = await client.callTool({ name: "diagnose", arguments: { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt" } });
+  expect(noPlan.isError).toBe(true);
+  const emptyPlan = await client.callTool({ name: "diagnose", arguments: { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: {} } });
+  expect(emptyPlan.isError).toBe(true);
+  expect((emptyPlan.content as { text: string }[])[0].text).toMatch(/at least one theme or one priority card/);
+});
+
+test("diagnose over MCP: the tool answers with the same result as the function; an unknown theme comes back as a tool error naming close themes", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: NAMOR_PLAN };
+  const res = await client.callTool({ name: "diagnose", arguments: args });
+  expect(res.isError).toBeFalsy();
+  expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(diagnose(store, args))));
+  const bad = await client.callTool({ name: "diagnose", arguments: { ...args, plan: { themes: ["Spellslingr"] } } });
+  expect(bad.isError).toBe(true);
+  expect((bad.content as { text: string }[])[0].text).toContain("Spellslinger");
+}, 60_000);

@@ -183,3 +183,59 @@ describe("the ported graph reads only the store", () => {
     }
   });
 });
+
+describe("the same deck and plan give the same diagnosis (ISC-45.1)", () => {
+  // A diagnose call is a few hundred milliseconds warm (the graph index, theme profiles and theme role shares are built
+  // once per store), so the property runs over a small pool: random subsets of the Namor and Teysa lists plus a few
+  // random in-color cards, under random plans drawn from five usable themes, each deck's own cards as priorities, and
+  // themes to avoid. Each run diagnoses the deck twice on one store, once more with its lines shuffled, and once on a
+  // second store opened cold (its own index and caches), and all four must agree finding for finding.
+  test("ISC-45.1: for random decks and plans, repeated, reordered and cold-store diagnoses are identical", async () => {
+    const fc = (await import("fast-check")).default;
+    const { diagnose } = await import("./diagnose");
+    const cold = openStore(DB_PATH);
+    try {
+      const lists = (["namor.txt", "teysa.txt"] as const).map((f) => readFileSync(new URL(`../fixtures/${f}`, import.meta.url), "utf8").split("\n").map((l) => l.trim()).filter((l) => /^\d+ /.test(l)));
+      const commanders = ["Namor the Sub-Mariner", "Teysa Karlov"];
+      const extras = commanders.map((c) => {
+        const ci = new Set(store.space.cards.get(store.names.find((n) => n.name === c)!.oracleId)!.ci);
+        return [...store.space.cards.values()].filter((x) => !x.land && x.ci.every((k) => ci.has(k))).map((x) => x.name).sort().slice(0, 4000);
+      });
+      const THEMES = ["Aristocrats", "Tokens", "Spellslinger", "+1/+1 Counters", "Voltron"];
+      const arb = fc.integer({ min: 0, max: 1 }).chain((k) => fc.record({
+        k: fc.constant(k),
+        lines: fc.subarray(lists[k], { minLength: 10, maxLength: lists[k].length }),
+        extra: fc.subarray(extras[k], { maxLength: 4 }),
+        themes: fc.subarray(THEMES, { maxLength: 2 }),
+        priorities: fc.subarray(lists[k].map((l) => l.replace(/^\d+ /, "")).filter((n) => n !== commanders[k]).slice(0, 30), { maxLength: 2 }),
+        avoid: fc.subarray(THEMES, { maxLength: 1 }),
+        seed: fc.integer(),
+      })).filter((r) => r.themes.length + r.priorities.length > 0 && !r.avoid.some((a) => r.themes.includes(a)));
+      fc.assert(fc.property(arb, (r) => {
+        const lines = [...r.lines, ...r.extra.map((n) => `1 ${n}`)];
+        const plan = { ...(r.themes.length ? { themes: r.themes } : {}), ...(r.priorities.length ? { priorities: r.priorities } : {}), ...(r.avoid.length ? { avoid: r.avoid } : {}) };
+        const input = { commander: commanders[r.k], decklist: lines.join("\n"), plan };
+        let a: unknown;
+        try { a = diagnose(store, input); } catch (e) {
+          // a priority card without graph data, or an avoided theme too thin to profile, is the caller's to fix: the same error every time
+          if (!(e instanceof ToolInputError)) throw e;
+          expect(() => diagnose(store, input)).toThrow(e.message);
+          return;
+        }
+        const shuffled = [...lines].sort((x, y) => ((hash(x + r.seed) - hash(y + r.seed)) || (x < y ? -1 : 1)));
+        expect(diagnose(store, input)).toEqual(a);
+        expect(diagnose(store, { ...input, decklist: shuffled.join("\n") })).toEqual(a);
+        expect(diagnose(cold, input)).toEqual(a);
+      }), { numRuns: 12, seed: 4501 });
+    } finally {
+      cold.db.close();
+    }
+  }, 300_000);
+});
+
+/** A small string hash (FNV-1a), for a seeded shuffle. */
+function hash(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}

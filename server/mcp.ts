@@ -8,6 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { commanderProfile, commanderProfileShape } from "./commander";
+import { diagnose, diagnoseShape } from "./diagnose";
 import {
   cardDetails, cardShape, deckStats, deckStatsShape, findCards, findCardsShape, findTags, neighbors, neighborsShape, openStore, tagsShape, type Store,
 } from "./deck-tools";
@@ -75,6 +76,17 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
       "`fallback` says why.",
     inputSchema: commanderProfileShape,
   }, async (args) => withStore(store, (s) => commanderProfile(s, args)));
+  server.registerTool("diagnose", {
+    title: "Diagnose a deck against the plan",
+    description: "What a Commander deck lacks and overdoes against the player's confirmed plan (`plan`, required: themes, " +
+      "priority cards, themes to avoid). Returns engine gaps (payoffs waiting on something too few cards make happen, with both " +
+      "counts and in-color cards that would feed them), every role against its target with the target's source (the plan's " +
+      "theme decks, or the default table when the plan's themes do not cover it) and the roles over and under, cards off the " +
+      "plan with the reason, the cards doing the least with their links into the deck, and the cards the card graph cannot " +
+      "read (static effects), which are never judged by their links. Give the commander and either a decklist file path or " +
+      "the pasted list. Same deck and plan, same answer.",
+    inputSchema: diagnoseShape,
+  }, async (args) => withStore(store, (s) => diagnose(s, args)));
   server.registerTool("neighbors", {
     title: "Card Space neighbors",
     description: "A card's nearest Card Space neighbors that a commander can play, nearest first, each with its similarity " +

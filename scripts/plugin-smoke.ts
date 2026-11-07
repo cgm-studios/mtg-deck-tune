@@ -42,7 +42,7 @@ async function run(manifest: object, seedStoreFrom?: string) {
 const good = await run({ ...real, url });
 check(good.connectMs < 5000, `server answers before the download (connected in ${Math.round(good.connectMs)} ms)`);
 const tools = (await good.client.listTools()).tools.map((t) => t.name).sort();
-check(tools.length === 9, `9 tools listed (${tools.join(", ")})`);
+check(tools.length === 10, `10 tools listed (${tools.join(", ")})`);
 const stats = await good.call("deck_stats", { commander: "Namor the Sub-Mariner", deckFile: "decks/namor.txt" });
 check(!stats.isError && stats.structuredContent?.cards === 100, `deck_stats on a project-relative deck path: ${stats.isError ? stats.content[0].text : `${stats.structuredContent.cards} cards, avg MV ${stats.structuredContent.averageManaValue}`}`);
 const profile = await good.call("commander_profile", { commander: "Namor the Sub-Mariner", deckFile: "decks/namor.txt" });
