@@ -193,7 +193,7 @@ test("given Teysa's list, Aristocrats is the strongest theme match, and every ma
   expect(aristocrats.held.length).toBeGreaterThan(0);
   for (const n of aristocrats.held) expect(names).toContain(n);
   for (const n of aristocrats.missing) expect(names).not.toContain(n);
-});
+}, 60_000); // re-derives every theme from 3,406 raw pages; about 6 s on a busy machine
 
 test("the MCP lists commander_profile and answers it: data for a real commander, an error the model can read for a bad name", async () => {
   const [a, b] = InMemoryTransport.createLinkedPair();
