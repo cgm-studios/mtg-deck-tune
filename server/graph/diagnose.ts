@@ -137,6 +137,34 @@ export function worksThroughStatic(idx: InteractionIndex, i: number): boolean {
   return idx.cards[i].graph.abilities.some((a) => a.relations.some((r) => r.relation === "modifies" && !selfOnlySel(r.selector)));
 }
 
+/** Every hook the given cards pay off on, with the cards that pay off on it (index positions). */
+export function payoffsOf(idx: InteractionIndex, cards: Iterable<number>): Map<string, Set<number>> {
+  const payoffs = new Map<string, Set<number>>();
+  for (const i of cards) for (const l of idx.listensOf(i)) if (isPayoff(l)) (payoffs.get(l.hook) ?? payoffs.set(l.hook, new Set()).get(l.hook)!).add(i);
+  return payoffs;
+}
+
+/** Cards outside the deck that make `hook` happen to your own cards for at least one of `payoffs` (deck cards paying off
+ * on it), over links that are not generic, each with the payoffs it feeds and whether it can do so again and again
+ * (makesOwn). Only cards `eligible` accepts are read. The engine gap's outlets to try (diagnose) and the shortlist's
+ * engine partners for a gap both read this. */
+export function outsideFeeders(idx: InteractionIndex, ctx: DeckContext, hook: string, payoffs: Iterable<number>, eligible: (i: number) => boolean): Map<number, { feeds: Set<string>; repeatable: boolean }> {
+  const feeds = new Map<number, { feeds: Set<string>; repeatable: boolean }>();
+  const ok = new Map<number, boolean>();
+  for (const pi of payoffs) for (const l of idx.linksTo(pi)) {
+    if (l.hook !== hook || ctx.generic(l)) continue;
+    const from = idx.indexOf(l.from);
+    if (ctx.members.has(from)) continue;
+    let pass = ok.get(from);
+    if (pass === undefined) ok.set(from, (pass = eligible(from) && makesOwn(idx, from, hook).own));
+    if (!pass) continue;
+    let f = feeds.get(from);
+    if (!f) feeds.set(from, (f = { feeds: new Set(), repeatable: makesOwn(idx, from, hook).repeatable }));
+    f.feeds.add(idx.cards[pi].name);
+  }
+  return feeds;
+}
+
 /** Which deck links count toward engine partners, and which are generic, for one deck. */
 export interface DeckContext {
   members: Set<number>;
@@ -147,36 +175,43 @@ export interface DeckContext {
   counts: (l: Link) => boolean;
 }
 
+// Which of a card's (hook, cost) pairs accept a third of the pool just for being cast or entering, pooling the card's
+// listens on the same pair as the graph's ranking does (a two-color "red or white spell" trigger is two listens). It
+// depends on the index alone, never on a deck, so it is worked out once per card and pair for the index's lifetime.
+const BROAD_MEMO = new WeakMap<InteractionIndex, Map<number, Map<string, boolean>>>();
+
+function isBroad(idx: InteractionIndex, i: number, key: string): boolean {
+  let byCard = BROAD_MEMO.get(idx);
+  if (!byCard) BROAD_MEMO.set(idx, (byCard = new Map()));
+  let keys = byCard.get(i);
+  if (!keys) byCard.set(i, (keys = new Map()));
+  let broad = keys.get(key);
+  if (broad === undefined) {
+    const ls = idx.listensOf(i).filter((l) => `${l.hook}|${l.consumed ?? ""}` === key);
+    let n: number;
+    if (ls.length === 1) n = idx.castFeederCount(ls[0]);
+    else {
+      const from = new Set<number>();
+      for (const l of ls) for (const f of idx.castFeeders(l)) from.add(f);
+      n = from.size;
+    }
+    keys.set(key, (broad = n / idx.cards.length >= BROAD));
+  }
+  return broad;
+}
+
 export function deckContext(idx: InteractionIndex, g: DeckGraph): DeckContext {
   const members = new Set(g.cards.map((c) => idx.indexOf(c.name)));
   const nameIdx = new Map([...members].map((i) => [idx.cards[i].name, i]));
-
-  // Which of a card's (hook, cost) pairs accept a third of the pool just for being cast or entering, pooling the card's
-  // listens on the same pair as the graph's ranking does (a two-color "red or white spell" trigger is two listens),
-  // memoized per card.
-  const broadMemo = new Map<number, Set<string>>();
-  const broadOf = (i: number) => {
-    let s = broadMemo.get(i);
-    if (s) return s;
-    const by = new Map<string, Set<number>>();
-    for (const l of idx.listensOf(i)) {
-      const key = `${l.hook}|${l.consumed ?? ""}`;
-      const acc = by.get(key) ?? by.set(key, new Set()).get(key)!;
-      for (const f of idx.castFeeders(l)) acc.add(f);
-    }
-    s = new Set([...by].filter(([, from]) => from.size / idx.cards.length >= BROAD).map(([key]) => key));
-    broadMemo.set(i, s);
-    return s;
-  };
   const byName = (name: string) => nameIdx.get(name) ?? idx.indexOf(name);
-  const generic = (l: Link) => l.emittedBy === "card" && broadOf(byName(l.to)).has(`${l.hook}|${l.consumed ?? ""}`);
+  const generic = (l: Link) => l.emittedBy === "card" && isBroad(idx, byName(l.to), `${l.hook}|${l.consumed ?? ""}`);
   const counts = (l: Link) => !offProfile(l.hook) && !generic(l);
   return { members, nameIdx, generic, counts };
 }
 
 export function diagnose(idx: InteractionIndex, g: DeckGraph, opts: DiagnoseOptions = {}, ctx: DeckContext = deckContext(idx, g)): Diagnosis {
   const top = opts.top ?? 10;
-  const { members, nameIdx, generic, counts } = ctx;
+  const { members, nameIdx, counts } = ctx;
   const commanders = new Set(g.commanders);
   const ci = new Set(commanders.size
     ? g.commanders.flatMap((c) => idx.cards[nameIdx.get(c)!].colorIdentity)
@@ -198,11 +233,7 @@ export function diagnose(idx: InteractionIndex, g: DeckGraph, opts: DiagnoseOpti
   const own = (i: number, hook: string) => { const k = `${i}|${hook}`; let v = ownMemo.get(k); if (!v) { v = makesOwn(idx, i, hook); ownMemo.set(k, v); } return v; };
 
   // Starved hooks and their enablers from outside the deck.
-  const payoffs = new Map<string, Set<number>>();
-  for (const c of nonland) {
-    const i = nameIdx.get(c.name)!;
-    for (const l of idx.listensOf(i)) if (isPayoff(l)) (payoffs.get(l.hook) ?? payoffs.set(l.hook, new Set()).get(l.hook)!).add(i);
-  }
+  const payoffs = payoffsOf(idx, nonland.map((c) => nameIdx.get(c.name)!));
   const enablers = new Map<string, Set<string>>();
   for (const l of g.links) {
     const to = nameIdx.get(l.to);
@@ -216,18 +247,12 @@ export function diagnose(idx: InteractionIndex, g: DeckGraph, opts: DiagnoseOpti
   for (const [hook, ps] of payoffs) {
     const es = enablers.get(hook) ?? new Set();
     if (ps.size < 2 || ps.size <= es.size) continue;
-    const feeds = new Map<number, Set<string>>();
-    for (const pi of ps) for (const l of idx.linksTo(pi)) {
-      if (l.hook !== hook || generic(l)) continue;
-      const from = idx.indexOf(l.from);
-      if (members.has(from) || !inColor(from) || !own(from, hook).own) continue;
-      (feeds.get(from) ?? feeds.set(from, new Set()).get(from)!).add(idx.cards[pi].name);
-    }
+    const feeds = outsideFeeders(idx, ctx, hook, ps, inColor);
     // Most payoffs fed, then repeatable (an outlet you can use every turn) before one-shot, then EDHREC rank.
-    const rep = (i: number) => (own(i, hook).repeatable ? 0 : 1);
-    const candidates = [...feeds].filter(([, s]) => s.size >= 2)
-      .sort(([a, x], [b, y]) => y.size - x.size || rep(a) - rep(b) || (idx.cards[a].edhrecRank ?? Infinity) - (idx.cards[b].edhrecRank ?? Infinity) || byteOrder(idx.cards[a].name, idx.cards[b].name))
-      .slice(0, top).map(([i, s]) => ({ name: idx.cards[i].name, feeds: names(s), repeatable: own(i, hook).repeatable }));
+    const rep = (i: number) => (feeds.get(i)!.repeatable ? 0 : 1);
+    const candidates = [...feeds].filter(([, f]) => f.feeds.size >= 2)
+      .sort(([a, x], [b, y]) => y.feeds.size - x.feeds.size || rep(a) - rep(b) || (idx.cards[a].edhrecRank ?? Infinity) - (idx.cards[b].edhrecRank ?? Infinity) || byteOrder(idx.cards[a].name, idx.cards[b].name))
+      .slice(0, top).map(([i, f]) => ({ name: idx.cards[i].name, feeds: names(f.feeds), repeatable: f.repeatable }));
     starved.push({ hook, payoffs: names([...ps].map((i) => idx.cards[i].name)), enablers: names(es), ratio: `${ps.size}:${es.size}`, candidates });
   }
   starved.sort((a, b) => b.payoffs.length / Math.max(1, b.enablers.length) - a.payoffs.length / Math.max(1, a.enablers.length) || byteOrder(a.hook, b.hook));

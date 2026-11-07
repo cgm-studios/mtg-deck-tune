@@ -334,15 +334,16 @@ export class InteractionIndex {
     return dedupe(out);
   }
 
-  private feedersMemo = new Map<string, ReadonlySet<number>>();
+  // Kept as sorted card positions (4 bytes a card) rather than Sets: the shortlist asks this of thousands of cards, and
+  // the sets ran to millions of entries.
+  private feedersMemo = new Map<string, Int32Array>();
 
-  /** The cards that feed listen `l` just by being cast or entering, the set behind a generic link (rank.ts pools these per
-   * hook and cost across a card's listens). A listen with no Self alternative depends only on its hook, cost and selector,
-   * so the set is memoized across cards; the listening card is never its own feeder, as in link(). */
-  castFeeders(l: Listen): ReadonlySet<number> {
+  /** The feeders of `l` with the listening card still in, sorted; memoized when the listen has no Self alternative. */
+  private feedersOf(l: Listen): Int32Array {
     const shared = !l.sel.any.some((a) => a.self);
     const key = `${l.hook}|${l.consumed ?? ""}|${l.onlyEmitted ?? ""}|${l.sel.raw}`;
-    if (shared && this.feedersMemo.has(key)) return this.withoutSelf(this.feedersMemo.get(key)!, l.card);
+    const hit = shared ? this.feedersMemo.get(key) : undefined;
+    if (hit) return hit;
     const from = new Set<number>();
     const b = this.cards[l.card];
     for (const e of this.emits.get(l.hook) ?? []) {
@@ -350,15 +351,26 @@ export class InteractionIndex {
       if (l.onlyEmitted && e.emitted !== l.onlyEmitted) continue;
       if (selectorsOverlap(e.sel, e.me ?? this.cards[e.card], l.sel, b, this.facts, e.hook)) from.add(e.card);
     }
-    if (shared) this.feedersMemo.set(key, from);
-    return this.withoutSelf(from, l.card);
+    const sorted = Int32Array.from(from).sort();
+    if (shared) this.feedersMemo.set(key, sorted);
+    return sorted;
   }
 
-  private withoutSelf(s: ReadonlySet<number>, card: number): ReadonlySet<number> {
-    if (!s.has(card)) return s;
-    const t = new Set(s);
-    t.delete(card);
-    return t;
+  /** The cards that feed listen `l` just by being cast or entering, the set behind a generic link (rank.ts pools these per
+   * hook and cost across a card's listens). A listen with no Self alternative depends only on its hook, cost and selector,
+   * so the set is memoized across cards; the listening card is never its own feeder, as in link(). */
+  castFeeders(l: Listen): ReadonlySet<number> {
+    const s = new Set(this.feedersOf(l));
+    s.delete(l.card);
+    return s;
+  }
+
+  /** How many cards castFeeders(l) holds, without building the set. */
+  castFeederCount(l: Listen): number {
+    const f = this.feedersOf(l);
+    let lo = 0, hi = f.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (f[mid] < l.card) lo = mid + 1; else hi = mid; }
+    return f.length - (lo < f.length && f[lo] === l.card ? 1 : 0);
   }
 
   /** Links between card `i` and the cards in `members`, both directions. Cheaper than linksFrom plus linksTo when the
@@ -368,6 +380,20 @@ export class InteractionIndex {
     for (const e of this.emitsByCard[i]) for (const l of this.listens.get(e.hook) ?? []) if (members.has(l.card)) { const k = this.link(e, l); if (k) out.push(k); }
     for (const l of this.listensByCard[i]) for (const e of this.emits.get(l.hook) ?? []) if (members.has(e.card)) { const k = this.link(e, l); if (k) out.push(k); }
     return dedupe(out);
+  }
+
+  /** linksWith for one fixed set of members, for many cards: the members' emits and listens are grouped by hook once, so
+   * each card is tested only against member cards, not walked through every card on a hook. Same links, same order. */
+  linkerFor(members: ReadonlySet<number>): (i: number) => Link[] {
+    const emits = new Map<string, Emit[]>(), listens = new Map<string, Listen[]>();
+    for (const [hook, es] of this.emits) { const m = es.filter((e) => members.has(e.card)); if (m.length) emits.set(hook, m); }
+    for (const [hook, ls] of this.listens) { const m = ls.filter((l) => members.has(l.card)); if (m.length) listens.set(hook, m); }
+    return (i) => {
+      const out: Link[] = [];
+      for (const e of this.emitsByCard[i]) for (const l of listens.get(e.hook) ?? []) { const k = this.link(e, l); if (k) out.push(k); }
+      for (const l of this.listensByCard[i]) for (const e of emits.get(l.hook) ?? []) { const k = this.link(e, l); if (k) out.push(k); }
+      return dedupe(out);
+    };
   }
 
   /** Links where `a` feeds `b`. */

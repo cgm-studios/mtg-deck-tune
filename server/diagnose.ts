@@ -5,10 +5,11 @@
 
 import { z } from "zod";
 import { readDeck, resolveCommander, ToolInputError, unresolvedLines, type DeckStats, type Store } from "./deck-tools";
-import { parseDecklist } from "./deck-pool";
-import { deckGraph, type DeckEntry } from "./graph/deck";
-import { deckContext, diagnose as graphDiagnose, hookPhrase, worksThroughStatic, type Bucket } from "./graph/diagnose";
-import { isMainHook, parseProfileHook } from "./graph/profile";
+import { parseDecklist, type Decklist, type SpaceCard } from "./deck-pool";
+import { deckGraph, type DeckEntry, type DeckGraph } from "./graph/deck";
+import { deckContext, diagnose as graphDiagnose, hookPhrase, worksThroughStatic, type Bucket, type DeckContext } from "./graph/diagnose";
+import type { Link } from "./graph/interact";
+import { byteOrder, isMainHook, parseProfileHook } from "./graph/profile";
 import { graphOf } from "./graph/store-graph";
 import { STRATEGY_DEFAULTS, strategyFacts, themeCommanders } from "./graph/strategy";
 import { planShape } from "./plan-input";
@@ -120,47 +121,67 @@ export type DiagnoseResult = {
   unresolved: DeckStats["unresolved"];
 };
 
-export function diagnose(store: Store, input: DiagnoseInput): DiagnoseResult {
-  const f = diagnoseInput.parse(input);
-  const text = readDeck(f);
-  const { card: commander } = resolveCommander(store, f.commander);
-  const plan = resolvePlan(store, { commander: commander.name, plan: f.plan });
-  const graph = graphOf(store.db);
-  const idx = graph.index;
-  const deck = parseDecklist(store.space, text);
+/** A decklist on the card graph: its graph members (the commander always among them) and the deck graph over them. */
+export type DeckOnGraph = {
+  deck: Decklist;
+  /** Store oracle id → store card id. */
+  idOf: Map<string, number>;
+  g: DeckGraph;
+  ctx: DeckContext;
+  commanderPos: number;
+  /** Resolved cards the card graph could not read (no card script). */
+  noGraphData: Set<string>;
+};
 
-  // The deck as graph members, by the index's own spelling; a card the graph could not translate has no position.
+/** Read a decklist onto the card graph, by the index's own spelling; a card the graph could not translate has no position.
+ * Throws a ToolInputError when the commander itself has no graph data. Shared by diagnose and shortlist. */
+export function deckOnGraph(store: Store, commander: SpaceCard, text: string): DeckOnGraph {
+  const { index: idx, positionOf } = graphOf(store.db);
+  const deck = parseDecklist(store.space, text);
   const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
   const counts = new Map<number, number>();
   const noGraphData = new Set<string>();
   for (const e of deck.entries) {
     if (!e.card) continue;
-    const pos = graph.positionOf.get(idOf.get(e.card.id)!);
+    const pos = positionOf.get(idOf.get(e.card.id)!);
     if (pos !== undefined) counts.set(pos, (counts.get(pos) ?? 0) + e.qty);
     else noGraphData.add(e.card.name);
   }
-  const commanderPos = graph.positionOf.get(plan.commander.id);
+  const commanderPos = positionOf.get(idOf.get(commander.id)!);
   if (commanderPos === undefined) throw new ToolInputError(`${commander.name} has no card graph data (its card script could not be read), so the deck's engine cannot be read around it`);
   if (!counts.has(commanderPos)) counts.set(commanderPos, 1);
   const entries: DeckEntry[] = [...counts].map(([pos, count]) => ({ name: idx.cards[pos].name, count }));
   const g = deckGraph(idx, entries, [idx.cards[commanderPos].name], store.roles);
+  return { deck, idOf, g, ctx: deckContext(idx, g), commanderPos, noGraphData };
+}
+
+/** A card's links with deck cards as a player reads them: each other card, which way, on what, and whether generic; one
+ * row per distinct reading, sorted by card, then direction, then event (byte order). */
+export function deckLinks(ctx: DeckContext, name: string, links: Link[]): DeckLink[] {
+  const seen = new Set<string>();
+  return links.filter((l) => l.from === name || l.to === name).map((l) => ({
+    card: l.from === name ? l.to : l.from, direction: l.from === name ? "feeds" as const : "fed by" as const, on: hookPhrase(l.hook), generic: ctx.generic(l),
+  })).filter((l) => { const k = `${l.card}|${l.direction}|${l.on}|${l.generic}`; return !seen.has(k) && !!seen.add(k); })
+    .sort((a, b) => byteOrder(a.card, b.card) || byteOrder(a.direction, b.direction) || byteOrder(a.on, b.on));
+}
+
+export function diagnose(store: Store, input: DiagnoseInput): DiagnoseResult {
+  const f = diagnoseInput.parse(input);
+  const text = readDeck(f);
+  const { card: commander } = resolveCommander(store, f.commander);
+  const plan = resolvePlan(store, { commander: commander.name, plan: f.plan });
+  const idx = graphOf(store.db).index;
+  const { deck, idOf, g, ctx, noGraphData } = deckOnGraph(store, commander, text);
   // Role counts are deck_stats' (every resolved nonland card, graph data or not), so a count quoted from either tool agrees.
   const sheet = roleSheet(store.roles, deck.entries.map((e) => ({ ...e, card: e.card && { id: e.card.id, name: e.card.name, land: e.card.land } })));
   g.roles = { counts: sheet.counts, unroled: sheet.unroled };
   const nonland = sheet.cards.reduce((n, c) => n + c.qty, 0);
   const targets = roleTargets(store, plan, commander.ci, nonland);
-  const ctx = deckContext(idx, g);
   const d = graphDiagnose(idx, g, { targets: { targets: Object.fromEntries(targets.map((t) => [t.role, t.target])), source: "plan" } }, ctx);
   const roles: RoleRead[] = targets.map((t) => ({ role: t.role, count: sheet.counts[t.role] ?? 0, target: t.target, source: t.source, basis: t.basis, ...(t.expected !== undefined ? { expected: t.expected } : {}) }));
   const read = new Map(roles.map((r) => [r.role, r]));
   const isStatic = (name: string) => worksThroughStatic(idx, idx.indexOf(name));
-  const linksOf = (name: string): DeckLink[] => {
-    const seen = new Set<string>();
-    return g.links.filter((l) => l.from === name || l.to === name).map((l) => ({
-      card: l.from === name ? l.to : l.from, direction: l.from === name ? "feeds" as const : "fed by" as const, on: hookPhrase(l.hook), generic: ctx.generic(l),
-    })).filter((l) => { const k = `${l.card}|${l.direction}|${l.on}|${l.generic}`; return !seen.has(k) && !!seen.add(k); })
-      .sort((a, b) => (a.card < b.card ? -1 : a.card > b.card ? 1 : 0) || (a.direction < b.direction ? -1 : a.direction > b.direction ? 1 : 0) || (a.on < b.on ? -1 : a.on > b.on ? 1 : 0));
-  };
+  const linksOf = (name: string): DeckLink[] => deckLinks(ctx, name, g.links);
   const nonlandCards = [...new Map(deck.entries.filter((e) => e.card && !e.card.land).map((e) => [e.card!.id, { id: idOf.get(e.card!.id)!, oracleId: e.card!.id, name: e.card!.name }])).values()];
   // A starved card waits on the first gap it pays off on, in the gaps' order (the graph's own assignment).
   const gapOf = new Map<string, string>();
