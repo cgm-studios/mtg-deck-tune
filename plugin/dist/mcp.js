@@ -41268,7 +41268,7 @@ function shortlist(store, input3) {
   const out = f.out === undefined ? null : outCard(store, f.out, entries);
   const notes = [];
   const eligible = (c, allowLand) => (allowLand || !c.land) && c.id !== commander.id && !inDeck.has(c.id) && fitsIdentity(c, commander.ci) && (f.maxManaValue === undefined || c.meta.cmc <= f.maxManaValue) && (f.maxPrice === undefined || c.meta.usd !== null && c.meta.usd <= f.maxPrice);
-  const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null }));
+  const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null, inference: null }));
   let avoided = 0;
   const keep = (c) => {
     if (!avoid.length || fit(c.id).score > 0 || !avoid.some((a) => a(c.id).score > 0))
