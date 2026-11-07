@@ -70,7 +70,8 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
     title: "Deck stats",
     description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " +
       "colored pip load, plus unresolved lines and off-identity cards; with the player's confirmed plan (`plan`: themes, " +
-      "priority cards, themes to avoid), plan fit: which cards fit it and which do not. " +
+      "priority cards, themes to avoid), plan fit: which cards fit it and which do not. Also every deck card's mana value, " +
+      "type line and rules text (`cardFacts`, the commander included): quote card facts from there. " +
       "Give the commander and either a decklist file path or the pasted list.",
     inputSchema: deckStatsShape,
   }, async (args) => withStore(store, (s) => deckStats(s, args)));
@@ -90,7 +91,8 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
       "counts and in-color cards that would feed them), every role against its target with the target's source (the plan's " +
       "theme decks, or the default table when the plan's themes do not cover it) and the roles over and under, cards off the " +
       "plan with the reason, the cards doing the least with their links into the deck, and the cards the card graph cannot " +
-      "read (static effects), which are never judged by their links. Give the commander and either a decklist file path or " +
+      "read (static effects), which are never judged by their links, and every deck card's mana value, type line and rules " +
+      "text (`cardFacts`). Give the commander and either a decklist file path or " +
       "the pasted list. Same deck and plan, same answer.",
     inputSchema: diagnoseShape,
   }, async (args) => withStore(store, (s) => diagnose(s, args)));

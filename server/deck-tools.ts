@@ -296,6 +296,10 @@ export function cardDetails(store: Store, input: CardInput): CardResult {
 //   planFit           with the player's confirmed plan (`plan`): which nonland cards other than the commander fit it
 //                     (plan.ts planScorer score > 0: a hook or tag of the plan's profiles), and which do not; null when
 //                     the call carries no plan. The plan always comes from the player, never from the commander's text.
+//   cardFacts         every card of the deck (each distinct resolved card of the list, lands included, and the commander
+//                     whether or not the list names it) with its mana value, full type line and rules text as the store
+//                     holds them, so a card fact quoted to the player comes from the data, never from memory (ISC-91,
+//                     ISC-92). Only these three facts and the name, in name order (byte order), to keep the result lean.
 const CURVE = ["0", "1", "2", "3", "4", "5", "6", "7+"] as const;
 const COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -323,8 +327,33 @@ export type DeckNumbers = {
 };
 export type DeckStats = DeckNumbers & {
   commander: { name: string; colorIdentity: string; matchedBy: MatchKind };
+  cardFacts: CardFact[];
   unresolved: { line: number; text: string; closeMatches: string[] }[];
 };
+
+/** One deck card's facts as the store holds them (cards.mana_value, type_line with every face, oracle_text). */
+export type CardFact = { name: string; manaValue: number; typeLine: string; oracleText: string };
+
+const STORE_IDS = new WeakMap<Store, Map<string, number>>();
+/** The store id of a card by oracle id (resolveCard indexes names by id - 1, so the map is the inverse). */
+function storeIdOf(store: Store, oracleId: string): number {
+  let m = STORE_IDS.get(store);
+  if (!m) STORE_IDS.set(store, (m = new Map(store.names.map((n) => [n.oracleId, n.id]))));
+  const id = m.get(oracleId);
+  if (id === undefined) throw new Error(`card store is inconsistent: oracle id ${oracleId} has no store id`);
+  return id;
+}
+
+/** The facts of every card of a deck: each distinct resolved card of the list and the commander, in name (byte) order. */
+export function cardFacts(store: Store, commander: SpaceCard, entries: DeckEntry[]): CardFact[] {
+  const ids = new Set([commander.id, ...entries.flatMap((e) => (e.card ? [e.card.id] : []))]);
+  const q = store.db.query("SELECT name, mana_value, type_line, oracle_text FROM cards WHERE id = ?");
+  return [...ids].map((oracleId) => {
+    const r = q.get(storeIdOf(store, oracleId)) as { name: string; mana_value: number; type_line: string; oracle_text: string } | null;
+    if (!r) throw new Error(`card store is inconsistent: oracle id ${oracleId} resolved but has no row`);
+    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, oracleText: r.oracle_text };
+  }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
 
 // A deckFile path as the tools read it: absolute, or relative to the repo root.
 export const deckPath = (deckFile: string) => (isAbsolute(deckFile) ? deckFile : join(DECK_ROOT, deckFile));
@@ -401,6 +430,7 @@ export function deckStats(store: Store, input: DeckStatsInput): DeckStats {
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join(""), matchedBy },
     ...deckNumbers(store, commander, deck.entries, plan),
+    cardFacts: cardFacts(store, commander, deck.entries),
     unresolved: unresolvedLines(store, deck.unresolved),
   };
 }

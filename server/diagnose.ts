@@ -4,7 +4,7 @@
 // are the graph repo's (graph/diagnose.ts, ported); the plan side is new here.
 
 import { z } from "zod";
-import { readDeck, resolveCommander, ToolInputError, unresolvedLines, type DeckStats, type Store } from "./deck-tools";
+import { cardFacts, readDeck, resolveCommander, ToolInputError, unresolvedLines, type CardFact, type DeckStats, type Store } from "./deck-tools";
 import { parseDecklist, type Decklist, type SpaceCard } from "./deck-pool";
 import { deckGraph, type DeckEntry, type DeckGraph } from "./graph/deck";
 import { deckContext, diagnose as graphDiagnose, hookPhrase, worksThroughStatic, type Bucket, type DeckContext } from "./graph/diagnose";
@@ -118,6 +118,9 @@ export type DiagnoseResult = {
   lowPartners: number;
   /** Cards the card graph could not read at all (no card script): in the role counts, outside every engine reading. */
   noGraphData: string[];
+  /** Every card of the deck (lands and the commander included) with its mana value, type line and rules text from the
+   * store, as deck_stats gives them (ISC-92). */
+  cardFacts: CardFact[];
   unresolved: DeckStats["unresolved"];
 };
 
@@ -213,6 +216,7 @@ export function diagnose(store: Store, input: DiagnoseInput): DiagnoseResult {
     cards: d.engine.map(({ degree: _d, ...e }) => e),
     lowPartners: d.lowPartners,
     noGraphData: [...noGraphData].sort(),
+    cardFacts: cardFacts(store, commander, deck.entries),
     unresolved: unresolvedLines(store, deck.unresolved),
   };
 }

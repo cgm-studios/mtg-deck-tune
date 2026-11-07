@@ -1191,3 +1191,61 @@ test("ISC-67: a swap built from a Teysa shortlist carries the deck before and af
   const adds = shortlist(store, { ...TEYSA, plan, problem: { engineGap: "a creature dying" } });
   for (const c of adds.cards) { expect(c.after).toBeUndefined(); expect(c.delta.cards).toBe(1); }
 }, 120_000);
+
+// ---------- card facts in deck results (DT-6.15, ISC-92) ----------
+// Claude must quote a deck card's mana value, type and rules text from a tool result, never from memory (ISC-91), so
+// deck_stats and diagnose carry those three facts for every card of the deck: each distinct resolved card of the list,
+// lands included, and the commander whether or not the list names it. The oracle is the store's plain columns.
+
+const BASIC_OF: Record<string, string> = { W: "Plains", U: "Island", B: "Swamp", R: "Mountain", G: "Forest" };
+type FactRow = { name: string; manaValue: number; typeLine: string; oracleText: string };
+const storeFacts = (name: string): FactRow =>
+  store.db.query("SELECT name, mana_value AS manaValue, type_line AS typeLine, oracle_text AS oracleText FROM cards WHERE name = ?").get(name) as FactRow;
+const byFactName = (a: FactRow, b: FactRow) => byteCmp(a.name, b.name);
+/** Every card of a list as the store resolves it (distinct), plus the commander. */
+function expectedFacts(commander: string, decklist: string): FactRow[] {
+  const names = new Set(parseDecklist(store.space, decklist).entries.flatMap((e) => (e.card ? [e.card.name] : [])));
+  names.add(commander);
+  return [...names].map(storeFacts).sort(byFactName);
+}
+const factDraw = fc.record({ commander: fc.constantFrom(...SWAP_COMMANDERS), seeds: fc.array(fc.nat(), { minLength: 10, maxLength: 10 }), off: fc.nat(), withCommander: fc.boolean(), typo: fc.boolean() });
+function factDeck(r: fc.RecordValue<typeof factDraw extends fc.Arbitrary<infer T> ? T : never>): string {
+  const basics = [...ciOf(r.commander)].map((c) => `3 ${BASIC_OF[c]}`);
+  return [drawDeck(r.commander, r.seeds, r.off), ...basics, ...(r.withCommander ? [`1 ${r.commander}`] : []), ...(r.typo ? ["1 Lightnig Bolt"] : [])].join("\n");
+}
+
+test("ISC-92: for random decks across commanders, deck_stats carries every deck card's mana value, type line and rules text, equal to the store's", () => {
+  let checked = 0;
+  fc.assert(fc.property(factDraw, (r) => {
+    const decklist = factDeck(r);
+    const s = deckStats(store, { commander: r.commander, decklist });
+    expect([...s.cardFacts].sort(byFactName)).toEqual(expectedFacts(r.commander, decklist));
+    checked += s.cardFacts.length;
+  }), { numRuns: 60, seed: 9201 });
+  expect(checked).toBeGreaterThan(60 * 10);
+}, 120_000);
+
+test("ISC-92: for random decks across commanders, diagnose carries every deck card's mana value, type line and rules text, equal to the store's", () => {
+  let checked = 0;
+  fc.assert(fc.property(factDraw, (r) => {
+    const decklist = factDeck(r);
+    const d = diagnose(store, { commander: r.commander, decklist, plan: { themes: ["Tokens"] } });
+    expect([...d.cardFacts].sort(byFactName)).toEqual(expectedFacts(r.commander, decklist));
+    checked += d.cardFacts.length;
+  }), { numRuns: 15, seed: 9202 });
+  expect(checked).toBeGreaterThan(15 * 10);
+}, 240_000);
+
+test("ISC-92: over MCP, deck_stats and diagnose return the card facts for every card of Namor's list, each with the store's text and nothing more", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt" };
+  const stats = await client.callTool({ name: "deck_stats", arguments: args });
+  const diag = await client.callTool({ name: "diagnose", arguments: { ...args, plan: NAMOR_PLAN } });
+  const text = readFileSync(NAMOR_DECK, "utf8");
+  for (const res of [stats, diag]) {
+    expect(res.isError).toBeFalsy();
+    const got = (res.structuredContent as { cardFacts: FactRow[] }).cardFacts;
+    expect([...got].sort(byFactName)).toEqual(expectedFacts(args.commander, text));
+    // lean: the three facts and the name, nothing else per card
+    for (const c of got) expect(Object.keys(c).sort()).toEqual(["manaValue", "name", "oracleText", "typeLine"]);
+  }
+}, 60_000);
