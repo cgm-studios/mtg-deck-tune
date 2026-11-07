@@ -16,6 +16,7 @@ import { acceptSwap, LABELS_PATH, rejectSwap, swapCandidates } from "./swap-tool
 import { diagnose } from "./diagnose";
 import { createDeckServer } from "./mcp";
 import { loadRoleIndex, roleSheet } from "./roles";
+import { readJSONL } from "./scryfall";
 
 // A player's confirmed plan for the Namor fixture (DT-6.3): the plan comes from the player, never from Namor's text.
 const NAMOR_PLAN = { themes: ["Spellslinger"] };
@@ -51,6 +52,25 @@ test("find schema: find_cards takes color identity, card type, mana value range,
   expect(props.tags.type).toBe("array");
   expect(props.keywords.type).toBe("array");
   for (const range of ["manaValue", "power", "toughness"]) expect(Object.keys(props[range].properties ?? {}).sort()).toEqual(["max", "min"]);
+});
+
+test("find schema: the tool and its inputs tell Claude what the mana-symbol and rules-text filters do, and how hybrid and Phyrexian symbols count (ISC-79, ISC-80)", async () => {
+  const { tools } = await client.listTools();
+  const tool = tools.find((t) => t.name === "find_cards")!;
+  const props = (tool.inputSchema as { properties: Record<string, { description?: string; type?: string; items?: { properties?: Record<string, { enum?: string[] }> } }> }).properties;
+  expect(props.manaSymbols.type).toBe("array");
+  expect(props.manaSymbols.items?.properties?.color.enum).toEqual(["W", "U", "B", "R", "G"]);
+  expect(props.rulesText.type).toBe("array");
+  expect(props.manaSymbols.description).toMatch(/hybrid/i);
+  expect(props.manaSymbols.description).toMatch(/phyrexian/i);
+  expect(props.manaSymbols.description).toMatch(/two or more blue/);
+  expect(props.rulesText.description).toMatch(/capitals are ignored/i);
+  expect(props.rulesText.description).toMatch(/part of a word/i);
+  // the tool's own description names both filters and says what to try when a search misses
+  expect(tool.description).toContain("manaSymbols");
+  expect(tool.description).toContain("rulesText");
+  expect(tool.description).toMatch(/noncreature/i);
+  expect(tool.description).toMatch(/misses|too few|too many/i);
 });
 
 // ---------- find filters (ISC-17.2) ----------
@@ -162,6 +182,138 @@ test("find filters: for random filter combinations every result satisfies every 
   console.log(`find filters: ${runs} runs, ${nonEmpty} non-empty`);
   expect(nonEmpty / runs).toBeGreaterThan(0.8);
 }, 60_000);
+
+// ---------- mana symbols and rules text (ISC-79, ISC-80, DT-6.11) ----------
+// The oracle here is the raw Scryfall file, read straight (data/scryfall/oracle_cards.jsonl.gz), not the store's
+// mana_cost or oracle_text columns the tool queries. A card's cost is its front face's (or the card's own) mana_cost,
+// its text the card's oracle_text or every face's joined by a line break. Symbols are counted by parsing each `{...}`
+// and splitting it on "/", not by the tool's letter count.
+
+type RawCard = { oracle_id: string; mana_cost?: string; oracle_text?: string; card_faces?: { mana_cost?: string; oracle_text?: string }[] };
+const COLOR_LETTERS = ["W", "U", "B", "R", "G"] as const;
+type Color = (typeof COLOR_LETTERS)[number];
+type Raw = { cost: string; text: string; symbols: Record<Color, number> };
+const factsByName = new Map<string, Raw>();
+const factsById = new Map<number, Raw>(); // keyed like `cards` (store id), joined through oracle_id
+
+beforeAll(async () => {
+  const raw = new Map<string, Raw>();
+  for (const o of (await readJSONL(new URL("../data/scryfall/oracle_cards.jsonl.gz", import.meta.url).pathname)) as RawCard[]) {
+    const cost = o.card_faces?.[0]?.mana_cost ?? o.mana_cost ?? "";
+    const text = o.oracle_text ?? (o.card_faces ?? []).map((f) => f.oracle_text ?? "").join("\n");
+    const symbols = Object.fromEntries(COLOR_LETTERS.map((c) =>
+      [c, (cost.match(/\{[^}]+\}/g) ?? []).filter((s) => s.slice(1, -1).split("/").includes(c)).length])) as Record<Color, number>;
+    raw.set(o.oracle_id, { cost, text, symbols });
+  }
+  for (const r of store.db.query("SELECT id, name, oracle_id FROM cards").all() as { id: number; name: string; oracle_id: string }[]) {
+    const x = raw.get(r.oracle_id);
+    if (!x) throw new Error(`store card ${r.name} is not in the raw Scryfall file`);
+    factsById.set(r.id, x);
+    factsByName.set(r.name, x);
+  }
+});
+
+const factsOf = (name: string) => factsByName.get(name)!;
+// capitals ignored for the letters A to Z only, the way the tool matches
+const asciiLower = (s: string) => s.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
+type SymbolFilter = { color: Color; min: number }[];
+const symbolsHold = (x: Raw, sf: SymbolFilter) => sf.every((s) => x.symbols[s.color] >= s.min);
+const textHolds = (x: Raw, words: string[]) => words.every((w) => asciiLower(x.text).includes(asciiLower(w)));
+
+// the other filters a new filter must combine with, each a fixed example the generator can pick
+const OTHERS: FindCardsInput[] = [
+  {}, {}, { colorIdentity: "U" }, { types: ["Instant"] }, { types: ["Creature"], manaValue: { max: 4 } }, { land: false, manaValue: { min: 3 } },
+  { colorIdentity: "WUB", keywords: ["Flying"] }, { maxPrice: 2 }, { tags: ["ramp"] },
+];
+
+function expectedPage(f: FindCardsInput, holds: (x: Raw) => boolean) {
+  const expected = cards.filter((c) => oracleMatches(c, f) && holds(factsById.get(c.id)!)).sort(ORDER[f.sort!]);
+  return { expected, page: expected.slice(f.offset, f.offset! + f.limit!).map((c) => c.name) };
+}
+
+test("ISC-79: for random colors, symbol counts and other filters, every result's raw cost carries at least that many symbols of that color (hybrid and Phyrexian each count once per color they can be paid with), and the page is exactly the matching cards", () => {
+  let runs = 0, nonEmpty = 0, deep = 0;
+  const arb = fc.record({
+    colors: fc.array(fc.record({ color: fc.constantFrom(...COLOR_LETTERS), min: fc.integer({ min: 1, max: 4 }) }), { minLength: 1, maxLength: 2 }),
+    other: fc.constantFrom(...OTHERS), sort: fc.constantFrom("name", "mana_value", "price") as fc.Arbitrary<"name" | "mana_value" | "price">,
+    limit: fc.integer({ min: 1, max: 100 }), offset: fc.constantFrom(0, 0, 3),
+  });
+  fc.assert(fc.property(arb, (d) => {
+    const f: FindCardsInput = { ...d.other, manaSymbols: d.colors, sort: d.sort, limit: d.limit, offset: d.offset };
+    const { expected, page } = expectedPage(f, (x) => symbolsHold(x, d.colors));
+    const got = findCards(store, f);
+    runs++;
+    if (got.total) nonEmpty++;
+    if (got.total && d.colors.some((s) => s.min >= 3)) deep++;
+    for (const r of got.cards) {
+      expect(symbolsHold(factsOf(r.name), d.colors)).toBe(true);
+      expect(oracleMatches(cards.find((c) => c.name === r.name)!, d.other)).toBe(true);
+    }
+    expect(got.total).toBe(expected.length);
+    expect(got.cards.map((r) => r.name)).toEqual(page);
+  }), { numRuns: 150, seed: 7901 });
+  console.log(`ISC-79: ${runs} runs, ${nonEmpty} non-empty, ${deep} non-empty with a count of 3 or more`);
+  expect(nonEmpty / runs).toBeGreaterThan(0.6);
+  expect(deep).toBeGreaterThan(3);
+}, 120_000);
+
+test("ISC-79: hybrid, generic-hybrid and Phyrexian symbols count once toward each color they can be paid with, on the front face's cost", () => {
+  const holds = (name: string, color: Color, min: number) => findCards(store, { name, manaSymbols: [{ color, min }] }).cards.some((c) => c.name === name);
+  // {U}{U/R}{R}: two blue, two red; {3}{R/P}{R/P}: two red; {1}{G}{G/W/P}{W}: two green, two white; {2/U}x3: three blue;
+  // {U}{U}: two blue; Fire // Ice is {1}{R} on its front face: one red, no blue
+  for (const [name, color, n] of [["Abstract Paintmage", "U", 2], ["Abstract Paintmage", "R", 2], ["Act of Aggression", "R", 2], ["Ajani, Sleeper Agent", "G", 2],
+    ["Ajani, Sleeper Agent", "W", 2], ["Advice from the Fae", "U", 3], ["Counterspell", "U", 2], ["Fire // Ice", "R", 1], ["Fire // Ice", "U", 0]] as const) {
+    if (n > 0) expect(holds(name, color, n)).toBe(true);
+    expect(holds(name, color, n + 1)).toBe(false);
+  }
+  expect(() => findCards(store, { manaSymbols: [{ color: "X" as Color, min: 1 }] })).toThrow();
+  expect(() => findCards(store, { manaSymbols: [{ color: "U", min: 0 }] })).toThrow();
+});
+
+test("ISC-80: for random words, every result's raw oracle text holds each of them (capitals ignored), and the page is exactly the matching cards", () => {
+  const withText = cards.filter((c) => factsById.get(c.id)!.text.length > 0);
+  const FIXED = ["draw a card", "Whenever you cast", "noncreature spell", "COUNTER TARGET", "{U}", "each opponent", "+1/+1 counter", "zzqqxx"];
+  let runs = 0, nonEmpty = 0, multi = 0;
+  const arb = fc.record({
+    seed: fc.nat(), from: fc.nat(), len: fc.integer({ min: 1, max: 4 }), upper: fc.boolean(), fixed: fc.subarray(FIXED, { maxLength: 2 }), useSeed: fc.boolean(),
+    other: fc.constantFrom(...OTHERS), sort: fc.constantFrom("name", "mana_value", "price") as fc.Arbitrary<"name" | "mana_value" | "price">,
+    limit: fc.integer({ min: 1, max: 100 }), offset: fc.constantFrom(0, 0, 3),
+  });
+  fc.assert(fc.property(arb, (d) => {
+    // words from a seed card's own text (so most runs match something), cut inside one line, plus fixed phrases
+    const line = factsById.get(withText[d.seed % withText.length].id)!.text.split("\n").filter(Boolean)[0].split(" ");
+    const start = d.from % line.length;
+    const fromSeed = line.slice(start, start + d.len).join(" ");
+    const words = [...(d.useSeed ? [d.upper ? fromSeed.toUpperCase() : fromSeed] : []), ...d.fixed];
+    if (words.length === 0) words.push("draw");
+    const f: FindCardsInput = { ...d.other, rulesText: words, includeText: true, sort: d.sort, limit: d.limit, offset: d.offset };
+    const { expected, page } = expectedPage(f, (x) => textHolds(x, words));
+    const got = findCards(store, f);
+    runs++;
+    if (got.total) nonEmpty++;
+    if (got.total && words.length > 1) multi++;
+    for (const r of got.cards) {
+      expect(textHolds(factsOf(r.name), words)).toBe(true);
+      for (const w of words) expect(asciiLower(r.oracleText!)).toContain(asciiLower(w)); // the text the tool hands back holds them too
+    }
+    expect(got.total).toBe(expected.length);
+    expect(got.cards.map((r) => r.name)).toEqual(page);
+  }), { numRuns: 150, seed: 8001 });
+  console.log(`ISC-80: ${runs} runs, ${nonEmpty} non-empty, ${multi} non-empty with several words`);
+  expect(nonEmpty / runs).toBeGreaterThan(0.5);
+  expect(multi).toBeGreaterThan(3);
+}, 120_000);
+
+test("ISC-80: a phrase is matched as typed (partial words match, '%' is a plain character), and either face's words of a two-faced card count", () => {
+  const names = (rulesText: string[], extra: FindCardsInput = {}) => findCards(store, { rulesText, limit: 100, ...extra }).cards.map((c) => c.name);
+  expect(names(["Tap target permanent", "draw a card"], { name: "fire // ice" })).toEqual(["Fire // Ice"]); // Ice's text, found through the whole card
+  expect(names(["Fire deals 2 damage divided"], { name: "fire // ice" })).toEqual(["Fire // Ice"]);
+  expect(names(["100%"])).toEqual(cards.filter((c) => factsById.get(c.id)!.text.toLowerCase().includes("100%")).sort(ORDER.name).map((c) => c.name));
+  expect(names(["%"], { name: "Counterspell" })).toEqual([]); // not a wildcard
+  expect(names(["draw"], { name: "Divination" })).toContain("Divination"); // "Draw two cards": a part of a word matches
+  expect(names(["DRAW TWO CARDS"], { name: "Divination" })).toContain("Divination"); // capitals ignored
+  expect(() => findCards(store, { rulesText: [""] })).toThrow();
+});
 
 test("find filters: a parent tag finds cards tagged only with its descendants", () => {
   const ramp = findCards(store, { tags: ["ramp"], colorIdentity: "U", limit: 100 });
@@ -293,6 +445,7 @@ const DATA_STRINGS: Record<string, string> = {
   "find_cards.tags[]": "a Tagger tag label from the store's vocabulary",
   "find_cards.keywords[]": "a keyword from the store's vocabulary",
   "find_cards.name": "part of a card name, matched with instr() on a bound parameter",
+  "find_cards.rulesText[]": "words or a phrase from a card's rules text, matched with instr() on a bound parameter",
   "card.name": "a card name, resolved in TypeScript",
   "commander_profile.commander": "a card name, resolved in TypeScript (exact or front face only)",
   "commander_profile.deckFile": "a file path, read from disk",

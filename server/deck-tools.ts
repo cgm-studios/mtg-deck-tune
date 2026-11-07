@@ -114,6 +114,7 @@ function known<T>(what: string, value: string, map: Map<string, T>, spell: (t: T
 }
 
 // ---------- find_cards ----------
+const COLOR_LETTERS = ["W", "U", "B", "R", "G"] as const;
 const range = (what: string) =>
   z.object({ min: z.number().optional(), max: z.number().optional() }).strict().describe(`${what} range, both ends inclusive`);
 
@@ -128,6 +129,20 @@ export const findCardsShape = {
   keywords: z.array(z.string().min(1)).optional().describe('Keywords the card must all have (e.g. ["Flying"])'),
   power: range("Power (cards with * in their power never match)").optional(),
   toughness: range("Toughness (cards with * in their toughness never match)").optional(),
+  manaSymbols: z.array(z.object({
+    color: z.enum(COLOR_LETTERS).describe("W, U, B, R or G"),
+    min: z.number().int().min(1).max(20).describe("At least this many symbols of that color"),
+  }).strict()).optional().describe(
+    "Minimum count of one color's mana symbols in the card's mana cost, one entry per color, all must hold " +
+    '(e.g. [{"color": "U", "min": 2}] = two or more blue symbols). A hybrid or Phyrexian symbol counts once toward each color it ' +
+    "can be paid with ({U}, {U/R}, {2/U}, {U/P} and {G/U/P} all count 1 toward blue), generic and colorless symbols count toward none. " +
+    "Reads the front face's cost, so Fire // Ice is {1}{R}; lands have no cost and never match."),
+  rulesText: z.array(z.string().min(1)).optional().describe(
+    "Words or phrases the card's rules text must all contain, typed as they would print " +
+    '(e.g. ["noncreature spell"], or ["whenever you cast", "draw a card"] for both). Capitals are ignored. A part of a word matches too ' +
+    '("draw" also finds "draws" and "drawn"), so write the longer phrase when you want fewer cards. Mana and counter symbols are ' +
+    'written as printed ("{U}", "+1/+1 counter"). The text of every face of a two-faced card counts. Each entry is matched as one ' +
+    "piece of text, so an entry never spans two abilities (abilities sit on separate lines); put separate ideas in separate entries."),
   maxPrice: z.number().nonnegative().optional().describe("Scryfall USD price ceiling; unpriced cards never match"),
   land: z.boolean().optional().describe("true = lands only, false = nonland only; omit for both"),
   name: z.string().min(1).optional().describe("Part of the card name (case, accents and punctuation ignored)"),
@@ -180,6 +195,12 @@ export function findCards(store: Store, input: FindCardsInput): FindCardsResult 
   between("c.mana_value", f.manaValue);
   if (f.power) { add(numeric("power")); between("CAST(c.power AS INTEGER)", f.power); }
   if (f.toughness) { add(numeric("toughness")); between("CAST(c.toughness AS INTEGER)", f.toughness); }
+  // A symbol that counts toward a color carries that color's letter exactly once ({U}, {U/R}, {2/U}, {U/P}, {G/U/P}), and no
+  // other symbol in a cost carries a color letter, so the letters in the cost are the symbols (the ISC-79 test checks
+  // this against the raw Scryfall costs by parsing the symbols).
+  for (const s of f.manaSymbols ?? []) add("(length(c.mana_cost) - length(replace(c.mana_cost, ?, ''))) >= ?", s.color, s.min);
+  // lower() folds A to Z only, so the bound phrase is folded the same way (not with toLowerCase, which folds more)
+  for (const w of f.rulesText ?? []) add("instr(lower(c.oracle_text), ?) > 0", w.replace(/[A-Z]/g, (ch) => ch.toLowerCase()));
   if (f.maxPrice !== undefined) add("c.usd_price IS NOT NULL AND c.usd_price <= ?", f.maxPrice);
   if (f.land !== undefined) add("c.is_land = ?", f.land ? 1 : 0);
   if (f.name !== undefined) add("instr(c.norm_name, ?) > 0", normName(f.name));
