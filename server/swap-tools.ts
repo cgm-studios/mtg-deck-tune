@@ -168,7 +168,8 @@ export const swapCandidatesShape = {
     "Role target counts, replacing the defaults for the roles named (e.g. {\"ramp\": 9}): the roles and redundancy levers " +
     "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)"),
   plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid). The plan lever needs it; with it, " +
-    "every lever reports plan fit before and after, and ties among cuts and fills go to the card that fits the plan"),
+    "every lever reports plan fit before and after, ties among cuts and fills go to the card that fits the plan, and its priority cards " +
+    "are never offered as the card to cut"),
 };
 const swapCandidatesInput = z.object(swapCandidatesShape).strict();
 export type SwapCandidatesInput = z.input<typeof swapCandidatesInput>;
@@ -215,6 +216,10 @@ type Ctx = {
 
 // A card's fit to the player's plan; 0 when the call carries no plan, so plan-fit tie-breaks fall through.
 const fitOf = (ctx: Ctx, c: SpaceCard) => ctx.plan?.fit(c.id).score ?? 0;
+
+// A priority card of the player's plan is never offered as the card to cut, on any lever (ISC-93): the player named it as
+// what the deck is about, as it is never off the plan (ISC-85). Asked to replace one by name, the per-card levers refuse.
+const isPriority = (ctx: Ctx, c: SpaceCard) => ctx.plan?.fit(c.id).priority === true;
 
 const swapCard = (store: Store, c: SpaceCard): SwapCard =>
   ({ name: c.name, manaValue: c.meta!.cmc, usd: c.meta!.usd, roles: countedRoles(store, c).map((r) => r.role) });
@@ -355,7 +360,7 @@ const picksFor = (ctx: Ctx, out: SpaceCard, lever: "plan" | "cheaper" | "budget"
 // incoming card used once (deck-swaps deckSwaps' rule), in the lever's order.
 const PER_CARD_IN_DECK = 3;
 function deckPicks(ctx: Ctx, lever: "plan" | "cheaper" | "budget", limit: number): Pick[] {
-  const outs = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id ? [[e.card.id, e.card] as const] : []))).values()]
+  const outs = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card] as const] : []))).values()]
     .sort((a, b) => byName(a.name, b.name));
   const all = outs.flatMap((c) => picksFor(ctx, c, lever, PER_CARD_IN_DECK)).sort(lever === "plan" ? PLAN_ORDER : LEVER_ORDER);
   const usedOut = new Set<string>(), usedIn = new Set<string>(), top: Pick[] = [];
@@ -368,15 +373,15 @@ function deckPicks(ctx: Ctx, lever: "plan" | "cheaper" | "budget", limit: number
 }
 
 // redundancy: deck cards that count toward a role over its target and whose removal leaves every role it counts toward
-// at or above its target (so a cut never opens a new gap). Order: relieves the most over-target roles, then lowest
-// plan score (off plan first), then highest mana value, then name.
+// at or above its target (so a cut never opens a new gap), never a priority card of the plan. Order: relieves the most
+// over-target roles, then lowest plan score (off plan first), then highest mana value, then name.
 type Cut = { card: SpaceCard; relieves: RoleStatus[]; tags: string[]; planScore: number };
 function cuts(ctx: Ctx, status: RoleStatus[]): Cut[] {
   const by = new Map(status.map((s) => [s.role, s]));
   const seen = new Set<string>(), out: Cut[] = [];
   for (const e of ctx.entries) {
     const c = e.card;
-    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id)) continue;
+    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id) || isPriority(ctx, c)) continue;
     seen.add(c.id);
     const roles = countedRoles(ctx.store, c);
     const relieves = roles.map((r) => by.get(r.role)!).filter((s) => s.status === "over");
@@ -443,12 +448,13 @@ function fills(ctx: Ctx, status: RoleStatus[]): Fill[] {
 //      then the most over-target roles relieved.
 //   4. Second choice, a card that costs no role: it counts toward none, or only toward roles the fill also gives.
 //   5. Ties: lowest plan score (off plan first), then highest mana value, then name. Each deck card is cut at most once.
+//   6. A priority card of the plan is never a cut.
 // No card passes 1 and 2: the fill stands as an add.
 type Pairing = { card: SpaceCard; lowered: RoleStatus[]; roles: string[] };
 function pairCuts(ctx: Ctx, list: Fill[], status: RoleStatus[]): (Pairing | null)[] {
   const by = new Map(status.map((s) => [s.role, s]));
   const left = new Map(status.map((s) => [s.role, s.count]));
-  const deck = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.id !== ctx.commander.id ? [[e.card.id, e.card] as const] : []))).values()]
+  const deck = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card] as const] : []))).values()]
     .map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: fitOf(ctx, card) }));
   const used = new Set<string>();
   return list.map((f) => {
@@ -509,6 +515,9 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
     if (!ctx.inDeck.has(card.id)) throw new ToolInputError(`${card.name} is not in the deck`);
     if (card.land) throw new ToolInputError(`${card.name} is a land; swap candidates cover nonland cards`);
     if (card.id === commander.id) throw new ToolInputError(`${card.name} is the commander`);
+    if (isPriority(ctx, card)) {
+      throw new ToolInputError(`${card.name} is one of the plan's priority cards, so it is never offered as a cut; if the player wants it replaced, take it out of the plan's priorities first`);
+    }
     if (f.lever === "budget" && card.meta!.usd === null) notes.push(`${card.name} has no Scryfall price, so no card is cheaper in dollars`);
     picks = picksFor(ctx, card, f.lever, f.limit ?? 5);
   } else if (f.lever === "plan" || f.lever === "cheaper" || f.lever === "budget") {
@@ -519,7 +528,10 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
   if (f.lever === "redundancy") {
     const list = cuts(ctx, roles!);
     for (const s of roles!) if (s.status === "over" && !list.some((c) => c.relieves.includes(s))) {
-      notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it also gives a role that would fall below target`);
+      const kept = [...new Map(deck.entries.flatMap((e) => (e.card && !e.card.land && e.card.id !== commander.id && isPriority(ctx, e.card) &&
+        countedRoles(store, e.card).some((r) => r.role === s.role) ? [[e.card.id, e.card.name] as const] : []))).values()].sort(byName);
+      notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it ${kept.length
+        ? `is a priority card of the plan (${kept.join(", ")}) or ` : ""}also gives a role that would fall below target`);
     }
     candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(ctx, c), c.tags));
   }
