@@ -434,3 +434,52 @@ describe("decks the graph reads only in part", () => {
     expect(() => diagnose(store, { commander: "Sophina, Spearsage Deserter", decklist: "1 Lightning Bolt", plan: { themes: ["Voltron"] } })).toThrow(ToolInputError);
   }, 60_000);
 });
+
+describe("the graph index's shortcuts give what the plain reads give (DT-6.5)", () => {
+  // linkerFor and castFeederCount exist for speed and memory (the shortlist reads thousands of cards against one deck);
+  // each must answer exactly what linksWith and castFeeders answer.
+  test("linkerFor(members) gives linksWith's links, in the same order, for random cards and random member sets", async () => {
+    const fc = (await import("fast-check")).default;
+    const n = idx.cards.length;
+    let links = 0;
+    fc.assert(fc.property(fc.uniqueArray(fc.integer({ min: 0, max: n - 1 }), { minLength: 1, maxLength: 80 }), fc.array(fc.integer({ min: 0, max: n - 1 }), { minLength: 1, maxLength: 25 }), (ms, cards) => {
+      const members = new Set(ms);
+      const linker = idx.linkerFor(members);
+      for (const i of cards) {
+        const want = idx.linksWith(i, members);
+        links += want.length;
+        expect(linker(i)).toEqual(want);
+      }
+    }), { numRuns: 60, seed: 6501 });
+    // the fixtures' decks, where links are many, against every card of a few hundred
+    for (const g of [namorG, teysaG]) {
+      const members = new Set(g.cards.map((c) => idx.indexOf(c.name)));
+      const linker = idx.linkerFor(members);
+      for (let i = 0; i < n; i += 97) { const want = idx.linksWith(i, members); links += want.length; expect(linker(i)).toEqual(want); }
+    }
+    expect(links).toBeGreaterThan(1000);
+  }, 120_000);
+
+  test("castFeederCount(l) is castFeeders(l)'s size, the listening card left out, for random listens", async () => {
+    const fc = (await import("fast-check")).default;
+    const n = idx.cards.length;
+    let listens = 0, selfFed = 0;
+    fc.assert(fc.property(fc.integer({ min: 0, max: n - 1 }), (i) => {
+      for (const l of idx.listensOf(i)) {
+        listens++;
+        const set = idx.castFeeders(l);
+        expect(set.has(i)).toBe(false);
+        expect(idx.castFeederCount(l)).toBe(set.size);
+      }
+    }), { numRuns: 400, seed: 6502 });
+    // a card that feeds its own listen just by being cast or entering (any creature that cares about creatures entering)
+    for (let i = 0; i < n && selfFed < 20; i++) for (const l of idx.listensOf(i)) {
+      const feedsItself = idx.emitsOf(i).some((e) => e.by === "card" && e.hook === l.hook) && idx.castFeederCount(l) > 0;
+      if (!feedsItself) continue;
+      selfFed++;
+      expect(idx.castFeederCount(l)).toBe(idx.castFeeders(l).size);
+    }
+    expect(listens).toBeGreaterThan(200);
+    expect(selfFed).toBe(20);
+  }, 120_000);
+});
