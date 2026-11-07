@@ -19,27 +19,18 @@
 // (ThinThemeError, ISC-77), the case where the skill asks the player for keystone cards instead (ISC-78).
 
 import { z } from "zod";
-import { resolveCard, resolveCommander, ToolInputError, type Store } from "./deck-tools";
-import { cardProfile, byteOrder, COMMANDER_WEIGHT, type HookProfile } from "./graph/profile";
+import { resolveCard, resolveCommander, type Store } from "./deck-tools";
+import { ToolInputError } from "./errors";
+import { planShape } from "./plan-input";
+import { byteOrder, cardProfile, COMMANDER_WEIGHT, hookWords, profileFit, profileMatcher, type HookProfile } from "./graph/profile";
 import { graphOf, type Graph } from "./graph/store-graph";
 import { STRATEGY_DEFAULTS, strategyProfile, themeCommanders } from "./graph/strategy";
 
 export { ThinThemeError, UnknownThemeError } from "./graph/strategy";
 
-const MAX_THEMES = 3;
-const MAX_PRIORITIES = 6; // the graph's card-plan limit (graph/profile.ts planCards)
-const MAX_AVOID = 5;
 const TOP_TAGS = 25;
 
-export const planShape = z.object({
-  themes: z.array(z.string().min(1)).max(MAX_THEMES).optional()
-    .describe(`EDHREC themes the deck is built around, by name (e.g. ["Aristocrats"]), at most ${MAX_THEMES}`),
-  priorities: z.array(z.string().min(1)).max(MAX_PRIORITIES).optional()
-    .describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}`),
-  avoid: z.array(z.string().min(1)).max(MAX_AVOID).optional()
-    .describe(`EDHREC themes the player does not want (e.g. ["Tokens"] for a deck that should not go wide), at most ${MAX_AVOID}`),
-}).strict();
-export type PlanInput = z.input<typeof planShape>;
+export { planShape, type PlanInput } from "./plan-input";
 
 const resolvePlanInput = z.object({
   commander: z.string().min(1),
@@ -186,5 +177,68 @@ export function resolvePlan(store: Store, input: ResolvePlanInput): ResolvedPlan
     priorities: priorities.map((p) => p.name),
     cards: priorities.length ? cardsProfile(store, graph, commander, priorities) : null,
     avoid: avoid.map((t) => themeProfile(store, graph, t)),
+  };
+}
+
+// ---------- plan fit of one card ----------
+// How well a card fits the plan, read against each plan profile (each theme, and the card profile) and taking the best:
+//   hooks  the graph's profileFit over profileMatcher (graph/profile.ts): the main hooks (weight above half the heaviest)
+//          the card's own abilities make or spend, never its own casting or entering; 0 for a card the graph could not
+//          translate
+//   tags   the summed weights of the profile's main tags (weight above half the heaviest, the same bar as main hooks)
+//          that the card's Tagger Card vector carries (its kept tags with their parents), so a card the graph cannot
+//          read (a counterspell, an anthem) still fits a plan that leans on it
+// score = hooks + tags, rounded to 3 places; a card with score 0 has no hook or tag in any plan profile (off plan).
+// This is the one plan fit the tools read (deck_stats planFit, the swap lever's plan gain); themes to avoid do not
+// enter it. Each part names what matched, heaviest first, for the reason text.
+export type PlanFit = { score: number; hooks: string[]; tags: string[] };
+/** A main tag weighs more than half the heaviest, as a main hook does (graph/profile.ts isMainHook). */
+const MAIN = 0.5;
+export type PlanScorer = (cardOracleId: string) => PlanFit;
+
+export function planScorer(store: Store, plan: ResolvedPlan): PlanScorer {
+  const graph = graphOf(store.db);
+  const { labels } = tagData(store);
+  const profiles = [...plan.themes, ...(plan.cards ? [plan.cards] : [])].map((p) => ({
+    match: profileMatcher(graph.index, p),
+    tags: new Map(p.tags.filter((t) => t.weight > MAIN).map((t) => [t.tag, t.weight])),
+  }));
+  const vector = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?");
+  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  const memo = new Map<string, PlanFit>();
+  return (oracleId) => {
+    const hit = memo.get(oracleId);
+    if (hit) return hit;
+    const id = idOf.get(oracleId);
+    if (id === undefined) throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
+    const i = graph.positionOf.get(id);
+    const row = vector.get(id) as { vector: Uint8Array } | null;
+    const cardTagSet = new Set((row ? unpack(row.vector) : []).map(([t]) => labels.get(t)));
+    let best: PlanFit = { score: 0, hooks: [], tags: [] };
+    for (const p of profiles) {
+      const fit = i === undefined ? { score: 0, counted: [] } : profileFit(p.match(i));
+      const tags = [...p.tags].filter(([t]) => cardTagSet.has(t));
+      const score = Math.round((fit.score + tags.reduce((s, [, w]) => s + w, 0)) * 1000) / 1000;
+      if (score > best.score) best = { score, hooks: [...new Set(fit.counted.map((c) => `${c.side} ${hookWords(c.hook)}`))], tags: tags.map(([t]) => t) };
+    }
+    memo.set(oracleId, best);
+    return best;
+  };
+}
+
+/** The plan as the tools echo it back: theme names as the data spells them, priority cards by exact name. */
+export type PlanEcho = { themes: string[]; priorities: string[]; avoid: string[] };
+/** What a tool needs to read plan fit: the confirmed plan as resolved, and its scorer. */
+export type PlanContext = { plan: PlanEcho; fit: PlanScorer };
+
+const themeName = (p: PlanProfile) => (p.source.kind === "strategy" ? p.source.theme : p.source.commander);
+
+/** The plan context for a tool call, or null when the call carries no plan. Throws the plan's ToolInputErrors. */
+export function planContext(store: Store, commander: string, plan: PlanInput | undefined): PlanContext | null {
+  if (plan === undefined) return null;
+  const resolved = resolvePlan(store, { commander, plan });
+  return {
+    plan: { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) },
+    fit: planScorer(store, resolved),
   };
 }

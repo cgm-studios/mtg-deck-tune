@@ -114,3 +114,72 @@ test("the theme floor read from the store matches the graph's: every theme's dec
   expect(got).toEqual(REC.themes as typeof got);
   expect(got.filter((t) => t.usable).length).toBe(50);
 });
+
+describe("the plan's other input checks", () => {
+  const err = (commander: string, plan: Parameters<typeof resolvePlan>[1]["plan"]) => {
+    try { resolvePlan(store, { commander, plan }); } catch (e) { return e as Error; }
+    throw new Error("resolvePlan did not throw");
+  };
+
+  test("an empty plan, an inexact or off-identity priority card, a repeated card and an untranslated card are tool errors that say why", () => {
+    for (const [commander, plan, why] of [
+      ["Teysa Karlov", {}, /at least one theme or one priority card/],
+      ["Teysa Karlov", { avoid: ["Tokens"] }, /at least one theme or one priority card/],
+      ["Teysa Karlov", { priorities: ["Blood Art"] }, /not an exact card name; candidates: Blood Artist/],
+      ["Teysa Karlov", { priorities: ["Krenko, Mob Boss"] }, /outside Teysa Karlov's color identity/],
+      ["Teysa Karlov", { priorities: ["Blood Artist", "Blood Artist"] }, /must all be different/],
+      ["Teysa Karlov", { priorities: ["Teysa Karlov"] }, /must all be different/],
+      ["Teysa Karlov", { priorities: ["Gisa's Favorite Shovel"] }, /no card graph data/],
+    ] as const) {
+      const e = err(commander, plan as Parameters<typeof resolvePlan>[1]["plan"]);
+      expect({ plan, error: e instanceof ToolInputError }).toEqual({ plan, error: true });
+      expect(e.message).toMatch(why);
+    }
+  });
+
+  test("the same commander and plan resolve to the same profiles, card for card, however the theme is spelled", () => {
+    const plan = { themes: ["Aristocrats", "+1/+1 Counters"], priorities: ["Blood Artist", "Viscera Seer"], avoid: ["Tokens"] };
+    const a = resolvePlan(store, { commander: "Teysa Karlov", plan });
+    const b = resolvePlan(store, { commander: "teysa karlov", plan: { ...plan, themes: ["aristocrats", "plus-1-plus-1-counters"] } });
+    expect(b).toEqual(a);
+    expect(a.themes.map((t) => t.source)).toEqual([
+      { kind: "strategy", theme: "Aristocrats", commanders: 86 }, { kind: "strategy", theme: "+1/+1 Counters", commanders: 275 },
+    ]);
+    expect(a.avoid.map((t) => t.source)).toEqual([{ kind: "strategy", theme: "Tokens", commanders: 269 }]);
+  }, 60_000);
+});
+
+describe("the ported graph reads only the store", () => {
+  test("the store's graph mapping version must match the ported mapping, or the graph is refused", async () => {
+    const { Database } = await import("bun:sqlite");
+    const { checkMappingVersion } = await import("./graph/store-graph");
+    const { MAPPING_VERSION } = await import("./graph/closure");
+    expect(MAPPING_VERSION).toBe("0.4.0");
+    expect(() => checkMappingVersion(store.db)).not.toThrow();
+    for (const value of ["0.3.0", null]) {
+      const db = new Database(":memory:");
+      db.run("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)");
+      if (value) db.run("INSERT INTO meta VALUES ('graph_mapping_version', ?)", [value]);
+      expect(() => checkMappingVersion(db)).toThrow(/mapping/);
+      db.close();
+    }
+  });
+
+  test("the ported mapping file is the graph repo's mapping 0.4.0 byte for byte (its lock hash)", async () => {
+    const { createHash } = await import("node:crypto");
+    const dir = new URL("./graph/mapping/", import.meta.url);
+    const lock = JSON.parse(readFileSync(new URL("forge-map.lock.json", dir), "utf8")) as Record<string, string>;
+    expect(createHash("sha256").update(readFileSync(new URL("forge-map.json", dir))).digest("hex")).toBe(lock["0.4.0"]);
+  });
+
+  test("no ported module or the plan resolver opens a file, a sibling checkout or the network", async () => {
+    const { readdirSync } = await import("node:fs");
+    const dir = new URL("./graph/", import.meta.url);
+    const sources = [...readdirSync(dir).filter((f) => f.endsWith(".ts")).map((f) => new URL(f, dir)), new URL("./plan.ts", import.meta.url)];
+    expect(sources.length).toBeGreaterThanOrEqual(6);
+    for (const f of sources) {
+      const text = readFileSync(f, "utf8");
+      expect({ f: f.pathname.split("/").pop(), fs: /node:fs|readFileSync|Bun\.file|fetch\(|\.\.\/mtg-|import\.meta\.dir/.test(text) }).toEqual({ f: f.pathname.split("/").pop(), fs: false });
+    }
+  });
+});

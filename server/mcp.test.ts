@@ -11,10 +11,13 @@ import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSpace, normName as normNameOf, parseDecklist, resolveName } from "./deck-pool";
-import { cardDetails, deckStats, findCards, findTags, neighbors, openStore, type FindCardsInput, type FoundCard, type Store } from "./deck-tools";
+import { cardDetails, deckStats, findCards, findTags, neighbors, openStore, ToolInputError, type FindCardsInput, type FoundCard, type Store } from "./deck-tools";
 import { acceptSwap, LABELS_PATH, rejectSwap, swapCandidates } from "./swap-tools";
 import { createDeckServer } from "./mcp";
 import { loadRoleIndex, roleSheet } from "./roles";
+
+// A player's confirmed plan for the Namor fixture (DT-6.3): the plan comes from the player, never from Namor's text.
+const NAMOR_PLAN = { themes: ["Spellslinger"] };
 
 let store: Store;
 let client: Client;
@@ -258,13 +261,15 @@ test("deck stats: Namor returns average mana value, curve, role counts, pip load
   expect(s.roleCounts).toEqual(sheet.counts);
   expect(s.unroled).toEqual(sheet.unroled);
 
-  // plan read from Namor's text: noncreature spells with blue pips make tokens; the tribe is Merfolk
-  expect(s.planFit.plan).toEqual({ spellPips: "U", tribe: "Merfolk" });
-  expect(s.planFit.of).toBe(63); // nonland cards other than the commander
-  expect(s.planFit.onPlan + s.planFit.offPlan.length).toBe(63);
-  // off plan: no blue pip on a noncreature spell, not a Merfolk, no payoff text; checked by hand against the list
-  for (const off of ["Sol Ring", "Mind Stone", "Lightning Greaves", "Chasm Skulker"]) expect(s.planFit.offPlan).toContain(off);
-  for (const on of ["Opt", "Merfolk Looter", "Talrand, Sky Summoner", "Curiosity"]) expect(s.planFit.offPlan).not.toContain(on);
+  // plan fit comes from the player's plan only (ISC-48): without one there is none, never a reading of Namor's text
+  expect(s.planFit).toBeNull();
+  const p = deckStats(store, { deckFile: "fixtures/namor.txt", commander: "Namor the Sub-Mariner", plan: NAMOR_PLAN }).planFit!;
+  expect(p.plan).toEqual({ themes: ["Spellslinger"], priorities: [], avoid: [] });
+  expect(p.of).toBe(63); // nonland cards other than the commander
+  expect(p.onPlan + p.offPlan.length).toBe(63);
+  // a spellslinger plan: mana rocks and equipment do nothing for it; spell payoffs and cantrips do (checked by hand)
+  for (const off of ["Sol Ring", "Mind Stone", "Lightning Greaves", "Swiftfoot Boots"]) expect(p.offPlan).toContain(off);
+  for (const on of ["Opt", "Consider", "Talrand, Sky Summoner", "Archmage of Runes"]) expect(p.offPlan).not.toContain(on);
 });
 
 test("deck stats: a pasted list works like a file, misses are flagged by line with close names, off-identity cards are named", () => {
@@ -294,6 +299,12 @@ const DATA_STRINGS: Record<string, string> = {
   "deck_stats.commander": "a card name, resolved in TypeScript",
   "deck_stats.deckFile": "a file path, read from disk",
   "deck_stats.decklist": "decklist text, parsed in TypeScript",
+  "deck_stats.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "deck_stats.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "deck_stats.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "swap_candidates.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "swap_candidates.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "swap_candidates.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
   "neighbors.card": "a card name, resolved in TypeScript",
   "tags.text": "words matched against tag labels and descriptions in TypeScript",
   "tags.colorIdentity": "WUBRG letters, checked by a regex and turned into a bitmask",
@@ -436,38 +447,40 @@ test("budget lever: for random priced cards and commanders, every candidate has 
   expect(r.notes.join(" ")).toMatch(/no Scryfall price/);
 }, 120_000);
 
-// Twelve Namor swaps a player rated good on 2026-11-06 (the file-based lever's tests hold the same list). Each must
-// stay offered in the top 3 for its card.
+// Twelve Namor swaps a player rated good on 2026-11-06, under the old plan lever that read Namor's text (blue pips per
+// spell, Merfolk). That reading is retired (ISA ISC-48: the plan comes from the player), so these are no longer a pass
+// bar for the lever; they stay as a measurement. Under a Spellslinger plan the lever keeps 3 of the 12 (measured
+// 2026-11-07: Chasm Skulker → Kaito, The Reality Chip → Counterbalance, Thought Vessel → Ms. Marvel); the old lever's
+// pip count, which made Neutralize beat Censor, is not a hook or a tag. The shortlist (DT-6.5) replaces this lever.
 const RATED_NAMOR: [string, string][] = [
   ["Archmage of Runes", "Spellweaver Volute"], ["Blink of an Eye", "Distorting Wake"], ["Censor", "Neutralize"], ["Chasm Skulker", "Kaito, Cunning Infiltrator"],
   ["Deeproot Pilgrimage", "Daughter of the Deep"], ["Dig Through Time", "Ancestral Memories"], ["Essence Scatter", "Mystic Denial"], ["Evacuation", "Inundate"],
   ["Imprisoned in the Moon", "In Too Deep"], ["Remand", "Archmage's Charm"], ["The Reality Chip", "Counterbalance"], ["Thought Vessel", "Ms. Marvel, Kamala Khan"],
 ];
 
-test("plan lever: all 12 Namor swaps a player rated good are still offered in the top 3 for their card, through swap_candidates", () => {
-  for (const [out, inn] of RATED_NAMOR) {
-    const r = swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", card: out, lever: "plan", limit: 3 });
-    expect(r.candidates.map((c) => c.in!.name)).toContain(inn);
-  }
+test("plan lever: under a Spellslinger plan, at least the 3 of the 12 rated Namor swaps measured on 2026-11-07 stay in the top 3 for their card", () => {
+  const kept = RATED_NAMOR.filter(([out, inn]) => swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", card: out, lever: "plan", limit: 3, plan: NAMOR_PLAN })
+    .candidates.some((c) => c.in!.name === inn));
+  expect(kept.length).toBeGreaterThanOrEqual(3);
 }, 60_000);
 
-test("plan lever: per card, the store port offers the same candidates in the same order as the file-based lever (deck-swaps.ts on MV-10's in-color graph)", async () => {
-  const { spaceFor, resolveName } = await import("./deck-pool");
-  const { deckSwaps, readPlan } = await import("./deck-swaps");
-  const base = await loadSpace();
-  const cmd = resolveName(base, "Namor the Sub-Mariner")!;
-  const space = await spaceFor(base, cmd);
-  const deck = parseDecklist(base, await Bun.file(NAMOR_DECK).text());
-  const ref = deckSwaps(space, cmd, deck.entries.map((e) => e.card!.id), readPlan(cmd), { perCard: 5 });
-  let compared = 0;
-  for (const c of ref.cards) {
-    const want = (ref.perCard.get(c.id) ?? []).map((s) => s.in.name);
-    const got = swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", card: c.name, lever: "plan", limit: 5 });
-    expect({ card: c.name, offered: got.candidates.map((x) => x.in!.name) }).toEqual({ card: c.name, offered: want });
-    compared += want.length;
+test("plan lever: it needs the player's plan, and every candidate fits that plan strictly better than the card it replaces, at most 1 mana value more (ISC-48)", () => {
+  const base = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever: "plan" as const };
+  expect(() => swapCandidates(store, base)).toThrow(/needs|pass plan/);
+  expect(() => swapCandidates(store, base)).toThrow(ToolInputError);
+  const r = swapCandidates(store, { ...base, plan: NAMOR_PLAN });
+  expect(r.plan).toEqual({ themes: ["Spellslinger"], priorities: [], avoid: [] });
+  expect(r.candidates.length).toBeGreaterThan(5);
+  for (const c of r.candidates) {
+    expect(c.evidence.planGain!).toBeGreaterThan(0);
+    expect(c.evidence.manaValueDelta).toBeLessThanOrEqual(1);
+    expect(c.reason).toMatch(/^plan: /);
   }
-  expect(compared).toBeGreaterThan(30);
-}, 120_000);
+  // the same plan named another way reads the same; a plan the data cannot read is a tool error saying which
+  expect(swapCandidates(store, { ...base, plan: { themes: ["spellslinger"] } }).candidates).toEqual(r.candidates);
+  expect(() => swapCandidates(store, { ...base, plan: { themes: ["Stompy"] } })).toThrow(/too little data/);
+  expect(() => swapCandidates(store, { ...base, plan: { themes: ["Spellslingr"] } })).toThrow(/closest known themes: Spellslinger/);
+}, 60_000);
 
 // Commander legality and color identity read from the raw Scryfall dump (deck-pool loadSpace), not from the store. Names
 // repeat in the dump (the token "Storm Crow" is not legal; the card is), so a name passes when a same-named entry does.
@@ -497,10 +510,11 @@ test("swap identity: for random commanders, decks and cards, every candidate und
   fc.assert(fc.property(deckDraw, fc.constantFrom(...LEVER_LIST), ({ commander, seeds, off }, lever) => {
     const decklist = drawDeck(commander, seeds, off);
     const cmd = ciOf(commander);
-    const deckRun = swapCandidates(store, { commander, decklist, lever });
+    const plan = lever === "plan" ? { themes: ["Tokens"] } : undefined; // a theme plan fits any commander
+    const deckRun = swapCandidates(store, { commander, decklist, lever, plan });
     wholeDeck[lever] += deckRun.candidates.length;
     const runs = [deckRun];
-    if (lever !== "roles") runs.push(swapCandidates(store, { commander, decklist, lever, card: decklist.split("\n")[0].slice(2) }));
+    if (lever !== "roles") runs.push(swapCandidates(store, { commander, decklist, lever, plan, card: decklist.split("\n")[0].slice(2) }));
     for (const r of runs) for (const s of r.candidates) {
       if (s.in) { seen++; expect({ card: s.in.name, ok: legalInside(s.in.name, cmd) }).toEqual({ card: s.in.name, ok: true }); }
       if (s.out) expect(decklist).toContain(`1 ${s.out.name}`);
@@ -514,8 +528,8 @@ test("swap identity: for random commanders, decks and cards, every candidate und
 function namorCandidates() {
   const runs = [];
   for (const lever of ["plan", "cheaper", "budget"] as const) {
-    runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever }));
-    for (const card of ["Dig Through Time", "Remand", "Sol Ring"]) runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever, card }));
+    runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever, plan: NAMOR_PLAN }));
+    for (const card of ["Dig Through Time", "Remand", "Sol Ring"]) runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever, card, plan: NAMOR_PLAN }));
   }
   return runs;
 }
@@ -557,16 +571,16 @@ function editedList(text: string, out: string, inn: string): string {
 
 test("swap deltas: every Namor candidate carries the deck numbers after the swap, equal to deck_stats on the edited list, and the change from before (ISC-21.2)", async () => {
   const text = await Bun.file(NAMOR_DECK).text();
-  const before = deckStats(store, { deckFile: "fixtures/namor.txt", commander: "Namor the Sub-Mariner" });
+  const before = deckStats(store, { deckFile: "fixtures/namor.txt", commander: "Namor the Sub-Mariner", plan: NAMOR_PLAN });
   let n = 0;
   for (const r of namorCandidates()) {
-    expect(r.before).toMatchObject({ cards: before.cards, averageManaValue: before.averageManaValue, curve: before.curve, roleCounts: before.roleCounts, pipLoad: before.pipLoad, onPlan: before.planFit.onPlan });
+    expect(r.before).toMatchObject({ cards: before.cards, averageManaValue: before.averageManaValue, curve: before.curve, roleCounts: before.roleCounts, pipLoad: before.pipLoad, onPlan: before.planFit!.onPlan });
     for (const c of r.candidates) {
       n++;
-      const after = deckStats(store, { decklist: editedList(text, c.out!.name, c.in!.name), commander: "Namor the Sub-Mariner" });
-      expect(c.after).toEqual({ cards: after.cards, nonland: after.nonland, averageManaValue: after.averageManaValue, curve: after.curve, roleCounts: after.roleCounts, pipLoad: after.pipLoad, onPlan: after.planFit.onPlan, planOf: after.planFit.of });
+      const after = deckStats(store, { decklist: editedList(text, c.out!.name, c.in!.name), commander: "Namor the Sub-Mariner", plan: NAMOR_PLAN });
+      expect(c.after).toEqual({ cards: after.cards, nonland: after.nonland, averageManaValue: after.averageManaValue, curve: after.curve, roleCounts: after.roleCounts, pipLoad: after.pipLoad, onPlan: after.planFit!.onPlan, planOf: after.planFit!.of });
       expect(c.delta.averageManaValue).toBeCloseTo(after.averageManaValue - before.averageManaValue, 3);
-      expect(c.delta.onPlan).toBe(after.planFit.onPlan - before.planFit.onPlan);
+      expect(c.delta.onPlan).toBe(after.planFit!.onPlan - before.planFit!.onPlan);
       for (const [role, k] of Object.entries(after.roleCounts)) expect(c.delta.roleCounts[role] ?? 0).toBe(k - before.roleCounts[role]);
       for (const [b, k] of Object.entries(after.curve)) expect(c.delta.curve[b] ?? 0).toBe(k - before.curve[b as keyof typeof before.curve]);
     }
@@ -578,7 +592,7 @@ test("role drop flag: swapping the deck's only counterspell for a card that is n
   const decklist = "1 Counterspell\n1 Sol Ring\n1 Opt\n1 Merfolk Looter\n30 Island";
   let flagged = 0, kept = 0;
   for (const lever of ["plan", "cheaper", "budget"] as const) {
-    const r = swapCandidates(store, { commander: "Namor the Sub-Mariner", decklist, card: "Counterspell", lever, limit: 50 });
+    const r = swapCandidates(store, { commander: "Namor the Sub-Mariner", decklist, card: "Counterspell", lever, limit: 50, plan: NAMOR_PLAN });
     expect(r.before.roleCounts.counterspell).toBe(1);
     for (const c of r.candidates) {
       const counters = cardDetails(store, { name: c.in!.name }).card.roles.some((x) => x.role === "counterspell");
@@ -823,7 +837,7 @@ test("neighbors tool: a card outside the commander's identity, a land, and an in
 });
 
 test("swap tools over MCP: swap_candidates answers through the client with the same result as the function; mistakes and SQL come back as tool errors", async () => {
-  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever: "plan", card: "Remand", limit: 3 };
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever: "plan", card: "Remand", limit: 3, plan: NAMOR_PLAN };
   const res = await client.callTool({ name: "swap_candidates", arguments: args });
   expect(res.isError).toBeFalsy();
   expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(swapCandidates(store, args as Parameters<typeof swapCandidates>[1]))));

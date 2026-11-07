@@ -25,7 +25,8 @@
 // order; a miss lists the closest themes by edit distance, not substring only; refusals are typed errors the tools
 // return as tool errors (UnknownThemeError, ThinThemeError).
 import type { Database } from "bun:sqlite";
-import { editDistance, ToolInputError } from "../deck-tools";
+import { editDistance } from "../deck-tools";
+import { ToolInputError } from "../errors";
 import type { Graph } from "./store-graph";
 import { byteOrder, normalizeProfile, offProfile, type HookProfile, type ProfileEntry } from "./profile";
 

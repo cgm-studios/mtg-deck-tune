@@ -8,7 +8,8 @@ import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { ciMask, fitsIdentity } from "./color-identity";
 import { buildSpace, normName, parseDecklist, type DeckEntry, type Space, type SpaceCard } from "./deck-pool";
-import { planScore, readPlan, type Plan } from "./deck-swaps";
+import { planContext, type PlanContext, type PlanEcho } from "./plan";
+import { planShape } from "./plan-input";
 import { DB_PATH, DECK_ROOT } from "./paths";
 import { compileRoleMap, roleSheet, rolesOf, type RoleHit, type RoleIndex, type RoleMap, type TagRecord } from "./roles";
 
@@ -20,7 +21,7 @@ export type Store = {
   db: Database;
   vocab: { types: Vocab; subtypes: Vocab; keywords: Vocab; tags: Map<string, { id: number; label: string }> };
   // every card as deck-pool's SpaceCard (rules data in `meta`, Regions in `r`, no neighbor lists), so decklists resolve
-  // exactly as `bun app/deck.ts` resolves them and readPlan / planScore / swapsFor read the same fields
+  // exactly as `bun app/deck.ts` resolves them and swapsFor reads the same fields
   space: Space;
   names: { id: number; oracleId: string; name: string; norm: string }[]; // every card, in store id (name) order, for fuzzy lookup
   roles: RoleIndex; // the MV-14 role map compiled against the store's own Tagger tree
@@ -79,8 +80,9 @@ export function openStore(path = DB_PATH, roleMapPath = ROLE_MAP_PATH): Store {
   };
 }
 
-// A caller's mistake (unknown name, bad value): the server returns it as a tool error the model can act on.
-export class ToolInputError extends Error {}
+// A caller's mistake (unknown name, bad value): the server returns it as a tool error the model can act on (errors.ts).
+export { ToolInputError } from "./errors";
+import { ToolInputError } from "./errors";
 
 // Edit distance, for "close matches" lists and fuzzy card names.
 export function editDistance(a: string, b: string): number {
@@ -270,9 +272,9 @@ export function cardDetails(store: Store, input: CardInput): CardResult {
 //   roleCounts        MV-14 role map: copies per role, every role listed; `unroled` names nonland cards with none
 //   pipLoad           colored mana symbols in nonland mana costs (front face), per color; a hybrid or Phyrexian
 //                     symbol counts once for each color in it
-//   planFit           the commander's plan read from its text (deck-swaps readPlan), and which nonland cards other
-//                     than the commander score on it (planScore > 0). readPlan parses pip payoffs and tribes only
-//                     (ISA fog: other commanders).
+//   planFit           with the player's confirmed plan (`plan`): which nonland cards other than the commander fit it
+//                     (plan.ts planScorer score > 0: a hook or tag of the plan's profiles), and which do not; null when
+//                     the call carries no plan. The plan always comes from the player, never from the commander's text.
 const CURVE = ["0", "1", "2", "3", "4", "5", "6", "7+"] as const;
 const COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -280,6 +282,7 @@ export const deckStatsShape = {
   commander: z.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored); use the card tool to look a partial name up"),
   deckFile: z.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
   decklist: z.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid); with it, planFit says which cards fit it"),
 };
 const deckStatsInput = z.object(deckStatsShape).strict();
 export type DeckStatsInput = z.input<typeof deckStatsInput>;
@@ -294,7 +297,7 @@ export type DeckNumbers = {
   roleCounts: Record<string, number>;
   unroled: string[];
   pipLoad: Record<(typeof COLORS)[number], number>;
-  planFit: { plan: Plan; onPlan: number; of: number; offPlan: string[] };
+  planFit: { plan: PlanEcho; onPlan: number; of: number; offPlan: string[] } | null; // null without a plan
   offIdentity: string[]; // cards outside the commander's color identity
 };
 export type DeckStats = DeckNumbers & {
@@ -336,7 +339,7 @@ export function unresolvedLines(store: Store, misses: DeckEntry[]): DeckStats["u
   });
 }
 
-export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: DeckEntry[]): DeckNumbers {
+export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: DeckEntry[], plan: PlanContext | null = null): DeckNumbers {
   const entries = deckEntries.filter((e): e is DeckEntry & { card: SpaceCard } => !!e.card);
   const nonland = entries.filter((e) => !e.card.land);
   const copies = (es: typeof entries) => es.reduce((n, e) => n + e.qty, 0);
@@ -353,9 +356,8 @@ export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: Dec
   const n = copies(nonland);
 
   const sheet = roleSheet(store.roles, deckEntries);
-  const plan = readPlan(commander);
   const scored = [...new Map(nonland.filter((e) => e.card.id !== commander.id).map((e) => [e.card.id, e.card])).values()];
-  const offPlan = scored.filter((c) => planScore(c, plan).score === 0).map((c) => c.name);
+  const offPlan = plan ? scored.filter((c) => plan.fit(c.id).score === 0).map((c) => c.name) : [];
   const distinct = [...new Map(entries.map((e) => [e.card.id, e.card])).values()];
   const offIdentity = distinct.filter((c) => !fitsIdentity(c, commander.ci)).map((c) => c.name);
 
@@ -364,7 +366,7 @@ export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: Dec
     cards: copies(entries), lands: copies(entries) - n, nonland: n,
     averageManaValue: n ? Math.round((mvSum / n) * 1000) / 1000 : 0,
     curve, roleCounts: sheet.counts, unroled: sheet.unroled, pipLoad,
-    planFit: { plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan },
+    planFit: plan ? { plan: plan.plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan } : null,
     offIdentity,
   };
 }
@@ -374,9 +376,10 @@ export function deckStats(store: Store, input: DeckStatsInput): DeckStats {
   const text = readDeck(f);
   const { card: commander, matchedBy } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
+  const plan = planContext(store, commander.name, f.plan);
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join(""), matchedBy },
-    ...deckNumbers(store, commander, deck.entries),
+    ...deckNumbers(store, commander, deck.entries, plan),
     unresolved: unresolvedLines(store, deck.unresolved),
   };
 }

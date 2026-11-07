@@ -8,11 +8,13 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ciMask, fitsIdentity } from "./color-identity";
 import { parseDecklist, withGraph, type DeckEntry, type Space, type SpaceCard } from "./deck-pool";
-import { planScore, readPlan, swapsFor, type Plan } from "./deck-swaps";
+import { swapsFor } from "./deck-swaps";
 import {
   deckNumbers, deckPath, readDeck, resolveCard, resolveCommander, ToolInputError, unresolvedLines,
   type DeckNumbers, type DeckStats, type Store,
 } from "./deck-tools";
+import { planContext, type PlanContext, type PlanEcho } from "./plan";
+import { planShape } from "./plan-input";
 import { rolesOf } from "./roles";
 
 // ---------- the commander's in-color Card Space ----------
@@ -108,15 +110,15 @@ const roleStatus = (store: Store, counts: Record<string, number>, targets: Recor
 // ---------- numbers before and after ----------
 // The deck_stats numbers that move when one card changes, for the before side (once per answer) and each candidate's
 // after side; `delta` is after minus before, listing only what changed.
-export type SwapStats = Pick<DeckNumbers, "cards" | "nonland" | "averageManaValue" | "curve" | "roleCounts" | "pipLoad"> & { onPlan: number; planOf: number };
+export type SwapStats = Pick<DeckNumbers, "cards" | "nonland" | "averageManaValue" | "curve" | "roleCounts" | "pipLoad"> & { onPlan: number | null; planOf: number | null }; // null without a plan
 export type StatsDelta = {
-  cards: number; averageManaValue: number; onPlan: number;
+  cards: number; averageManaValue: number; onPlan: number | null;
   curve: Record<string, number>; roleCounts: Record<string, number>; pipLoad: Record<string, number>;
 };
 
 const swapStats = (n: DeckNumbers): SwapStats => ({
   cards: n.cards, nonland: n.nonland, averageManaValue: n.averageManaValue, curve: n.curve, roleCounts: n.roleCounts, pipLoad: n.pipLoad,
-  onPlan: n.planFit.onPlan, planOf: n.planFit.of,
+  onPlan: n.planFit?.onPlan ?? null, planOf: n.planFit?.of ?? null,
 });
 
 function changed(a: Record<string, number>, b: Record<string, number>): Record<string, number> {
@@ -126,7 +128,7 @@ function changed(a: Record<string, number>, b: Record<string, number>): Record<s
 }
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
 const statsDelta = (a: SwapStats, b: SwapStats): StatsDelta => ({
-  cards: b.cards - a.cards, averageManaValue: round3(b.averageManaValue - a.averageManaValue), onPlan: b.onPlan - a.onPlan,
+  cards: b.cards - a.cards, averageManaValue: round3(b.averageManaValue - a.averageManaValue), onPlan: a.onPlan === null || b.onPlan === null ? null : b.onPlan - a.onPlan,
   curve: changed(a.curve, b.curve), roleCounts: changed(a.roleCounts, b.roleCounts), pipLoad: changed(a.pipLoad, b.pipLoad),
 });
 
@@ -156,7 +158,7 @@ export const swapCandidatesShape = {
   deckFile: z.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory"),
   decklist: z.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
   lever: z.enum(LEVERS).describe(
-    "plan: in-color Card Space neighbors in the same Region that score higher on the commander's plan, at most 1 mana value more; " +
+    "plan: in-color Card Space neighbors in the same Region that fit the player's plan better (needs `plan`), at most 1 mana value more; " +
     "cheaper: lower mana value; budget: lower Scryfall USD price; " +
     "roles: per-role counts against targets, and cards that fill roles under target; " +
     "redundancy: roles over target, and deck cards that could be cut"),
@@ -165,6 +167,8 @@ export const swapCandidatesShape = {
   targets: z.record(z.string(), z.number().int().min(0)).optional().describe(
     "Role target counts, replacing the defaults for the roles named (e.g. {\"ramp\": 9}): the roles and redundancy levers " +
     "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid). The plan lever needs it; with it, " +
+    "every lever reports plan fit before and after, and ties among cuts and fills go to the card that fits the plan"),
 };
 const swapCandidatesInput = z.object(swapCandidatesShape).strict();
 export type SwapCandidatesInput = z.input<typeof swapCandidatesInput>;
@@ -176,7 +180,7 @@ export type Evidence = {
   similarity: number | null; // Card Space similarity, when they are neighbors either way
   sharedTags: string[]; // Tagger tags both cards carry directly
   roleTags: string[]; // roles and redundancy levers: the card's own Tagger tags that give the role it fills or relieves
-  planGain: number; // plan score in minus out (deck-swaps planScore); an absent side scores 0
+  planGain: number | null; // plan fit in minus out (plan.ts planScorer); an absent side scores 0; null without a plan
   manaValueDelta: number; // in minus out; an absent side counts 0
   priceDelta: number | null; // in minus out, USD; an absent side costs $0; null when a present card is unpriced
 };
@@ -195,7 +199,7 @@ export type Candidate = {
 export type SwapCandidatesResult = {
   commander: { name: string; colorIdentity: string };
   lever: Lever; card: string | null;
-  plan: Plan;
+  plan: PlanEcho | null;
   before: SwapStats;
   roles: RoleStatus[] | null; // the roles and redundancy levers: every role's count against its target
   candidates: Candidate[];
@@ -204,10 +208,13 @@ export type SwapCandidatesResult = {
 };
 
 type Ctx = {
-  store: Store; commander: SpaceCard; mask: number; plan: Plan; graph: InColor;
+  store: Store; commander: SpaceCard; mask: number; plan: PlanContext | null; graph: InColor;
   entries: DeckEntry[]; inDeck: Set<string>; before: SwapStats;
   targets: Record<string, number>; // every role's target, for the below-target flag under every lever
 };
+
+// A card's fit to the player's plan; 0 when the call carries no plan, so plan-fit tie-breaks fall through.
+const fitOf = (ctx: Ctx, c: SpaceCard) => ctx.plan?.fit(c.id).score ?? 0;
 
 const swapCard = (store: Store, c: SpaceCard): SwapCard =>
   ({ name: c.name, manaValue: c.meta!.cmc, usd: c.meta!.usd, roles: countedRoles(store, c).map((r) => r.role) });
@@ -231,7 +238,7 @@ const tagList = (tags: string[]) => `${tags.slice(0, 6).join(", ")}${tags.length
 // `out` alone is a cut (the redundancy lever), `in` alone an add (a role fill with nothing left to cut).
 function candidate(ctx: Ctx, out: SpaceCard | null, inCard: SpaceCard | null, why: string[], roleTags: string[] = []): Candidate {
   if (!out && !inCard) throw new Error("candidate: needs an outgoing card, an incoming card, or both");
-  const { store, plan } = ctx;
+  const { store } = ctx;
   const l = out && inCard ? links(ctx, out, inCard) : { neighborRank: null, reverseRank: null, similarity: null };
   const outTags = new Set(out ? directTags(store, out.id) : []);
   const sharedTags = inCard ? directTags(store, inCard.id).filter((t) => outTags.has(t)) : [];
@@ -240,9 +247,10 @@ function candidate(ctx: Ctx, out: SpaceCard | null, inCard: SpaceCard | null, wh
   const mvDelta = mv(inCard) - mv(out);
   const inUsd = usd(inCard), outUsd = usd(out);
   const priceDelta = inUsd !== null && outUsd !== null ? round3(inUsd - outUsd) : null;
-  const score = (c: SpaceCard | null) => (c ? planScore(c, plan).score : 0);
-  const evidence: Evidence = { ...l, sharedTags, roleTags, planGain: score(inCard) - score(out), manaValueDelta: mvDelta, priceDelta };
-  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard)));
+  const score = (c: SpaceCard | null) => (c ? fitOf(ctx, c) : 0);
+  const planGain = ctx.plan ? Math.round((score(inCard) - score(out)) * 1000) / 1000 : null;
+  const evidence: Evidence = { ...l, sharedTags, roleTags, planGain, manaValueDelta: mvDelta, priceDelta };
+  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard), ctx.plan));
   const roleDrops = ctx.store.roles.roleNames
     .filter((r) => after.roleCounts[r] < ctx.before.roleCounts[r])
     .map((r) => ({ role: r, before: ctx.before.roleCounts[r], after: after.roleCounts[r] }));
@@ -323,12 +331,21 @@ function leverPicks(ctx: Ctx, out: SpaceCard, lever: "cheaper" | "budget"): Pick
 }
 
 // plan for one card: the MV-10 swap lever (deck-swaps.ts swapsFor, its defaults: same leidenHi Region, a strict plan
-// gain, at most 1 mana value more, reverse neighbors on) run on the commander's in-color Space built from the store.
-// Its order is kept: plan gain × similarity.
+// gain, at most 1 mana value more, reverse neighbors on) run on the commander's in-color Space built from the store,
+// with the player's plan as the fit (plan.ts planScorer). Its order is kept: plan gain × similarity.
 function planPicks(ctx: Ctx, out: SpaceCard, limit: number): Pick[] {
+  const plan = ctx.plan;
+  if (!plan) throw new Error("planPicks: the plan lever runs only with a plan (swapCandidates checks)");
   const deck = new Set([...ctx.inDeck, ctx.commander.id]);
-  return swapsFor(ctx.graph.space, out, deck, ctx.plan, { colorIdentity: ctx.commander.ci, perCard: limit })
-    .map((s) => pick(ctx, out, ctx.store.space.cards.get(s.in.id)!, [`plan: ${s.why.join(", ")} (plan score ${signed(s.gain)})`], 0, s.rank));
+  return swapsFor(ctx.graph.space, out, deck, (c) => plan.fit(c.id).score, { colorIdentity: ctx.commander.ci, perCard: limit })
+    .map((s) => pick(ctx, out, ctx.store.space.cards.get(s.in.id)!, [planWhy(plan, s.in, out, s.gain)], 0, s.rank));
+}
+
+// What the incoming card fits in the plan, and its fit against the outgoing card's.
+function planWhy(plan: PlanContext, inCard: SpaceCard, out: SpaceCard, gain: number): string {
+  const f = plan.fit(inCard.id);
+  const parts = [f.hooks.length > 0 && `works on ${f.hooks.slice(0, 4).join(", ")}`, f.tags.length > 0 && `plan tags: ${tagList(f.tags)}`].filter(Boolean);
+  return `plan: ${parts.join("; ")} (plan fit ${f.score} vs ${plan.fit(out.id).score}, ${signed(Math.round(gain * 1000) / 1000)})`;
 }
 
 const picksFor = (ctx: Ctx, out: SpaceCard, lever: "plan" | "cheaper" | "budget", limit: number) =>
@@ -365,17 +382,17 @@ function cuts(ctx: Ctx, status: RoleStatus[]): Cut[] {
     const relieves = roles.map((r) => by.get(r.role)!).filter((s) => s.status === "over");
     if (!relieves.length || roles.some((r) => by.get(r.role)!.count - 1 < by.get(r.role)!.target)) continue;
     const tags = [...new Set(roles.filter((r) => relieves.some((s) => s.role === r.role)).flatMap((r) => r.tags))].sort();
-    out.push({ card: c, relieves, tags, planScore: planScore(c, ctx.plan).score });
+    out.push({ card: c, relieves, tags, planScore: fitOf(ctx, c) });
   }
   return out.sort((a, b) => b.relieves.length - a.relieves.length || a.planScore - b.planScore ||
     b.card.meta!.cmc - a.card.meta!.cmc || byName(a.card.name, b.card.name));
 }
 
-const cutWhy = (cut: Cut) => [
+const cutWhy = (ctx: Ctx, cut: Cut) => [
   ...cut.relieves.map((s) => `${s.role} ${s.count} over target ${s.target}`),
   `gives it through Tagger tags: ${tagList(cut.tags)}`,
   "removing it keeps every role at or above target",
-  cut.planScore === 0 ? "off the commander's plan" : `plan score ${cut.planScore}`,
+  ...(ctx.plan ? [cut.planScore === 0 ? "off the player's plan" : `plan fit ${cut.planScore}`] : []),
 ];
 
 // roles: cards that fill a role under its target, from every nonland store card inside the identity that counts toward
@@ -404,7 +421,7 @@ function fills(ctx: Ctx, status: RoleStatus[]): Fill[] {
   const perRole = gaps.map((s) => pool
     .flatMap(({ c, roles }) => {
       const hit = roles.find((r) => r.role === s.role);
-      return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: planScore(c, ctx.plan).score }] : [];
+      return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: fitOf(ctx, c) }] : [];
     })
     .sort((a, b) => b.affinity - a.affinity || (b.nearest?.sim ?? -1) - (a.nearest?.sim ?? -1) || b.planScore - a.planScore ||
       a.card.meta!.cmc - b.card.meta!.cmc || byName(a.card.name, b.card.name))
@@ -432,7 +449,7 @@ function pairCuts(ctx: Ctx, list: Fill[], status: RoleStatus[]): (Pairing | null
   const by = new Map(status.map((s) => [s.role, s]));
   const left = new Map(status.map((s) => [s.role, s.count]));
   const deck = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.id !== ctx.commander.id ? [[e.card.id, e.card] as const] : []))).values()]
-    .map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: planScore(card, ctx.plan).score }));
+    .map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: fitOf(ctx, card) }));
   const used = new Set<string>();
   return list.map((f) => {
     const fillRoles = new Set(countedRoles(ctx.store, f.card).map((r) => r.role));
@@ -472,10 +489,14 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
   const { card: commander } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
   const mask = ciMask(commander.ci);
-  const before = swapStats(deckNumbers(store, commander, deck.entries));
+  if (f.lever === "plan" && f.plan === undefined) {
+    throw new ToolInputError("the plan lever scores cards against the player's plan; pass plan (the confirmed themes or priority cards)");
+  }
+  const plan = planContext(store, commander.name, f.plan);
+  const before = swapStats(deckNumbers(store, commander, deck.entries, plan));
   const targets = targetsFor(store, f.targets);
   const ctx: Ctx = {
-    store, commander, mask, plan: readPlan(commander), graph: inColor(store, mask), entries: deck.entries,
+    store, commander, mask, plan, graph: inColor(store, mask), entries: deck.entries,
     inDeck: new Set(deck.entries.flatMap((e) => (e.card ? [e.card.id] : []))), before, targets,
   };
   const notes: string[] = [];
@@ -500,7 +521,7 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
     for (const s of roles!) if (s.status === "over" && !list.some((c) => c.relieves.includes(s))) {
       notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it also gives a role that would fall below target`);
     }
-    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(c), c.tags));
+    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(ctx, c), c.tags));
   }
   if (f.lever === "roles") {
     const list = fills(ctx, roles!).slice(0, f.limit ?? 15);
@@ -512,7 +533,7 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
   }
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join("") },
-    lever: f.lever, card: card?.name ?? null, plan: ctx.plan, before, roles,
+    lever: f.lever, card: card?.name ?? null, plan: plan?.plan ?? null, before, roles,
     candidates, notes,
     unresolved: unresolvedLines(store, deck.unresolved),
   };

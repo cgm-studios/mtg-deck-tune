@@ -61,7 +61,8 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
   server.registerTool("deck_stats", {
     title: "Deck stats",
     description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " +
-      "colored pip load and plan fit against the commander's own text, plus unresolved lines and off-identity cards. " +
+      "colored pip load, plus unresolved lines and off-identity cards; with the player's confirmed plan (`plan`: themes, " +
+      "priority cards, themes to avoid), plan fit: which cards fit it and which do not. " +
       "Give the commander and either a decklist file path or the pasted list.",
     inputSchema: deckStatsShape,
   }, async (args) => withStore(store, (s) => deckStats(s, args)));
@@ -83,12 +84,13 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
   }, async (args) => withStore(store, (s) => neighbors(s, args)));
   server.registerTool("swap_candidates", {
     title: "Swap candidates",
-    description: "Swap candidates for one card in a Commander deck, or for the whole deck, under a lever: plan (better on the " +
-      "commander's plan), cheaper (lower mana value), budget (lower USD price), roles (role counts against targets, and cards " +
+    description: "Swap candidates for one card in a Commander deck, or for the whole deck, under a lever: plan (fits the " +
+      "player's confirmed plan better; needs `plan`), cheaper (lower mana value), budget (lower USD price), roles (role counts against targets, and cards " +
       "that fill roles under target) or redundancy (roles over target, and cuts). Every candidate is a commander-legal card " +
       "inside the commander's color identity, with its reason, its evidence, the deck numbers after the swap (`before` is " +
       "given once), `dropsRole` when it leaves a role with fewer cards, and `belowTarget` when that leaves a role under its " +
-      "target. Role targets are a proposal; pass `targets` to change them.",
+      "target. Role targets are a proposal; pass `targets` to change them. A plan that names a theme the data does not know, " +
+      "or one with too little data to profile, comes back as an error saying which.",
     inputSchema: swapCandidatesShape,
   }, async (args) => withStore(store, (s) => swapCandidates(s, args)));
   server.registerTool("accept_swap", {
