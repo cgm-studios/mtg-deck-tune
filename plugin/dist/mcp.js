@@ -34957,74 +34957,4351 @@ import { Database } from "bun:sqlite";
 import { readFileSync } from "fs";
 import { isAbsolute, join as join2 } from "path";
 
-// server/deck-swaps.ts
-var COLOR = { white: "W", blue: "U", black: "B", red: "R", green: "G" };
-function readPlan(commander) {
-  const t = commander.meta?.text ?? "";
-  const pip = t.match(/noncreature spell with one or more (white|blue|black|red|green) mana symbols/i);
-  const tribe = t.match(/number of (\w+) you control|other (\w+) you control|(\w+) creature tokens/i);
-  const name = tribe?.slice(1).find(Boolean) ?? null;
-  return { spellPips: pip ? COLOR[pip[1].toLowerCase()] : null, tribe: name && /^[A-Z]/.test(name) ? name : null };
+// server/errors.ts
+class ToolInputError extends Error {
 }
-var WEIGHTS = { tokens: 1, tribe: 2, payoff: 2 };
-function planScore(c, plan, w = WEIGHTS) {
-  const m = c.meta;
-  const pipRe = plan.spellPips ? new RegExp(`\\{[^}]*${plan.spellPips}[^}]*\\}`, "g") : null;
-  const tokens = pipRe && !/Creature/.test(m.type) ? (m.cost.match(pipRe) ?? []).length : 0;
-  const tribe = plan.tribe && new RegExp(`\\b${plan.tribe}\\b`).test(m.type) ? 1 : 0;
-  const ownText = m.text.split(c.name).join("CARDNAME");
-  const payoff = plan.tribe && new RegExp(`\\b${plan.tribe}\\b`, "i").test(ownText) || /whenever (you cast|a player casts) (a|an|your first|your second|their second) (spell|noncreature|instant|sorcery)/i.test(ownText) ? 1 : 0;
-  return { tokens, tribe, payoff, score: w.tokens * tokens + w.tribe * tribe + w.payoff * payoff };
+
+// server/plan-input.ts
+var MAX_THEMES = 3;
+var MAX_PRIORITIES = 6;
+var MAX_AVOID = 5;
+var planShape = exports_external.object({
+  themes: exports_external.array(exports_external.string().min(1)).max(MAX_THEMES).optional().describe(`EDHREC themes the deck is built around, by name (e.g. ["Aristocrats"]), at most ${MAX_THEMES}`),
+  priorities: exports_external.array(exports_external.string().min(1)).max(MAX_PRIORITIES).optional().describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}`),
+  avoid: exports_external.array(exports_external.string().min(1)).max(MAX_AVOID).optional().describe(`EDHREC themes the player does not want (e.g. ["Tokens"] for a deck that should not go wide), at most ${MAX_AVOID}`)
+}).strict().describe("The player's confirmed plan: at least one theme or one priority card");
+
+// server/graph/profile.ts
+var byteOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function normalizeProfile(source, entries, { top = 25, gaps = true } = {}) {
+  const by = new Map;
+  for (const e of entries) {
+    if (!(e.weight > 0))
+      continue;
+    const h = by.get(e.hook) ?? by.set(e.hook, { makes: 0, spends: 0, cards: new Map }).get(e.hook);
+    h[e.side] += e.weight;
+    h.cards.set(e.card, (h.cards.get(e.card) ?? 0) + e.weight);
+  }
+  const max = Math.max(0, ...[...by.values()].map((h) => h.makes + h.spends));
+  const hooks = [...by.entries()].map(([hook, h]) => {
+    const side = h.makes > 0 && h.spends > 0 ? "both" : h.makes > 0 ? "makes" : "spends";
+    const gap = !gaps || side === "both" ? undefined : side === "spends" ? "unmade" : "unspent";
+    return {
+      hook,
+      side,
+      weight: max ? Math.round((h.makes + h.spends) / max * 1000) / 1000 : 0,
+      evidence: [...h.cards.entries()].sort((a, b) => b[1] - a[1] || byteOrder(a[0], b[0])).map(([c]) => c),
+      ...gap ? { gap } : {}
+    };
+  });
+  hooks.sort((a, b) => b.weight - a.weight || byteOrder(a.hook, b.hook));
+  return { source, hooks: hooks.slice(0, top) };
 }
-var SWAP_DEFAULTS = { method: "leidenHi", maxCmcUp: 1, perCard: 3, weights: WEIGHTS, sameRegion: true, minGain: 0.000000001, tieFloor: 0, cmcPenalty: 0, reverse: true };
-var REV = new WeakMap;
-function reverseOf(space) {
-  let m = REV.get(space);
-  if (m)
-    return m;
-  m = new Map;
-  for (const id of space.order) {
-    const c = space.cards.get(id);
-    c.nb.forEach((v, x) => {
-      const l = m.get(v) ?? [];
-      l.push([id, c.ns[x]]);
-      m.set(v, l);
+function offProfile(hook) {
+  return hook === "ManaAdded" || hook === "ManaPaid" || hook.startsWith("Keyword:");
+}
+function profileHookKey(hook, token) {
+  return token === null || hook === "TokenCreated" ? hook : `${hook}[${token ? "token" : "nontoken"}]`;
+}
+function parseProfileHook(key) {
+  const m = /^(.+)\[(token|nontoken)\]$/.exec(key);
+  return m ? { hook: m[1], token: m[2] === "token" } : { hook: key, token: null };
+}
+function hookWords(key) {
+  const { hook, token } = parseProfileHook(key);
+  return token === null ? hook : `${token ? "token" : "nontoken"} ${hook}`;
+}
+function touches(idx, i) {
+  const me = idx.cards[i];
+  const src = (x) => ({ source: `${x.ability}.${x.relation}` });
+  const out = [];
+  for (const e of idx.emitsOf(i))
+    if (e.by !== "card" && !offProfile(e.hook))
+      out.push({ card: i, hook: e.hook, side: "makes", sel: e.sel, me, ...src(e), emit: e });
+  const costs = new Map;
+  for (const l of idx.listensOf(i)) {
+    if (l.listener !== "consumes") {
+      if (!offProfile(l.hook))
+        out.push({ card: i, hook: l.hook, side: "spends", sel: l.sel, me, ...src(l), listens: [l] });
+      continue;
+    }
+    const hook = l.consumed ?? l.hook;
+    if (offProfile(hook))
+      continue;
+    const k = `${hook}|${l.sel.raw}`;
+    const t = costs.get(k);
+    if (t)
+      t.listens.push(l);
+    else {
+      const n = { card: i, hook, side: "spends", sel: l.sel, me, ...src(l), listens: [l] };
+      costs.set(k, n);
+      out.push(n);
+    }
+  }
+  return out;
+}
+function tokenness(sel) {
+  if (!sel.any.length)
+    return null;
+  const v = sel.any.map((a) => a.self ? false : a.token);
+  return v.every((x) => x === true) ? true : v.every((x) => x === false) ? false : null;
+}
+function planCards(idx, plan) {
+  if (plan.priorities.length > 6)
+    throw new Error(`at most 6 priority cards (got ${plan.priorities.length})`);
+  const out = [plan.commander, ...plan.priorities].map((n) => idx.indexOf(n));
+  if (new Set(out).size !== out.length)
+    throw new Error("the commander and priority cards must all be different cards");
+  const cmd = idx.cards[out[0]];
+  for (const p of out.slice(1)) {
+    const c = idx.cards[p];
+    if (!c.colorIdentity.every((x) => cmd.colorIdentity.includes(x)))
+      throw new Error(`${c.name} is outside ${cmd.name}'s color identity`);
+  }
+  return out;
+}
+function cardProfile(idx, plan) {
+  const planIdx = planCards(idx, plan);
+  const byHook = new Map;
+  for (const p of planIdx)
+    for (const t of touches(idx, p))
+      (byHook.get(t.hook) ?? byHook.set(t.hook, []).get(t.hook)).push(t);
+  const planMakes = [...byHook.values()].flat().filter((t) => t.side === "makes");
+  const entries = [];
+  for (const [hook, ts] of byHook) {
+    const makers = ts.filter((t) => t.side === "makes"), spenders = ts.filter((t) => t.side === "spends");
+    const engine = spenders.some((s) => s.listens.some((l) => planMakes.some((m) => m.card !== s.card && m.hook === l.hook && feeds(idx, m, s, l))));
+    const deciding = (makers.length ? makers : spenders).map((t) => tokenness(t.sel));
+    const token = deciding.every((x) => x === true) ? true : deciding.every((x) => x === false) ? false : null;
+    const key = profileHookKey(hook, token);
+    for (const card of new Set(ts.map((t) => t.card))) {
+      const sides = [...new Set(ts.filter((t) => t.card === card).map((t) => t.side))];
+      const w = (engine ? 2 : 1) * (card === planIdx[0] ? COMMANDER_WEIGHT : 1);
+      for (const side of sides)
+        entries.push({ hook: key, side, weight: w / sides.length, card: idx.cards[card].name });
+    }
+  }
+  const names = planIdx.map((i) => idx.cards[i].name);
+  return normalizeProfile({ kind: "cards", commander: names[0], priorities: names.slice(1) }, entries);
+}
+var COMMANDER_WEIGHT = 2;
+function feeds(idx, m, s, l) {
+  if (l.onlyEmitted && m.emit.emitted !== l.onlyEmitted)
+    return false;
+  return idx.selectorsMeet(m.sel, m.emit.me ?? m.me, l.sel, s.me, m.hook);
+}
+function isMainHook(h) {
+  return h.weight > 0.5;
+}
+function profileMatcher(idx, profile) {
+  const main = profile.hooks.filter(isMainHook).map((h) => {
+    const { hook, token } = parseProfileHook(h.hook);
+    const evidence = { makes: [], spends: [] };
+    for (const name of h.evidence) {
+      let j;
+      try {
+        j = idx.indexOf(name);
+      } catch {
+        continue;
+      }
+      for (const t of touches(idx, j))
+        if (t.hook === hook)
+          evidence[t.side].push({ sel: t.sel, me: t.me });
+    }
+    const definer = evidence.makes.length ? "makes" : "spends";
+    for (const side of ["makes", "spends"]) {
+      if (side !== definer)
+        continue;
+      evidence[side] = evidence[side].flatMap((e) => {
+        const sel = onSide(e.sel, token);
+        return sel ? [{ sel, me: e.me }] : [];
+      });
+    }
+    const against = (side) => {
+      const otherSide = side === "makes" ? "spends" : "makes";
+      const use = evidence[otherSide].length ? otherSide : side;
+      return { envelope: evidence[use], qualified: use === definer };
+    };
+    return { key: h.hook, hook, token, weight: h.weight, cards: h.evidence, makes: against("makes"), spends: against("spends") };
+  });
+  return (i) => {
+    const out = new Map;
+    for (const t of touches(idx, i))
+      for (const h of main) {
+        if (t.hook !== h.hook)
+          continue;
+        const sel = t.side === "makes" ? yours(t.sel, t.hook) : notSelf(t.sel);
+        const { envelope, qualified } = h[t.side];
+        if (!sel || qualified && !onSide(sel, h.token))
+          continue;
+        if (envelope.length && !envelope.some((e) => idx.selectorsMeet(sel, t.me, e.sel, e.me, h.hook)))
+          continue;
+        const k = `${h.key}|${t.side}|${t.source}`;
+        const own2 = qualified ? h.key : profileHookKey(h.hook, tokenness(sel));
+        if (!out.has(k))
+          out.set(k, { hook: h.key, side: t.side, weight: h.weight, cards: h.cards, source: t.source, ...own2 !== h.key ? { as: own2 } : {} });
+      }
+    return [...out.values()];
+  };
+}
+function profileFit(matches) {
+  const order = [...matches].sort((a, b) => byteOrder(a.hook, b.hook) || byteOrder(a.side, b.side) || byteOrder(a.source, b.source));
+  const slot = (m) => `${m.hook}|${m.side}`;
+  const slots = [...new Set(order.map(slot))];
+  const unit = (m) => `${m.source}|${m.side}`;
+  const units = [...new Set(order.map(unit))].sort();
+  if (slots.length > 30)
+    throw new Error(`profileFit: ${slots.length} hook sides is more than the search handles`);
+  const memo2 = new Map;
+  const best = (k, used) => {
+    if (k === units.length)
+      return { total: 0, picks: [] };
+    const key = `${k}|${used}`;
+    const hit = memo2.get(key);
+    if (hit)
+      return hit;
+    let out = best(k + 1, used);
+    for (const m of order) {
+      if (unit(m) !== units[k])
+        continue;
+      const bit = 1 << slots.indexOf(slot(m));
+      if (used & bit)
+        continue;
+      const rest = best(k + 1, used | bit);
+      if (rest.total + m.weight > out.total + 0.000000001)
+        out = { total: rest.total + m.weight, picks: [m, ...rest.picks] };
+    }
+    memo2.set(key, out);
+    return out;
+  };
+  const { total, picks } = best(0, 0);
+  return { score: Math.round(total * 1000) / 1000, counted: [...picks].sort((a, b) => b.weight - a.weight || byteOrder(a.hook, b.hook) || byteOrder(a.side, b.side)) };
+}
+function onSide(sel, token) {
+  if (token === null || !sel.any.length)
+    return sel;
+  const any3 = sel.any.filter((a) => a.player !== undefined || ((a.self ? false : a.token) ?? token) === token).map((a) => a.player !== undefined || a.self ? a : { ...a, token });
+  return any3.length ? { any: any3, raw: sel.raw } : null;
+}
+function yours(sel, hook) {
+  const mine = (a) => a.controller === "you" || a.props.includes("EquippedBy") || hook === "ETB" && a.controller === "any";
+  const any3 = sel.any.filter((a) => !a.self && (a.player !== undefined || mine(a)));
+  return any3.length ? { any: any3, raw: sel.raw } : null;
+}
+function notSelf(sel) {
+  const any3 = sel.any.filter((a) => !a.self);
+  return any3.length ? { any: any3, raw: sel.raw } : null;
+}
+// server/graph/mapping/closure_rules.yaml
+var closure_rules_default = {
+  version: "2.0",
+  description: `Closure rules define implications between events and between effects. Used by the graph compiler to generate transitive edges. Rules may be unconditional or conditional on target card type.
+`,
+  event_implications: [
+    {
+      from: "Sacrifice",
+      implies: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Only creatures and planeswalkers 'die'. Other permanents go to graveyard but don't trigger Dies."
+    },
+    {
+      from: "Sacrifice",
+      implies: "LTB",
+      condition: null,
+      note: "All sacrificed permanents leave the battlefield."
+    },
+    {
+      from: "Sacrifice",
+      implies: "PutIntoGraveyard",
+      condition: null,
+      note: "Any sacrificed permanent goes to the graveyard (Treasure, artifacts, lands too). Added 2026-11-06 for F5."
+    },
+    {
+      from: "Destroy",
+      implies: "PutIntoGraveyard",
+      condition: null,
+      note: "Any destroyed permanent goes to the graveyard. Added 2026-11-06 for F5."
+    },
+    {
+      from: "Dies",
+      implies: "LTB",
+      condition: null,
+      note: "Dying always means leaving the battlefield."
+    },
+    {
+      from: "Destroy",
+      implies: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Destroyed creatures/planeswalkers die. Destroyed artifacts/enchantments go to graveyard without dying."
+    },
+    {
+      from: "Destroy",
+      implies: "LTB",
+      condition: null,
+      note: "All destroyed permanents leave the battlefield."
+    },
+    {
+      from: "Exile",
+      implies: "LTB",
+      condition: null,
+      note: "Exiled permanents leave the battlefield."
+    },
+    {
+      from: "ReturnToHand",
+      implies: "LTB",
+      condition: null,
+      note: "Bounced permanents leave the battlefield."
+    },
+    {
+      from: "Flicker",
+      implies: "LTB",
+      condition: null,
+      note: "Flickered permanent leaves then re-enters."
+    },
+    {
+      from: "Flicker",
+      implies: "ETB",
+      condition: null,
+      note: "Flickered permanent re-enters the battlefield."
+    },
+    {
+      from: "TokenCreated",
+      implies: "ETB",
+      condition: null,
+      note: "Created tokens enter the battlefield."
+    },
+    {
+      from: "Reanimate",
+      implies: "ETB",
+      condition: null,
+      note: "Reanimated cards enter the battlefield."
+    }
+  ],
+  effect_closures: [
+    {
+      effect: "CreateToken",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Creating a token puts it onto the battlefield."
+    },
+    {
+      effect: "CreateToken",
+      triggers_event: "TokenCreated",
+      condition: null,
+      note: "Creating a token fires TokenCreated."
+    },
+    {
+      effect: "Reanimate",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Reanimating puts a card onto the battlefield."
+    },
+    {
+      effect: "LandToBattlefield",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Putting a land onto the battlefield is an ETB."
+    },
+    {
+      effect: "LandToBattlefield",
+      triggers_event: "LandPlayed",
+      condition: null,
+      note: "Land entering triggers LandPlayed."
+    },
+    {
+      effect: "Destroy",
+      triggers_event: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Destroying a creature/planeswalker causes it to die."
+    },
+    {
+      effect: "Destroy",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Destroying any permanent causes LTB."
+    },
+    {
+      effect: "Sacrifice",
+      triggers_event: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Sacrificing a creature/planeswalker causes it to die."
+    },
+    {
+      effect: "Sacrifice",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Sacrificing any permanent causes LTB."
+    },
+    {
+      effect: "Bounce",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Bouncing causes LTB."
+    },
+    {
+      effect: "Exile",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Exiling a permanent causes LTB."
+    },
+    {
+      effect: "Flicker",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Flickering causes LTB then ETB."
+    },
+    {
+      effect: "Flicker",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Flickered permanent re-enters."
+    },
+    {
+      effect: "GainLife",
+      triggers_event: "LifeGained",
+      condition: null,
+      note: "Gaining life triggers LifeGained."
+    },
+    {
+      effect: "LoseLife",
+      triggers_event: "LifeLost",
+      condition: null,
+      note: "Losing life triggers LifeLost."
+    },
+    {
+      effect: "DrainLife",
+      triggers_event: "LifeGained",
+      condition: null,
+      note: "Drain = damage + life gain."
+    },
+    {
+      effect: "DrainLife",
+      triggers_event: "LifeLost",
+      condition: null,
+      note: "Drain = opponent loses life."
+    },
+    {
+      effect: "Damage",
+      triggers_event: "DamageDealt",
+      condition: null,
+      note: "Dealing damage fires DamageDealt."
+    },
+    {
+      effect: "Draw",
+      triggers_event: "DrawCard",
+      condition: null,
+      note: "Drawing fires DrawCard."
+    },
+    {
+      effect: "Discard",
+      triggers_event: "Discard",
+      condition: null,
+      note: "Forcing discard fires Discard event."
+    },
+    {
+      effect: "Mill",
+      triggers_event: "Mill",
+      condition: null,
+      note: "Milling fires Mill event."
+    },
+    {
+      effect: "AddCounter",
+      triggers_event: "CounterPlaced",
+      condition: null,
+      note: "Adding counters fires CounterPlaced."
+    },
+    {
+      effect: "RemoveCounter",
+      triggers_event: "CounterRemoved",
+      condition: null,
+      note: "Removing counters fires CounterRemoved."
+    },
+    {
+      effect: "Proliferate",
+      triggers_event: "CounterPlaced",
+      condition: null,
+      note: "Proliferate adds counters."
+    },
+    {
+      effect: "Control",
+      triggers_event: "Control",
+      condition: null,
+      note: "Gaining control fires Control event."
+    },
+    {
+      effect: "ReturnToHand",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Returning to hand means leaving battlefield."
+    },
+    {
+      effect: "CreateCopy",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Copy of a permanent enters the battlefield."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "ExtraTurn",
+      condition: null,
+      note: "Extra turn effect fires the ExtraTurn event."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "Upkeep",
+      condition: null,
+      note: "Extra turn includes an upkeep step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "DrawStep",
+      condition: null,
+      note: "Extra turn includes a draw step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "MainPhase",
+      condition: null,
+      note: "Extra turn includes main phases."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "EndStep",
+      condition: null,
+      note: "Extra turn includes an end step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "BeginningOfCombat",
+      condition: null,
+      note: "Extra turn includes a combat phase."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "AttackDeclared",
+      condition: null,
+      note: "Extra turn includes declare attackers step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "BlockDeclared",
+      condition: null,
+      note: "Extra turn includes declare blockers step."
+    },
+    {
+      effect: "SearchLand",
+      triggers_event: "LandPlayed",
+      condition: null,
+      note: "Searching for a land and putting it onto the battlefield triggers LandPlayed."
+    },
+    {
+      effect: "SearchLand",
+      triggers_event: "ETB",
+      condition: null,
+      note: "The found land enters the battlefield."
+    }
+  ]
+};
+// server/graph/mapping/forge-map.json
+var forge_map_default = {
+  version: "0.4.0",
+  forgeCommit: "c3d29388be82a37e7f648e3254ef04f4cd986d6e",
+  note: "Forge script vocabulary -> card graph hooks. Anything not listed here is reported as unmapped, never dropped. Hook names are open; renaming one is a version bump.",
+  zones: [
+    {
+      origin: "Graveyard",
+      destination: "Battlefield",
+      hooks: [
+        "Reanimate",
+        "ETB"
+      ]
+    },
+    {
+      origin: "Exile",
+      destination: "Battlefield",
+      hooks: [
+        "ReturnFromExile",
+        "ETB"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Battlefield",
+      hooks: [
+        "PutOntoBattlefield",
+        "ETB"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Battlefield",
+      hooks: [
+        "PutOntoBattlefield",
+        "ETB"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Battlefield",
+      hooks: [
+        "ETB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Graveyard",
+      hooks: [
+        "PutIntoGraveyard",
+        "LTB"
+      ],
+      creatureHooks: [
+        "Dies"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Exile",
+      hooks: [
+        "Exile",
+        "LTB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Hand",
+      hooks: [
+        "Bounce",
+        "LTB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Library",
+      hooks: [
+        "Tuck",
+        "LTB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "*",
+      hooks: [
+        "LTB"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Hand",
+      hooks: [
+        "Tutor"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Graveyard",
+      hooks: [
+        "Mill"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Exile",
+      hooks: [
+        "ExileFromLibrary"
+      ]
+    },
+    {
+      origin: "Graveyard",
+      destination: "Hand",
+      hooks: [
+        "Regrowth"
+      ]
+    },
+    {
+      origin: "Graveyard",
+      destination: "Exile",
+      hooks: [
+        "ExileFromGraveyard"
+      ]
+    },
+    {
+      origin: "Graveyard",
+      destination: "Library",
+      hooks: [
+        "GraveyardToLibrary"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Graveyard",
+      hooks: [
+        "Discard"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Exile",
+      hooks: [
+        "ExileFromHand"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Library",
+      hooks: [
+        "HandToLibrary"
+      ]
+    },
+    {
+      origin: "Stack",
+      destination: "*",
+      hooks: [
+        "SpellMoved"
+      ]
+    },
+    {
+      origin: "Exile",
+      destination: "Hand",
+      hooks: [
+        "ExileToHand"
+      ]
+    },
+    {
+      origin: "Exile",
+      destination: "Graveyard",
+      hooks: [
+        "ExileToGraveyard"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Graveyard",
+      hooks: [
+        "PutIntoGraveyard"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Exile",
+      hooks: [
+        "Exile"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Hand",
+      hooks: [
+        "ToHand"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Library",
+      hooks: [
+        "ToLibrary"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "*",
+      hooks: [
+        "ZoneChange"
+      ]
+    }
+  ],
+  phases: {
+    Upkeep: "Upkeep",
+    Draw: "DrawStep",
+    Main1: "PrecombatMain",
+    Main2: "PostcombatMain",
+    BeginCombat: "BeginningOfCombat",
+    "Declare Attackers": "AttackersDeclared",
+    "End Combat": "EndOfCombat",
+    "End of Turn": "EndStep",
+    Cleanup: "Cleanup",
+    EndCombat: "EndOfCombat",
+    "End Of Turn": "EndStep",
+    Main: "Main",
+    Untap: "UntapStep"
+  },
+  triggers: {
+    Attacks: "Attacks",
+    AttackersDeclared: "AttackersDeclared",
+    AttackersDeclaredOneTarget: "AttackersDeclared",
+    Blocks: "Blocks",
+    AttackerBlocked: "BecomesBlocked",
+    AttackerBlockedOnce: "BecomesBlocked",
+    AttackerUnblocked: "Unblocked",
+    AttackerUnblockedOnce: "Unblocked",
+    BlockersDeclared: "BlockersDeclared",
+    SpellCast: "SpellCast",
+    SpellCopy: "SpellCopied",
+    SpellAbilityCast: "SpellCast",
+    AbilityCast: "AbilityActivated",
+    AbilityActivated: "AbilityActivated",
+    Drawn: "CardDrawn",
+    Discarded: "Discard",
+    DiscardedAll: "Discard",
+    Milled: "Mill",
+    MilledAll: "Mill",
+    Sacrificed: "Sacrifice",
+    SacrificedOnce: "Sacrifice",
+    Destroyed: "Destroy",
+    Exiled: "Exile",
+    TokenCreated: "TokenCreated",
+    TokenCreatedOnce: "TokenCreated",
+    CounterAdded: "CounterPlaced",
+    CounterAddedOnce: "CounterPlaced",
+    CounterAddedAll: "CounterPlaced",
+    CounterRemoved: "CounterRemoved",
+    CounterRemovedOnce: "CounterRemoved",
+    LifeGained: "LifeGain",
+    LifeLost: "LifeLoss",
+    LifeLostAll: "LifeLoss",
+    Taps: "Tap",
+    TapAll: "Tap",
+    Untaps: "Untap",
+    UntapAll: "Untap",
+    Scry: "Scry",
+    Surveil: "Surveil",
+    Shuffled: "Shuffle",
+    BecomesTarget: "BecomesTarget",
+    BecomesTargetOnce: "BecomesTarget",
+    Attached: "Attach",
+    Unattach: "Unattach",
+    TurnFaceUp: "TurnFaceUp",
+    Transformed: "Transform",
+    Countered: "SpellCountered",
+    Fight: "Fight",
+    FightOnce: "Fight",
+    Explored: "Explore",
+    Investigated: "Investigate",
+    LandPlayed: "LandPlayed",
+    ManaAdded: "ManaAdded",
+    TapsForMana: "TapForMana",
+    Cycled: "Cycle",
+    Crewed: "Crew",
+    Exploited: "Exploit",
+    ChaosEnsues: "ChaosEnsues",
+    BecomeMonarch: "BecomeMonarch",
+    Proliferate: "Proliferate",
+    RolledDie: "DieRolled",
+    RolledDieOnce: "DieRolled",
+    FlippedCoin: "CoinFlipped",
+    Championed: "Champion",
+    Evolved: "Evolve",
+    Mutates: "Mutate",
+    Foretell: "Foretell",
+    ClassLevelGained: "ClassLevelGained",
+    NewGame: "GameStart",
+    Always: "StateCheck",
+    Immediate: "Immediate",
+    Phase: "@phase",
+    ChangesZone: "@zone",
+    ChangesZoneAll: "@zone",
+    DamageDone: "@damage",
+    DamageDoneOnce: "@damage",
+    DamageAll: "@damage",
+    DamageDealtOnce: "@damage",
+    DamagePreventedOnce: "DamagePrevented",
+    Devoured: "Devour",
+    Enlisted: "Enlist",
+    Abandoned: "Abandon",
+    BecomesCrewed: "Crew",
+    Clashed: "Clash",
+    Adapt: "Adapt",
+    Exerted: "Exert",
+    PayLife: "LifeLoss",
+    PayCumulativeUpkeep: "CumulativeUpkeep",
+    RingTemptsYou: "RingTemptsYou",
+    VisitAttraction: "VisitAttraction",
+    Specializes: "Specialize",
+    TakesInitiative: "TakeInitiative",
+    DayTimeChanges: "DayNight",
+    Stationed: "Station",
+    Forage: "Forage",
+    CommitCrime: "CommitCrime",
+    Collected: "CollectEvidence",
+    Expend: "Expend",
+    ManifestDread: "ManifestDread",
+    BecomesSaddled: "Saddle",
+    Saddled: "Saddle",
+    RoomEntered: "RoomUnlocked",
+    UnlockDoor: "RoomUnlocked",
+    FullyUnlock: "RoomUnlocked",
+    Discover: "Discover",
+    Airbend: "Airbend",
+    Earthbend: "Earthbend",
+    Firebend: "Firebend",
+    Waterbend: "Waterbend",
+    Trains: "Train",
+    Plotted: "Plot",
+    BecomeRenowned: "Renown",
+    BecomesPlotted: "Plot",
+    SetInMotion: "SchemeSetInMotion",
+    PlanarDice: "PlanarDice",
+    PlaneswalkedTo: "Planeswalk",
+    PlaneswalkedFrom: "Planeswalk",
+    LosesGame: "PlayerLoses",
+    Vote: "Vote",
+    Revealed: "Reveal",
+    SearchedLibrary: "SearchLibrary",
+    Attains: "Attain",
+    ConniveCompleted: "Connive",
+    CaseSolved: "CaseSolved",
+    BecomesTargetedOnce: "BecomesTarget",
+    Blight: "Blight",
+    Sneak: "Sneak",
+    Endure: "Endure",
+    ExcessDamage: "ExcessDamage",
+    ExcessDamageAll: "ExcessDamage",
+    MutatesOnto: "Mutate",
+    SpellCastOrCopy: "SpellCast",
+    LifeGainedOnce: "LifeGain",
+    AttackerBlockedByCreature: "Blocks",
+    BecomeMonstrous: "Monstrous",
+    ManaExpend: "Expend",
+    ChangesController: "GainControl",
+    StickerPlaced: "Sticker",
+    CounterPlayerAddedAll: "CounterPlaced",
+    Explores: "Explore",
+    Unattached: "Unattach",
+    DungeonCompleted: "DungeonCompleted",
+    PhaseIn: "PhaseIn",
+    AbilityTriggered: "AbilityTriggered",
+    Connives: "Connive",
+    AbilityResolves: "AbilityResolves",
+    CounterTypeAddedAll: "CounterPlaced",
+    MilledOnce: "Mill",
+    PhaseOut: "PhaseOut",
+    PhaseOutAll: "PhaseOut",
+    CollectEvidence: "CollectEvidence",
+    PayEcho: "Echo",
+    GiveGift: "Gift",
+    Mentored: "Mentor",
+    ElementalBend: "Bend",
+    SpellAbilityCopy: "SpellCopied",
+    ClaimPrize: "ClaimPrize",
+    TurnBegin: "TurnBegins"
+  },
+  effects: {
+    ChangeZone: "@zone",
+    ChangeZoneAll: "@zone",
+    Pump: [
+      "Pump"
+    ],
+    PumpAll: [
+      "Pump"
+    ],
+    Draw: [
+      "CardDrawn"
+    ],
+    Token: [
+      "TokenCreated"
+    ],
+    PutCounter: [
+      "CounterPlaced"
+    ],
+    PutCounterAll: [
+      "CounterPlaced"
+    ],
+    DealDamage: [
+      "Damage"
+    ],
+    DamageAll: [
+      "Damage"
+    ],
+    EachDamage: [
+      "Damage"
+    ],
+    DamageResolve: [],
+    Mana: [
+      "ManaAdded"
+    ],
+    ManaReflected: [
+      "ManaAdded"
+    ],
+    GainLife: [
+      "LifeGain"
+    ],
+    LoseLife: [
+      "LifeLoss"
+    ],
+    SetLife: [
+      "LifeTotalSet"
+    ],
+    Destroy: [
+      "Destroy"
+    ],
+    DestroyAll: [
+      "Destroy"
+    ],
+    Tap: [
+      "Tap"
+    ],
+    TapAll: [
+      "Tap"
+    ],
+    Untap: [
+      "Untap"
+    ],
+    UntapAll: [
+      "Untap"
+    ],
+    TapOrUntap: [
+      "Tap",
+      "Untap"
+    ],
+    Discard: [
+      "Discard"
+    ],
+    Animate: [
+      "Animate"
+    ],
+    AnimateAll: [
+      "Animate"
+    ],
+    Dig: [
+      "LookAtTop"
+    ],
+    DigUntil: [
+      "RevealUntil"
+    ],
+    DigMultiple: [
+      "LookAtTop"
+    ],
+    PeekAndReveal: [
+      "LookAtTop"
+    ],
+    RearrangeTopOfLibrary: [
+      "LookAtTop"
+    ],
+    Sacrifice: [
+      "Sacrifice"
+    ],
+    SacrificeAll: [
+      "Sacrifice"
+    ],
+    Mill: [
+      "Mill"
+    ],
+    Counter: [
+      "SpellCountered"
+    ],
+    Scry: [
+      "Scry"
+    ],
+    Surveil: [
+      "Surveil"
+    ],
+    CopyPermanent: [
+      "TokenCreated",
+      "Copy"
+    ],
+    Clone: [
+      "Copy"
+    ],
+    Play: [
+      "CastWithoutPaying"
+    ],
+    GainControl: [
+      "GainControl"
+    ],
+    ExchangeControl: [
+      "GainControl"
+    ],
+    Regenerate: [
+      "Regenerate"
+    ],
+    CopySpellAbility: [
+      "SpellCopied"
+    ],
+    Attach: [
+      "Attach"
+    ],
+    Unattach: [
+      "Unattach"
+    ],
+    RemoveCounter: [
+      "CounterRemoved"
+    ],
+    RemoveCounterAll: [
+      "CounterRemoved"
+    ],
+    MoveCounter: [
+      "CounterRemoved",
+      "CounterPlaced"
+    ],
+    MultiplyCounter: [
+      "CounterPlaced"
+    ],
+    Proliferate: [
+      "Proliferate",
+      "CounterPlaced"
+    ],
+    Fight: [
+      "Fight",
+      "Damage"
+    ],
+    Investigate: [
+      "Investigate",
+      "TokenCreated"
+    ],
+    Amass: [
+      "Amass",
+      "CounterPlaced"
+    ],
+    Incubate: [
+      "Incubate",
+      "TokenCreated"
+    ],
+    Explore: [
+      "Explore"
+    ],
+    Connive: [
+      "Connive",
+      "CardDrawn",
+      "Discard"
+    ],
+    Goad: [
+      "Goad"
+    ],
+    Poison: [
+      "PoisonCounter"
+    ],
+    Shuffle: [
+      "Shuffle"
+    ],
+    Reveal: [
+      "Reveal"
+    ],
+    RevealHand: [
+      "Reveal"
+    ],
+    PreventDamage: [
+      "DamagePrevented"
+    ],
+    Fog: [
+      "DamagePrevented"
+    ],
+    Protection: [
+      "GainProtection"
+    ],
+    ProtectionAll: [
+      "GainProtection"
+    ],
+    Debuff: [
+      "LoseAbility"
+    ],
+    AddTurn: [
+      "ExtraTurn"
+    ],
+    AddPhase: [
+      "ExtraPhase"
+    ],
+    BecomeMonarch: [
+      "BecomeMonarch"
+    ],
+    TakeInitiative: [
+      "TakeInitiative"
+    ],
+    Venture: [
+      "Venture"
+    ],
+    RingTemptsYou: [
+      "RingTemptsYou"
+    ],
+    Phases: [
+      "PhaseOut"
+    ],
+    SetState: [
+      "Transform"
+    ],
+    Manifest: [
+      "Manifest"
+    ],
+    ManifestDread: [
+      "Manifest"
+    ],
+    Cloak: [
+      "Manifest"
+    ],
+    Discover: [
+      "Discover",
+      "CastWithoutPaying"
+    ],
+    MakeCard: [
+      "CardCreated"
+    ],
+    Seek: [
+      "Tutor"
+    ],
+    Learn: [
+      "Tutor"
+    ],
+    Draft: [
+      "CardCreated"
+    ],
+    LosesGame: [
+      "PlayerLoses"
+    ],
+    WinsGame: [
+      "PlayerWins"
+    ],
+    MustBlock: [
+      "ForceBlock"
+    ],
+    RemoveFromCombat: [
+      "RemoveFromCombat"
+    ],
+    SkipPhase: [
+      "SkipPhase"
+    ],
+    SkipTurn: [
+      "SkipTurn"
+    ],
+    Detain: [
+      "Detain"
+    ],
+    Earthbend: [
+      "Earthbend",
+      "CounterPlaced"
+    ],
+    Airbend: [
+      "Airbend",
+      "Exile"
+    ],
+    Endure: [
+      "CounterPlaced",
+      "TokenCreated"
+    ],
+    Empower: [
+      "CounterPlaced"
+    ],
+    Intensify: [
+      "Intensify"
+    ],
+    PutSticker: [
+      "Sticker"
+    ],
+    Radiation: [
+      "Mill",
+      "LifeLoss"
+    ],
+    Recruit: [
+      "Tutor"
+    ],
+    ExchangeLife: [
+      "LifeTotalSet"
+    ],
+    GainOwnership: [
+      "GainControl"
+    ],
+    PermanentCreature: [],
+    PermanentNoncreature: [],
+    Abandon: [
+      "Abandon"
+    ],
+    OpenAttraction: [
+      "OpenAttraction"
+    ],
+    AssembleContraption: [
+      "Assemble"
+    ],
+    DayTime: [
+      "DayNight"
+    ],
+    Planeswalk: [
+      "Planeswalk"
+    ],
+    ChangeTargets: [
+      "Retarget"
+    ],
+    ControlSpell: [
+      "GainControl"
+    ],
+    ChangeText: [
+      "ChangeText"
+    ],
+    AlterAttribute: [
+      "AlterAttribute"
+    ],
+    Heist: [
+      "CardCreated"
+    ],
+    ExchangePower: [
+      "Pump"
+    ],
+    Balance: [
+      "Sacrifice",
+      "Discard"
+    ],
+    Meld: [
+      "Meld"
+    ],
+    TimeTravel: [
+      "CounterPlaced",
+      "CounterRemoved"
+    ],
+    AddOrRemoveCounter: [
+      "CounterPlaced",
+      "CounterRemoved"
+    ],
+    Blight: [
+      "Blight"
+    ],
+    EndTurn: [
+      "EndTurn"
+    ],
+    Clash: [
+      "Clash"
+    ],
+    RollDice: [
+      "DieRolled"
+    ],
+    FlipCoin: [
+      "CoinFlipped"
+    ],
+    ChaosEnsues: [
+      "ChaosEnsues"
+    ],
+    Vote: [
+      "Vote"
+    ],
+    UnlockDoor: [
+      "RoomUnlocked"
+    ],
+    Effect: "@effect",
+    DelayedTrigger: "@delayed",
+    ImmediateTrigger: "@delayed",
+    Charm: "@choices",
+    GenericChoice: "@choices",
+    Branch: "@branch",
+    RepeatEach: "@repeat",
+    Repeat: "@repeat",
+    Cleanup: [],
+    StoreSVar: [],
+    ChooseCard: [],
+    ChooseType: [],
+    ChooseColor: [],
+    ChoosePlayer: [],
+    ChooseNumber: [],
+    ChooseSource: [],
+    ChooseEvenOdd: [],
+    ChooseDirection: [],
+    ChooseSector: [],
+    NameCard: [],
+    TwoPiles: [],
+    MultiplePiles: [],
+    BlankLine: [],
+    LookAt: [],
+    AssignGroup: [],
+    ReplaceEffect: [],
+    ReplaceToken: [],
+    ReplaceCounter: [],
+    ReplaceDamage: [],
+    ReplaceSplitDamage: [],
+    ReplaceMana: [],
+    VillainousChoice: [],
+    GainControlVariant: [
+      "GainControl"
+    ],
+    ControlPlayer: [
+      "ControlPlayer"
+    ],
+    ChangeCombatants: [
+      "Retarget"
+    ],
+    DrainMana: [
+      "ManaLost"
+    ],
+    BecomesBlocked: [
+      "BecomesBlocked"
+    ],
+    ExchangeLifeVariant: [
+      "LifeTotalSet"
+    ],
+    BidLife: [
+      "LifeLoss"
+    ],
+    Regeneration: [
+      "Regenerate"
+    ],
+    GameDrawn: [
+      "GameDrawn"
+    ],
+    ReorderZone: [
+      "LookAtTop"
+    ],
+    ActivateAbility: [
+      "AbilityActivated"
+    ],
+    Block: [
+      "ForceBlock"
+    ],
+    ExchangeTextBox: [
+      "ChangeText"
+    ],
+    SwitchBlock: [
+      "ForceBlock"
+    ],
+    HealDamage: [
+      "DamageRemoved"
+    ],
+    RestartGame: [
+      "RestartGame"
+    ],
+    ChangeSpeed: [
+      "Speed"
+    ],
+    ChangeX: [],
+    TapOrUntapAll: [
+      "Tap",
+      "Untap"
+    ],
+    TaporUntapAll: [
+      "Tap",
+      "Untap"
+    ],
+    Camouflage: [
+      "ForceBlock"
+    ],
+    ReverseTurnOrder: [
+      "TurnOrder"
+    ],
+    RollPlanarDice: [
+      "PlanarDice"
+    ],
+    EndCombatPhase: [
+      "EndCombat"
+    ],
+    ExchangeControlVariant: [
+      "GainControl"
+    ]
+  },
+  costs: {
+    T: "Tap",
+    Q: "Untap",
+    Sac: "Sacrifice",
+    Discard: "Discard",
+    PayLife: "LifeLoss",
+    SubCounter: "CounterRemoved",
+    AddCounter: "CounterPlaced",
+    Exile: "Exile",
+    ExileFromGrave: "ExileFromGraveyard",
+    tapXType: "Tap",
+    untapXType: "Untap",
+    Return: "Bounce",
+    Mill: "Mill",
+    Reveal: "Reveal",
+    PayEnergy: "EnergySpent",
+    Draw: "CardDrawn",
+    Collect: "CollectEvidence",
+    Forage: "Forage",
+    RemoveAnyCounter: "CounterRemoved",
+    PutCardToLib: "ToLibrary",
+    Unattach: "Unattach",
+    Exert: "Exert",
+    Blight: "Blight",
+    Waterbend: "Tap",
+    ExileFromHand: "ExileFromHand",
+    XMin1: null,
+    CollectEvidence: "CollectEvidence",
+    ExileFromTop: "ExileFromLibrary",
+    ExiledMoveToGrave: "ExileToGraveyard",
+    untapYType: "Untap",
+    RevealChosen: "Reveal",
+    Mana: "ManaPaid",
+    PutCardToLibFromHand: "HandToLibrary",
+    PutCardToLibFromGrave: "GraveyardToLibrary",
+    PutCardToLibFromBattlefield: "Tuck",
+    ExileFromStack: "Exile",
+    ChooseCreatureType: null,
+    ExileSameGrave: "ExileFromGraveyard",
+    RevealOrChoose: "Reveal",
+    RollDice: "DieRolled",
+    ExileAnyGrave: "ExileFromGraveyard",
+    RevealFromExile: "Reveal"
+  },
+  statics: {
+    Continuous: "@continuous",
+    ReduceCost: [
+      "CostReduction"
+    ],
+    RaiseCost: [
+      "CostIncrease"
+    ],
+    SetCost: [
+      "CostSet"
+    ],
+    AlternativeCost: [
+      "AlternativeCost"
+    ],
+    OptionalCost: [
+      "AdditionalCost"
+    ],
+    CantBlockBy: [
+      "EvasionRestriction"
+    ],
+    CantAttack: [
+      "AttackRestriction"
+    ],
+    CantBlock: [
+      "BlockRestriction"
+    ],
+    CantBeCast: [
+      "CastRestriction"
+    ],
+    CantBeActivated: [
+      "ActivationRestriction"
+    ],
+    MustAttack: [
+      "ForceAttack"
+    ],
+    MustBlock: [
+      "ForceBlock"
+    ],
+    CastWithFlash: [
+      "CastTiming"
+    ],
+    MinMaxBlocker: [
+      "EvasionRestriction"
+    ],
+    CantTarget: [
+      "TargetRestriction"
+    ],
+    CantGainLife: [
+      "LifeGainRestriction"
+    ],
+    CantDraw: [
+      "DrawRestriction"
+    ],
+    CantPlayLand: [
+      "LandRestriction"
+    ],
+    MayPlay: [
+      "CastPermission"
+    ],
+    MayLookAt: [
+      "Reveal"
+    ],
+    CanAttackDefender: [
+      "AttackPermission"
+    ],
+    CantAttackUnless: [
+      "AttackRestriction"
+    ],
+    CantBlockUnless: [
+      "BlockRestriction"
+    ],
+    CantTransform: [
+      "TransformRestriction"
+    ],
+    CantUntap: [
+      "UntapRestriction"
+    ],
+    CantSacrifice: [
+      "SacrificeRestriction"
+    ],
+    CantPutCounter: [
+      "CounterRestriction"
+    ],
+    CantChangeZone: [
+      "ZoneRestriction"
+    ],
+    CantRegenerate: [
+      "RegenerateRestriction"
+    ],
+    CantPreventDamage: [
+      "PreventRestriction"
+    ],
+    CantSearchLibrary: [
+      "SearchRestriction"
+    ],
+    IgnoreHexproof: [
+      "TargetPermission"
+    ],
+    Panharmonicon: [
+      "TriggerMultiplier"
+    ],
+    CombatDamageToughness: [
+      "DamageRule"
+    ],
+    AssignCombatDamageAsUnblocked: [
+      "DamageRule"
+    ],
+    AttackRequirement: [
+      "ForceAttack"
+    ],
+    BlockRestrict: [
+      "BlockRestriction"
+    ],
+    AttackRestrict: [
+      "AttackRestriction"
+    ],
+    ManaConvert: [
+      "ManaRule"
+    ],
+    UnspentMana: [
+      "ManaRule"
+    ],
+    CountersRemain: [
+      "CounterRule"
+    ],
+    PlayerMustAttack: [
+      "ForceAttack"
+    ],
+    CanBlockAny: [
+      "BlockPermission"
+    ],
+    CanBlockAmount: [
+      "BlockPermission"
+    ],
+    MustBeBlockedBy: [
+      "ForceBlock"
+    ],
+    MustBeBlockedByAll: [
+      "ForceBlock"
+    ],
+    CantExile: [
+      "ZoneRestriction"
+    ],
+    CantBeTargetedBy: [
+      "TargetRestriction"
+    ],
+    Devotion: [
+      "Devotion"
+    ],
+    CastFromGraveyard: [
+      "CastPermission"
+    ],
+    ETBTapped: [
+      "EntersTapped"
+    ],
+    FlipCoinMod: [
+      "CoinRule"
+    ],
+    AdaptMod: [
+      "Adapt"
+    ],
+    NoCleanupDamage: [
+      "DamageRule"
+    ],
+    OptionalAttackCost: [
+      "AttackCost"
+    ],
+    CantAttach: [
+      "AttachRestriction"
+    ],
+    CantCrew: [
+      "CrewRestriction"
+    ],
+    CantVenture: [
+      "VentureRestriction"
+    ],
+    DisableTriggers: [
+      "TriggerSuppression"
+    ],
+    CantWinLose: [
+      "GameRule"
+    ],
+    CantLoseGame: [
+      "GameRule"
+    ],
+    CantWinGame: [
+      "GameRule"
+    ],
+    RaiseCostPerTarget: [
+      "CostIncrease"
+    ],
+    SacrificeEachTurn: [
+      "Sacrifice"
+    ],
+    CantTapForMana: [
+      "ManaRule"
+    ],
+    AttackPermission: [
+      "AttackPermission"
+    ],
+    MaxHandSize: [
+      "HandSize"
+    ],
+    Untap: [
+      "Untap"
+    ],
+    AssignNoCombatDamage: [
+      "DamageRule"
+    ],
+    UntapOtherPlayer: [
+      "Untap"
+    ],
+    IgnoreLandWalk: [
+      "EvasionRule"
+    ],
+    IgnoreLegendRule: [
+      "LegendRule"
+    ],
+    TapPowerValue: [
+      "CrewRule"
+    ],
+    NumLoyaltyAct: [
+      "LoyaltyRule"
+    ],
+    CantChangeLife: [
+      "LifeRule"
+    ],
+    CantPhaseIn: [
+      "PhaseRule"
+    ],
+    ActivateAbilityAsIfHaste: [
+      "HasteRule"
+    ],
+    CanBlockIfShadow: [
+      "BlockPermission"
+    ],
+    CantBeCopied: [
+      "CopyRestriction"
+    ],
+    CanAttackIfHaste: [
+      "HasteRule"
+    ],
+    MustTarget: [
+      "TargetRule"
+    ],
+    CantPayLife: [
+      "LifeRule"
+    ],
+    ManaRestriction: [
+      "ManaRule"
+    ],
+    Activations: [
+      "ActivationRule"
+    ],
+    CantLoseLife: [
+      "LifeRule"
+    ],
+    CantPhaseOut: [
+      "PhaseRule"
+    ],
+    CanBlockIfReach: [
+      "BlockPermission"
+    ],
+    CantGainControl: [
+      "ControlRestriction"
+    ],
+    IgnorePlaneswalkerZeroLoyaltyRule: [
+      "LoyaltyRule"
+    ],
+    DrawFromBottom: [
+      "DrawRule"
+    ],
+    ForetellAnyTurn: [
+      "Foretell"
+    ],
+    InfectDamage: [
+      "PoisonCounter"
+    ],
+    ColorlessDamageSource: [
+      "DamageRule"
+    ],
+    CantDiscard: [
+      "DiscardRestriction"
+    ],
+    PlotZone: [
+      "Plot"
+    ],
+    ManaBurn: [
+      "ManaRule"
+    ],
+    CanAdapt: [
+      "Adapt"
+    ],
+    FlipCoinDoubler: [
+      "CoinRule"
+    ],
+    AttackVigilance: [
+      "Keyword:Vigilance"
+    ],
+    CantBecomeMonarch: [
+      "MonarchRestriction"
+    ],
+    BlockTapped: [
+      "BlockPermission"
+    ],
+    SurveilNum: [
+      "Surveil"
+    ],
+    IgnoreShroud: [
+      "TargetPermission"
+    ],
+    CantBeSuspected: [
+      "SuspectRestriction"
+    ],
+    WitherDamage: [
+      "CounterPlaced"
+    ],
+    CombatDamageNegatePower: [
+      "DamageRule"
+    ],
+    GainLifeRadiation: [
+      "LifeGain"
+    ],
+    MaxCounter: [
+      "CounterRule"
+    ]
+  },
+  continuous: {
+    AddKeyword: "Keyword:{value}",
+    AddPower: "Power",
+    AddToughness: "Toughness",
+    SetPower: "Power",
+    SetToughness: "Toughness",
+    AddType: "Type",
+    AddAllCreatureTypes: "Type",
+    RemoveType: "Type",
+    SetColor: "Color",
+    AddColor: "Color",
+    AddAbility: "GrantedAbility",
+    AddTrigger: "GrantedAbility",
+    AddStaticAbility: "GrantedAbility",
+    AddReplacementEffect: "GrantedAbility",
+    AddHiddenKeyword: "Keyword:{value}",
+    RemoveKeyword: "LoseKeyword",
+    RemoveAllAbilities: "LoseAbility",
+    GainControl: "GainControl",
+    MayPlay: "CastPermission",
+    MayLookAt: "Reveal",
+    AddSVar: null,
+    Affected: null,
+    AffectedZone: null,
+    AffectedDefined: null,
+    Description: null,
+    Mode: null,
+    CharacteristicDefining: null,
+    Condition: null,
+    IsPresent: null,
+    CheckSVar: null,
+    SVarCompare: null,
+    EffectZone: null,
+    ValidCard: null,
+    MayPlayLimit: null,
+    MayPlayWithoutManaCost: null,
+    MayPlayIgnoreType: null,
+    MayPlayIgnoreColor: null,
+    MayPlayAltManaCost: null,
+    MayPlayDontGrantZonePermissions: null,
+    MayPlayPlayer: null,
+    MayPlayText: null,
+    MayPlayWithFlash: null,
+    MayPlaySnowIgnoreColor: null,
+    GainsAbilitiesLimitPerTurn: null,
+    SetMaxHandSize: "HandSize",
+    RemoveCreatureTypes: "Type",
+    RemoveLandTypes: "Type",
+    RemoveCardTypes: "Type",
+    RemoveArtifactTypes: "Type",
+    GainsAbilitiesOf: "GrantedAbility",
+    GainsAbilitiesOfZones: "GrantedAbility",
+    GainsAbilitiesOfDefined: "GrantedAbility",
+    GainsValidAbilities: "GrantedAbility",
+    GainsTriggerAbsOf: "GrantedAbility",
+    GainTextOf: "ChangeText",
+    GainTextAbilities: "GrantedAbility",
+    GainsStickerAbilitiesOfDefined: "GrantedAbility",
+    GainsStickerAbilitiesOf: "GrantedAbility",
+    SetName: "Name",
+    AddNames: "Name",
+    AdditionalOptionalVote: "Vote",
+    AdditionalVote: "Vote",
+    AdditionalVillainousChoice: "Vote",
+    RemoveNonManaAbilities: "LoseAbility",
+    PresentCompare: null,
+    PresentZone: null,
+    Secondary: null,
+    SharedRestrictions: null,
+    SharedKeywordsZone: null,
+    ValidAfterStack: null,
+    TopCardOfLibraryIs: null,
+    ValidSA: null,
+    CheckSecondSVar: null,
+    SecondSVarCompare: null,
+    CheckThirdSVar: null,
+    Player: null,
+    Phases: null,
+    LockInText: null,
+    KeywordDefined: null,
+    GameStage: null,
+    FromDraftNotes: null,
+    ExcludeZone: null,
+    DeclaresBlockers: null,
+    Caster: null,
+    CalcKeywordN: null,
+    ActivationZone: null,
+    Activator: null,
+    ValidPlayer: null,
+    Origin: null,
+    Destination: null,
+    AdjustLandPlays: "LandPlays",
+    CanBlockAmount: "BlockPermission",
+    CanBlockAny: "BlockPermission",
+    RaiseMaxHandSize: "HandSize",
+    Goad: "Goad",
+    RaiseCost: "CostIncrease",
+    CantHaveKeyword: "LoseKeyword",
+    LethalDamageByPower: "DamageRule",
+    ControlOpponentsSearchingLibrary: "ControlPlayer",
+    ChangeColorWordsTo: "ChangeText",
+    ManaConversion: "ManaRule",
+    ReplaceGraveyard: "ZoneRule",
+    IgnoreEffectCost: "CostReduction",
+    Duration: null,
+    ControlVote: "Vote",
+    DeclaresAttackers: "ControlPlayer"
+  },
+  replacements: {
+    Moved: "@zone",
+    CreateToken: [
+      "TokenCreated"
+    ],
+    AddCounter: [
+      "CounterPlaced"
+    ],
+    DamageDone: [
+      "Damage"
+    ],
+    Untap: [
+      "Untap"
+    ],
+    Counter: [
+      "SpellCountered"
+    ],
+    Draw: [
+      "CardDrawn"
+    ],
+    GainLife: [
+      "LifeGain"
+    ],
+    LoseLife: [
+      "LifeLoss"
+    ],
+    BeginPhase: [
+      "PhaseBegins"
+    ],
+    BeginTurn: [
+      "TurnBegins"
+    ],
+    GameLoss: [
+      "PlayerLoses"
+    ],
+    GameWin: [
+      "PlayerWins"
+    ],
+    ProduceMana: [
+      "ManaAdded"
+    ],
+    TurnFaceUp: [
+      "TurnFaceUp"
+    ],
+    Discard: [
+      "Discard"
+    ],
+    Destroy: [
+      "Destroy"
+    ],
+    Tap: [
+      "Tap"
+    ],
+    Scry: [
+      "Scry"
+    ],
+    Mill: [
+      "Mill"
+    ],
+    Explore: [
+      "Explore"
+    ],
+    Proliferate: [
+      "Proliferate"
+    ],
+    PayLife: [
+      "LifeLoss"
+    ],
+    SetInMotion: [
+      "SchemeSetInMotion"
+    ],
+    Planeswalk: [
+      "Planeswalk"
+    ],
+    RollPlanarDice: [
+      "PlanarDice"
+    ],
+    Transform: [
+      "Transform"
+    ],
+    Attached: [
+      "Attach"
+    ],
+    Cascade: [
+      "Cascade"
+    ],
+    AssembleContraption: [
+      "Assemble"
+    ],
+    DrawCards: [
+      "CardDrawn"
+    ],
+    PlanarDiceResult: [
+      "PlanarDice"
+    ],
+    RemoveCounter: [
+      "CounterRemoved"
+    ],
+    LifeReduced: [
+      "LifeLoss"
+    ],
+    Learn: [
+      "Tutor"
+    ],
+    DeclareBlocker: [
+      "BlockersDeclared"
+    ],
+    RollDice: [
+      "DieRolled"
+    ],
+    FlipCoin: [
+      "CoinFlipped"
+    ],
+    Copy: [
+      "SpellCopied"
+    ],
+    PlayLand: [
+      "LandPlayed"
+    ],
+    Cast: [
+      "SpellCast"
+    ],
+    LoseMana: [
+      "ManaLost"
+    ],
+    CopySpell: [
+      "SpellCopied"
+    ],
+    Connive: [
+      "Connive"
+    ]
+  },
+  extraImplications: [
+    {
+      from: "Dies",
+      implies: "PutIntoGraveyard",
+      note: "A creature dying is a permanent put into a graveyard from the battlefield."
+    },
+    {
+      from: "Reanimate",
+      implies: "ETB"
+    },
+    {
+      from: "TokenCreated",
+      implies: "ETB"
+    },
+    {
+      from: "Manifest",
+      implies: "ETB"
+    },
+    {
+      from: "Meld",
+      implies: "ETB"
+    },
+    {
+      from: "Copy",
+      implies: "ETB"
+    }
+  ],
+  keywords: {
+    selfAttribute: [
+      "Flying",
+      "Trample",
+      "Vigilance",
+      "Haste",
+      "Flash",
+      "Reach",
+      "Menace",
+      "First Strike",
+      "Double Strike",
+      "Deathtouch",
+      "Defender",
+      "Indestructible",
+      "Hexproof",
+      "Shroud",
+      "Fear",
+      "Shadow",
+      "Intimidate",
+      "Horsemanship",
+      "Skulk",
+      "Changeling",
+      "Devoid",
+      "Ward",
+      "Protection",
+      "Landwalk",
+      "Infect",
+      "Wither",
+      "Toxic",
+      "Flanking",
+      "Banding",
+      "Partner",
+      "Partner with",
+      "Choose a Background",
+      "Doctor",
+      "Enchant",
+      "Convoke",
+      "Delve",
+      "Improvise",
+      "Affinity",
+      "Kicker",
+      "Multikicker",
+      "Entwine",
+      "Splice",
+      "Buyback",
+      "Split second",
+      "Storm",
+      "Cascade",
+      "Rebound",
+      "Read ahead",
+      "Start your engines",
+      "Compleated",
+      "Daybound",
+      "Nightbound",
+      "Ascend",
+      "Myriad",
+      "Melee",
+      "Battle cry",
+      "Annihilator",
+      "Bushido",
+      "Rampage",
+      "Provoke",
+      "Living weapon",
+      "Totem armor",
+      "Umbra armor",
+      "Soulbond",
+      "Undying",
+      "Persist",
+      "Exalted",
+      "Evolve",
+      "Extort",
+      "Prowess",
+      "Training",
+      "Mentor",
+      "Riot",
+      "Afflict",
+      "Afterlife",
+      "Fabricate",
+      "Decayed",
+      "Ravenous",
+      "Squad",
+      "Gift",
+      "Offspring",
+      "Saddle",
+      "Station",
+      "Mobilize",
+      "Job select",
+      "For Mirrodin",
+      "Backup",
+      "Bargain",
+      "Casualty",
+      "Craft",
+      "Disturb",
+      "Escape",
+      "Flashback",
+      "Jump-start",
+      "Retrace",
+      "Aftermath",
+      "Unearth",
+      "Embalm",
+      "Eternalize",
+      "Encore",
+      "Foretell",
+      "Plot",
+      "Warp",
+      "Suspend",
+      "Madness",
+      "Evoke",
+      "Echo",
+      "Cumulative upkeep",
+      "Morph",
+      "Megamorph",
+      "Disguise",
+      "Mutate",
+      "Bestow",
+      "Ninjutsu",
+      "Dash",
+      "Blitz",
+      "Prototype",
+      "Overload",
+      "Spectacle",
+      "Surge",
+      "Emerge",
+      "Escalate",
+      "Replicate",
+      "Sneak",
+      "Exploit",
+      "Devour",
+      "Modular",
+      "Graft",
+      "Dethrone",
+      "Renown",
+      "Hideaway",
+      "Sunburst",
+      "Amplify",
+      "Fading",
+      "Vanishing",
+      "Level up",
+      "Reconfigure",
+      "Specialize",
+      "Champion",
+      "Haunt",
+      "Ripple",
+      "Soulshift",
+      "Splice onto Arcane",
+      "Tribute",
+      "Dredge",
+      "Transmute",
+      "Forecast",
+      "Reinforce",
+      "Outlast",
+      "Scavenge",
+      "Bloodthirst",
+      "Crew",
+      "Firebending",
+      "Max speed",
+      "Harmonize",
+      "More Than Meets the Eye",
+      "Impending",
+      "Freerunning",
+      "Tiered",
+      "Spree",
+      "Cleave",
+      "Demonstrate",
+      "Hexproof from",
+      "Protection from black",
+      "Protection from red",
+      "Protection from white",
+      "Protection from blue",
+      "Protection from green",
+      "Protection from artifacts",
+      "Protection from everything",
+      "Lifelink",
+      "Equip",
+      "Cycling",
+      "TypeCycling",
+      "Landcycling",
+      "AlternateAdditionalCost",
+      "MayEffectFromOpeningHand",
+      "StickerSheet",
+      "You may choose not to untap CARDNAME during your untap step",
+      "Fuse",
+      "Companion",
+      "Conspire",
+      "Cipher",
+      "Phasing",
+      "Epic",
+      "Gravestorm",
+      "Poisonous",
+      "Frenzy",
+      "Horsemanship",
+      "Absorb",
+      "Aura swap",
+      "Bloodrush",
+      "Recover",
+      "Awaken",
+      "Ingest",
+      "Partner with",
+      "Hidden agenda",
+      "Double agenda",
+      "Assist",
+      "Visit",
+      "Prize",
+      "Enlist",
+      "Read Ahead",
+      "Compleated",
+      "Miracle",
+      "Paradox",
+      "Doctor's companion",
+      "Strive",
+      "Teamwork",
+      "Living metal",
+      "MayFlashCost",
+      "MayFlashSac",
+      "Storied",
+      "Undaunted",
+      "Paradigm",
+      "DeckLimit",
+      "MayEffectFromOpeningDeck",
+      "Space sculptor",
+      "Prowl",
+      "Mayhem",
+      "Web-slinging",
+      "MustBeBlockedByAll"
+    ],
+    relations: {
+      Lifelink: [
+        {
+          relation: "produces",
+          hook: "LifeGain",
+          selector: "You"
+        }
+      ],
+      Equip: [
+        {
+          relation: "consumes",
+          hook: "ManaPaid",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Cycling: [
+        {
+          relation: "produces",
+          hook: "Cycle",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CardDrawn",
+          selector: "You"
+        }
+      ],
+      TypeCycling: [
+        {
+          relation: "produces",
+          hook: "Cycle",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Tutor",
+          selector: "You"
+        }
+      ],
+      Landcycling: [
+        {
+          relation: "produces",
+          hook: "Cycle",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Tutor",
+          selector: "Land"
+        }
+      ],
+      Flashback: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Escape: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Unearth: [
+        {
+          relation: "produces",
+          hook: "Reanimate",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "ETB",
+          selector: "Card.Self"
+        }
+      ],
+      Persist: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Reanimate",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Undying: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Reanimate",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Prowess: [
+        {
+          relation: "triggers_on",
+          hook: "SpellCast",
+          selector: "Card.nonCreature+YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Exalted: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.attacking"
+        }
+      ],
+      Afterlife: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        }
+      ],
+      Fabricate: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        }
+      ],
+      Evolve: [
+        {
+          relation: "triggers_on",
+          hook: "ETB",
+          selector: "Creature.YouCtrl+Other"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Extort: [
+        {
+          relation: "triggers_on",
+          hook: "SpellCast",
+          selector: "Card.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "LifeLoss",
+          selector: "Opponent"
+        },
+        {
+          relation: "produces",
+          hook: "LifeGain",
+          selector: "You"
+        }
+      ],
+      Annihilator: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Permanent.OppCtrl"
+        }
+      ],
+      Toxic: [
+        {
+          relation: "produces",
+          hook: "PoisonCounter",
+          selector: "Opponent"
+        }
+      ],
+      Infect: [
+        {
+          relation: "produces",
+          hook: "PoisonCounter",
+          selector: "Opponent"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Wither: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Mentor: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature.attacking"
+        }
+      ],
+      Training: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Modular: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        }
+      ],
+      Exploit: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Devour: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Crew: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Crew",
+          selector: "Card.Self"
+        }
+      ],
+      Storm: [
+        {
+          relation: "consumes",
+          hook: "SpellCast",
+          selector: "Card"
+        },
+        {
+          relation: "produces",
+          hook: "SpellCopied",
+          selector: "Card.Self"
+        }
+      ],
+      Cascade: [
+        {
+          relation: "produces",
+          hook: "Cascade",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "You"
+        }
+      ],
+      Morph: [
+        {
+          relation: "produces",
+          hook: "TurnFaceUp",
+          selector: "Card.Self"
+        }
+      ],
+      Megamorph: [
+        {
+          relation: "produces",
+          hook: "TurnFaceUp",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Disguise: [
+        {
+          relation: "produces",
+          hook: "TurnFaceUp",
+          selector: "Card.Self"
+        }
+      ],
+      Madness: [
+        {
+          relation: "triggers_on",
+          hook: "Discard",
+          selector: "Card.Self"
+        }
+      ],
+      Ninjutsu: [
+        {
+          relation: "consumes",
+          hook: "Bounce",
+          selector: "Creature.YouCtrl+unblocked"
+        },
+        {
+          relation: "produces",
+          hook: "ETB",
+          selector: "Card.Self"
+        }
+      ],
+      Warp: [
+        {
+          relation: "modifies",
+          hook: "AlternativeCost",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Card.Self"
+        }
+      ],
+      Encore: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Embalm: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Eternalize: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Myriad: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Squad: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Offspring: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Backup: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Riot: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Bloodthirst: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Ravenous: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Casualty: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "SpellCopied",
+          selector: "Card.Self"
+        }
+      ],
+      Bargain: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Permanent.YouCtrl"
+        }
+      ],
+      Emerge: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Convoke: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Improvise: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Artifact.YouCtrl"
+        }
+      ],
+      Delve: [
+        {
+          relation: "consumes",
+          hook: "ExileFromGraveyard",
+          selector: "Card.YouOwn"
+        }
+      ],
+      Saddle: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Saddle",
+          selector: "Card.Self"
+        }
+      ],
+      Melee: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      "Battle cry": [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.attacking+Other"
+        }
+      ],
+      Dredge: [
+        {
+          relation: "produces",
+          hook: "Mill",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "Regrowth",
+          selector: "Card.Self"
+        }
+      ],
+      Scavenge: [
+        {
+          relation: "consumes",
+          hook: "ExileFromGraveyard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Outlast: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Mobilize: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        }
+      ],
+      "Living weapon": [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        },
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Card.Self"
+        }
+      ],
+      Decayed: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        }
+      ],
+      Echo: [
+        {
+          relation: "consumes",
+          hook: "ManaPaid",
+          selector: "You"
+        }
+      ],
+      "Cumulative upkeep": [
+        {
+          relation: "triggers_on",
+          hook: "Upkeep",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Fading: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "Upkeep",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CounterRemoved",
+          selector: "Card.Self"
+        }
+      ],
+      Vanishing: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "Upkeep",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CounterRemoved",
+          selector: "Card.Self"
+        }
+      ],
+      Suspend: [
+        {
+          relation: "produces",
+          hook: "ExileFromHand",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "Card.Self"
+        }
+      ],
+      Foretell: [
+        {
+          relation: "produces",
+          hook: "ExileFromHand",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Foretell",
+          selector: "Card.Self"
+        }
+      ],
+      Plot: [
+        {
+          relation: "produces",
+          hook: "ExileFromHand",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Plot",
+          selector: "Card.Self"
+        }
+      ],
+      Evoke: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        }
+      ],
+      Dash: [
+        {
+          relation: "produces",
+          hook: "Bounce",
+          selector: "Card.Self"
+        }
+      ],
+      Blitz: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CardDrawn",
+          selector: "You"
+        }
+      ],
+      Hideaway: [
+        {
+          relation: "produces",
+          hook: "ExileFromLibrary",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "You"
+        }
+      ],
+      Afflict: [
+        {
+          relation: "triggers_on",
+          hook: "BecomesBlocked",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "LifeLoss",
+          selector: "Opponent"
+        }
+      ],
+      Renown: [
+        {
+          relation: "triggers_on",
+          hook: "CombatDamage",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Bushido: [
+        {
+          relation: "triggers_on",
+          hook: "Blocks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Rampage: [
+        {
+          relation: "triggers_on",
+          hook: "BecomesBlocked",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Flanking: [
+        {
+          relation: "triggers_on",
+          hook: "BecomesBlocked",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.blocking"
+        }
+      ],
+      Soulshift: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Regrowth",
+          selector: "Spirit.YouOwn"
+        }
+      ],
+      Haunt: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Card.Self"
+        }
+      ],
+      Dethrone: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Ascend: [
+        {
+          relation: "produces",
+          hook: "CitysBlessing",
+          selector: "You"
+        }
+      ],
+      "Totem armor": [
+        {
+          relation: "replaces",
+          hook: "Destroy",
+          selector: "Creature.EnchantedBy"
+        }
+      ],
+      "Umbra armor": [
+        {
+          relation: "replaces",
+          hook: "Destroy",
+          selector: "Creature.EnchantedBy"
+        }
+      ],
+      Phasing: [
+        {
+          relation: "produces",
+          hook: "PhaseOut",
+          selector: "Card.Self"
+        }
+      ],
+      Amplify: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Sunburst: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Graft: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "ETB",
+          selector: "Creature.Other"
+        }
+      ],
+      Reconfigure: [
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      "Level up": [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Champion: [
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Creature.YouCtrl+Other"
+        }
+      ],
+      Ripple: [
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "Card.Self"
+        }
+      ],
+      Rebound: [
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "Card.Self"
+        }
+      ],
+      Spectacle: [
+        {
+          relation: "consumes",
+          hook: "LifeLoss",
+          selector: "Opponent"
+        }
+      ],
+      Bloodrush: [
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.attacking"
+        }
+      ],
+      Enlist: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Mutate: [
+        {
+          relation: "produces",
+          hook: "Mutate",
+          selector: "Creature.YouOwn+nonHuman"
+        }
+      ],
+      Bestow: [
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Creature"
+        }
+      ],
+      "Jump-start": [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        },
+        {
+          relation: "consumes",
+          hook: "Discard",
+          selector: "Card.YouOwn"
+        }
+      ],
+      Retrace: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        },
+        {
+          relation: "consumes",
+          hook: "Discard",
+          selector: "Land.YouOwn"
+        }
+      ],
+      Disturb: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Aftermath: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Miracle: [
+        {
+          relation: "triggers_on",
+          hook: "CardDrawn",
+          selector: "Card.Self"
+        }
+      ],
+      Unleash: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced:P1P1",
+          selector: "Card.Self"
+        }
+      ],
+      Increment: [
+        {
+          relation: "triggers_on",
+          hook: "SpellCast",
+          selector: "Card.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced:P1P1",
+          selector: "Card.Self"
+        }
+      ],
+      Offering: [
+        {
+          relation: "consumes",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Fortify: [
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Land.YouCtrl"
+        }
+      ],
+      Transfigure: [
+        {
+          relation: "consumes",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Tutor",
+          selector: "Creature"
+        }
+      ],
+      "Web-slinging": [
+        {
+          relation: "consumes",
+          hook: "Bounce",
+          selector: "Creature.YouCtrl+tapped"
+        }
+      ],
+      Mayhem: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ]
+    },
+    structural: [
+      "Class",
+      "Chapter",
+      "etbCounter",
+      "ETBReplacement",
+      "Landwalk",
+      "Protection",
+      "Hexproof from"
+    ]
+  },
+  ruleSentences: [
+    {
+      pattern: "can.t attack or block",
+      hook: "AttackRestriction"
+    },
+    {
+      pattern: "can.t attack",
+      hook: "AttackRestriction"
+    },
+    {
+      pattern: "can.t block",
+      hook: "BlockRestriction"
+    },
+    {
+      pattern: "can only attack alone",
+      hook: "AttackRestriction"
+    },
+    {
+      pattern: "must be blocked",
+      hook: "ForceBlock"
+    },
+    {
+      pattern: "able to block",
+      hook: "ForceBlock"
+    },
+    {
+      pattern: "^Prevent all .*damage",
+      hook: "DamagePrevented"
+    },
+    {
+      pattern: "any number of cards named",
+      hook: "DeckRule"
+    },
+    {
+      pattern: "can be your commander",
+      hook: "CommanderRule"
+    },
+    {
+      pattern: "choose not to untap",
+      hook: "UntapRestriction"
+    },
+    {
+      pattern: "assign (its|CARDNAME.s) combat damage",
+      hook: "DamageRule"
+    },
+    {
+      pattern: "lethal damage",
+      hook: "DamageRule"
+    },
+    {
+      pattern: "roll a die|reroll",
+      hook: "DieRolled"
+    },
+    {
+      pattern: "cast CARDNAME from your library",
+      hook: "CastPermission"
+    },
+    {
+      pattern: "additional \\+1/\\+1 counters",
+      hook: "CounterPlaced:P1P1"
+    },
+    {
+      pattern: "Spend only colored mana",
+      hook: "ManaRule"
+    }
+  ]
+};
+
+// server/graph/closure.ts
+var MAPPING_VERSION = forge_map_default.version;
+var EFFECT_TO_HOOK = { CreateToken: "TokenCreated", Bounce: "Bounce", LandToBattlefield: "PutOntoBattlefield" };
+
+class Closure {
+  rules = [];
+  constructor() {
+    const y = closure_rules_default;
+    if (!Array.isArray(y?.event_implications) || !Array.isArray(y?.effect_closures))
+      throw new Error("closure_rules.yaml: missing event_implications or effect_closures");
+    this.rules.push(...y.event_implications);
+    for (const e of y.effect_closures)
+      this.rules.push({ from: EFFECT_TO_HOOK[e.effect] ?? e.effect, implies: e.triggers_event, condition: e.condition });
+    for (const z2 of forge_map_default.zones)
+      for (const h of z2.hooks.slice(1))
+        this.rules.push({ from: z2.hooks[0], implies: h });
+    for (const z2 of forge_map_default.zones)
+      for (const h of z2.creatureHooks ?? [])
+        for (const i of z2.hooks)
+          this.rules.push({ from: h, implies: i });
+    for (const x of forge_map_default.extraImplications)
+      this.rules.push({ from: x.from, implies: x.implies });
+  }
+  get ruleCount() {
+    return this.rules.length;
+  }
+  expand(hook, types = []) {
+    const lower = types.map((x) => x.toLowerCase());
+    const out = new Set([hook]);
+    const queue = [hook];
+    while (queue.length) {
+      const h = queue.shift();
+      const parent = h.includes(":") ? h.slice(0, h.indexOf(":")) : null;
+      const next = this.rules.filter((r) => r.from === h && (!r.condition?.target_type || r.condition.target_type.some((t) => lower.includes(t)))).map((r) => r.implies);
+      if (parent)
+        next.push(parent);
+      for (const n of next)
+        if (!out.has(n)) {
+          out.add(n);
+          queue.push(n);
+        }
+    }
+    return [...out].sort();
+  }
+}
+// server/graph/mapping/supply.yaml
+var supply_default = {
+  version: "1.0",
+  description: `What feeds a cost that spends something. A card that "consumes Sacrifice" needs a permanent on the battlefield, so anything that puts one there (ETB) feeds it. Used by src/interact.ts. ManaPaid is left out on purpose (ISA Decisions 2026-11-06): ramp is a role the Galaxy fills, and linking every mana source to every mana cost would drown the real interactions.
+`,
+  supply: [
+    {
+      consumes: "Sacrifice",
+      fed_by: [
+        "ETB"
+      ],
+      note: "Sacrifice outlets eat permanents: tokens, reanimation, anything entering."
+    },
+    {
+      consumes: "Exile",
+      fed_by: [
+        "ETB"
+      ],
+      note: "An exile-a-permanent cost, same source as sacrifice."
+    },
+    {
+      consumes: "Bounce",
+      fed_by: [
+        "ETB"
+      ],
+      note: "A return-a-permanent-to-hand cost."
+    },
+    {
+      consumes: "Tap",
+      fed_by: [
+        "Untap"
+      ],
+      note: "A {T} cost is paid again when the permanent untaps."
+    },
+    {
+      consumes: "Untap",
+      fed_by: [
+        "Tap"
+      ]
+    },
+    {
+      consumes: "Discard",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ],
+      note: "Discard costs spend cards in hand."
+    },
+    {
+      consumes: "ExileFromHand",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ]
+    },
+    {
+      consumes: "HandToLibrary",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ]
+    },
+    {
+      consumes: "ExileFromGraveyard",
+      fed_by: [
+        "PutIntoGraveyard",
+        "Mill",
+        "Discard"
+      ],
+      note: "Delve-style and escape-style costs spend graveyard cards."
+    },
+    {
+      consumes: "CollectEvidence",
+      fed_by: [
+        "PutIntoGraveyard",
+        "Mill",
+        "Discard"
+      ]
+    },
+    {
+      consumes: "LifeLoss",
+      fed_by: [
+        "LifeGain"
+      ],
+      note: "Paying life is spent from the life total."
+    },
+    {
+      consumes: "CounterRemoved",
+      fed_by: [
+        "CounterPlaced"
+      ],
+      note: "CounterRemoved:P1P1 is fed by CounterPlaced:P1P1; the subtype carries over (src/interact.ts)."
+    }
+  ]
+};
+
+// server/graph/interact.ts
+function loadSupply() {
+  const y = supply_default;
+  if (!Array.isArray(y?.supply))
+    throw new Error("supply.yaml: missing supply list");
+  return new Map(y.supply.map((s) => [s.consumes, s.fed_by]));
+}
+var PERMANENT_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Land", "Planeswalker"];
+var CARD_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Instant", "Kindred", "Land", "Planeswalker", "Sorcery"];
+var SUPERTYPES = ["Basic", "Legendary", "Snow"];
+var ALL_FACES_CAST = new Set(["split", "adventure", "modal_dfc", "omen"]);
+function costColors(cost) {
+  const out = new Set;
+  for (const m of (cost ?? "").matchAll(/\{([^}]+)\}/g))
+    for (const ch of m[1].split("/"))
+      if (/^[WUBRG]$/.test(ch))
+        out.add(ch);
+  return ["W", "U", "B", "R", "G"].filter((x) => out.has(x));
+}
+function faceOf(typeLine, colors, cost, anySubtype) {
+  const [front, sub = ""] = typeLine.split("\u2014");
+  return { types: CARD_TYPES.filter((t) => front.includes(t)), supertypes: SUPERTYPES.filter((t) => front.includes(t)), subtypes: sub.trim().split(/\s+/).filter(Boolean), colors, costColors: costColors(cost), anySubtype };
+}
+function cardInfo(g, c) {
+  const anySubtype = c.keywords.includes("Changeling");
+  const sides = c.faces?.length ? c.faces : [{ type_line: c.typeLine, colors: c.colors ?? undefined, mana_cost: c.manaCost }];
+  const faces = sides.map((f) => faceOf(f.type_line ?? "", f.colors ?? (c.faces?.length ? costColors(f.mana_cost) : c.colors ?? []), f.mana_cost, anySubtype));
+  const front = faces[0];
+  return {
+    id: c.id,
+    name: g.name,
+    oracleId: g.oracleId,
+    types: front.types,
+    subtypes: front.subtypes,
+    supertypes: front.supertypes ?? [],
+    colors: front.colors ?? [],
+    costColors: front.costColors ?? [],
+    anySubtype,
+    faces: ALL_FACES_CAST.has(c.layout) ? faces : [front],
+    colorIdentity: c.colorIdentity,
+    edhrecRank: c.edhrecRank,
+    graph: g
+  };
+}
+var GENERIC = new Set(["Card", "Permanent", "Spell"]);
+var NO_FACTS = { creatureOnly: new Set, landOnly: new Set, known: new Set };
+var COLOR = { White: "W", Blue: "U", Black: "B", Red: "R", Green: "G" };
+function colorTests(props) {
+  const out = [];
+  for (const p of props) {
+    const m = /^(non)?(ManaCostPartial)?(White|Blue|Black|Red|Green|Colorless|MonoColor|Multicolor)$/.exec(p);
+    if (!m)
+      continue;
+    const pick2 = (me) => (m[2] ? me.costColors : me.colors) ?? [];
+    const base = m[3] === "Colorless" ? (me) => pick2(me).length === 0 : m[3] === "MonoColor" ? (me) => pick2(me).length === 1 : m[3] === "Multicolor" ? (me) => pick2(me).length > 1 : (me) => pick2(me).includes(COLOR[m[3]]);
+    out.push(m[1] ? (me) => !base(me) : base);
+  }
+  return out;
+}
+var CHANGES_HANDS = new Set(["GainControl", "ExchangeControl"]);
+function resolve(a, me, facts, hook) {
+  let types = a.types.filter((x) => !GENERIC.has(x) && !SUPERTYPES.includes(x));
+  const supertypes = a.types.filter((x) => SUPERTYPES.includes(x));
+  const nonSupertypes = a.props.flatMap((p) => {
+    const m = /^non([A-Z][a-z]+)$/.exec(p);
+    return m && SUPERTYPES.includes(m[1]) ? [m[1]] : [];
+  });
+  let subtypes = facts.known.size ? a.subtypes.filter((x) => facts.known.has(x)) : a.subtypes;
+  let token = a.token;
+  if (!types.length && supertypes.includes("Basic"))
+    types = ["Land"];
+  if (a.self) {
+    types = [...new Set([...types, ...me.types])];
+    subtypes = [...new Set([...subtypes, ...me.subtypes])];
+    token = false;
+  } else if (!types.length && subtypes.some((x) => facts.creatureOnly.has(x)))
+    types = ["Creature"];
+  else if (!types.length && subtypes.length && subtypes.every((x) => facts.landOnly.has(x)))
+    types = ["Land"];
+  const excluded = a.props.flatMap((p) => {
+    const m = /^non([A-Z][a-z]+)$/.exec(p);
+    return m && CARD_TYPES.includes(m[1]) ? [m[1]] : [];
+  });
+  const controller = a.controller === "any" && (a.props.includes("EquippedBy") || a.self && !CHANGES_HANDS.has(hook ?? "")) ? "you" : a.controller;
+  return { types, subtypes, supertypes, nonSupertypes, ...a.self && me.anySubtype ? { anySubtype: true } : {}, excluded, ...a.self ? { me } : {}, color: colorTests(a.props), controller, token, self: a.self, player: a.player };
+}
+function playerSide(p) {
+  if (p === "You")
+    return "you";
+  if (p === "Opponent")
+    return "opponent";
+  return "any";
+}
+function overlap(a, b) {
+  if (a.self && b.self)
+    return false;
+  if (a.controller !== "any" && b.controller !== "any" && a.controller !== b.controller)
+    return false;
+  if (a.token !== null && b.token !== null && a.token !== b.token)
+    return false;
+  const aPlayer = a.player !== undefined, bPlayer = b.player !== undefined;
+  if (aPlayer && bPlayer) {
+    const x = playerSide(a.player), y = playerSide(b.player);
+    return x === "any" || y === "any" || x === y;
+  }
+  if (aPlayer && b.types.length || bPlayer && a.types.length)
+    return false;
+  if (a.types.length && b.types.length && !a.types.some((t) => b.types.includes(t)))
+    return false;
+  const excludes = (x, y) => y.excluded.length > 0 && x.types.length > 0 && (x.self ? x.types.some((t) => y.excluded.includes(t)) : x.types.every((t) => y.excluded.includes(t)));
+  if (excludes(a, b) || excludes(b, a))
+    return false;
+  if (a.subtypes.length && b.subtypes.length && !a.anySubtype && !b.anySubtype && !a.subtypes.some((x) => b.subtypes.includes(x)))
+    return false;
+  const superOk = (me, y) => y.supertypes.every((t) => me.supertypes?.includes(t)) && !y.nonSupertypes.some((t) => me.supertypes?.includes(t));
+  if (a.supertypes.some((t) => b.nonSupertypes.includes(t)) || b.supertypes.some((t) => a.nonSupertypes.includes(t)))
+    return false;
+  if (a.me && !superOk(a.me, b))
+    return false;
+  if (b.me && !superOk(b.me, a))
+    return false;
+  if (a.me && !b.color.every((t) => t(a.me)))
+    return false;
+  if (b.me && !a.color.every((t) => t(b.me)))
+    return false;
+  return true;
+}
+function selectorsOverlap(a, aMe, b, bMe, facts = NO_FACTS, hook) {
+  if (!a.any.length || !b.any.length)
+    return true;
+  return a.any.some((x) => b.any.some((y) => overlap(resolve(x, aMe, facts, hook), resolve(y, bMe, facts, hook))));
+}
+function closureTypes(sel, me, facts) {
+  const out = new Set;
+  for (const a of sel.any) {
+    if (a.player)
+      continue;
+    const r = resolve(a, me, facts);
+    if (!r.types.length && !r.subtypes.length && !r.excluded.includes("Creature"))
+      out.add("creature");
+    for (const x of r.types)
+      out.add(x.toLowerCase());
+  }
+  return [...out];
+}
+
+class InteractionIndex {
+  cards;
+  emits = new Map;
+  listens = new Map;
+  emitsByCard = [];
+  listensByCard = [];
+  byName = new Map;
+  byLower = new Map;
+  hookCards = new Map;
+  facts;
+  constructor(cards, closure, supply, facts = NO_FACTS) {
+    this.cards = cards;
+    this.facts = facts;
+    cards.forEach((c, i) => {
+      this.byName.set(c.name, i);
+      for (const face of c.name.split(" // "))
+        if (!this.byName.has(face))
+          this.byName.set(face, i);
+      for (const n of [c.name, ...c.name.split(" // ")])
+        if (!this.byLower.has(n.toLowerCase()))
+          this.byLower.set(n.toLowerCase(), i);
+      const emits = [], listens = [];
+      const seen = new Set;
+      for (const [ability, ab] of c.graph.abilities.entries())
+        for (const [relation, r] of ab.relations.entries()) {
+          if (r.relation === "produces" || r.relation === "consumes") {
+            const by = r.relation === "produces" ? "effect" : "cost";
+            for (const hook of closure.expand(r.hook, closureTypes(r.selector, c, facts)))
+              emits.push({ card: i, hook, emitted: r.hook, by, sel: r.selector, ability, relation });
+          }
+          if (r.relation === "triggers_on" || r.relation === "replaces")
+            listens.push({ card: i, hook: r.hook, listener: r.relation, sel: r.selector, ability, relation });
+          if (r.relation === "consumes") {
+            const [base, sub] = r.hook.split(":");
+            for (const fed of supply.get(base) ?? []) {
+              if (sub && fed === "CounterPlaced") {
+                listens.push({ card: i, hook: `${fed}:${sub}`, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
+                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, onlyEmitted: fed, ability, relation });
+              } else
+                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
+            }
+          }
+        }
+      const self = { any: [{ types: [], subtypes: [], controller: "you", token: false, self: true, other: false, props: [] }], raw: "intrinsic" };
+      for (const f of c.faces) {
+        if (!f.types.length)
+          continue;
+        if (!f.types.includes("Land"))
+          emits.push({ card: i, hook: "SpellCast", emitted: "SpellCast", by: "card", sel: self, me: f });
+        if (f.types.some((t) => PERMANENT_TYPES.includes(t)))
+          emits.push({ card: i, hook: "ETB", emitted: "ETB", by: "card", sel: self, me: f });
+      }
+      for (const e of emits) {
+        (this.emits.get(e.hook) ?? this.emits.set(e.hook, []).get(e.hook)).push(e);
+        seen.add(e.hook);
+      }
+      for (const l of listens) {
+        (this.listens.get(l.hook) ?? this.listens.set(l.hook, []).get(l.hook)).push(l);
+        seen.add(l.hook);
+      }
+      for (const h of seen)
+        this.hookCards.set(h, (this.hookCards.get(h) ?? 0) + 1);
+      this.emitsByCard.push(emits);
+      this.listensByCard.push(listens);
     });
   }
-  REV.set(space, m);
-  return m;
+  emitsOf(i) {
+    return this.emitsByCard[i];
+  }
+  listensOf(i) {
+    return this.listensByCard[i];
+  }
+  selectorsMeet(a, aMe, b, bMe, hook) {
+    return selectorsOverlap(a, aMe, b, bMe, this.facts, hook);
+  }
+  indexOf(name) {
+    const i = this.byName.get(name) ?? this.byLower.get(name.toLowerCase());
+    if (i === undefined)
+      throw new Error(`no card named ${name} in the graph`);
+    return i;
+  }
+  link(e, l) {
+    if (e.card === l.card)
+      return null;
+    if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
+      return null;
+    const a = this.cards[e.card], b = this.cards[l.card];
+    if (!selectorsOverlap(e.sel, e.me ?? a, l.sel, b, this.facts, e.hook))
+      return null;
+    return { from: a.name, to: b.name, hook: e.hook, emittedBy: e.by, emitted: e.emitted, listener: l.listener, ...l.consumed ? { consumed: l.consumed } : {} };
+  }
+  linksFrom(i) {
+    const out = [];
+    for (const e of this.emitsByCard[i])
+      for (const l of this.listens.get(e.hook) ?? []) {
+        const k = this.link(e, l);
+        if (k)
+          out.push(k);
+      }
+    return dedupe(out);
+  }
+  linksTo(i) {
+    const out = [];
+    for (const l of this.listensByCard[i])
+      for (const e of this.emits.get(l.hook) ?? []) {
+        const k = this.link(e, l);
+        if (k)
+          out.push(k);
+      }
+    return dedupe(out);
+  }
+  feedersMemo = new Map;
+  castFeeders(l) {
+    const shared = !l.sel.any.some((a) => a.self);
+    const key = `${l.hook}|${l.consumed ?? ""}|${l.onlyEmitted ?? ""}|${l.sel.raw}`;
+    if (shared && this.feedersMemo.has(key))
+      return this.withoutSelf(this.feedersMemo.get(key), l.card);
+    const from = new Set;
+    const b = this.cards[l.card];
+    for (const e of this.emits.get(l.hook) ?? []) {
+      if (e.by !== "card" || from.has(e.card))
+        continue;
+      if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
+        continue;
+      if (selectorsOverlap(e.sel, e.me ?? this.cards[e.card], l.sel, b, this.facts, e.hook))
+        from.add(e.card);
+    }
+    if (shared)
+      this.feedersMemo.set(key, from);
+    return this.withoutSelf(from, l.card);
+  }
+  withoutSelf(s, card) {
+    if (!s.has(card))
+      return s;
+    const t = new Set(s);
+    t.delete(card);
+    return t;
+  }
+  linksWith(i, members2) {
+    const out = [];
+    for (const e of this.emitsByCard[i])
+      for (const l of this.listens.get(e.hook) ?? [])
+        if (members2.has(l.card)) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+    for (const l of this.listensByCard[i])
+      for (const e of this.emits.get(l.hook) ?? [])
+        if (members2.has(e.card)) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+    return dedupe(out);
+  }
+  linksBetween(a, b) {
+    const name = this.cards[this.indexOf(b)].name;
+    return this.linksFrom(this.indexOf(a)).filter((l) => l.to === name);
+  }
 }
-function swapsFor(space, card, deck, plan, opts = {}) {
-  const o = { ...SWAP_DEFAULTS, ...opts };
-  const me = space.cards.get(card.id), mine = planScore(me, plan, o.weights), reg = me.r[o.method] ?? -1;
+function dedupe(links) {
+  const seen = new Set;
+  return links.filter((l) => {
+    const k = `${l.from}|${l.to}|${l.hook}|${l.emittedBy}|${l.emitted}|${l.listener}|${l.consumed ?? ""}`;
+    if (seen.has(k))
+      return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+// server/graph/store-graph.ts
+function checkMappingVersion(db) {
+  const row = db.query("SELECT value FROM meta WHERE key = 'graph_mapping_version'").get();
+  if (row?.value !== MAPPING_VERSION) {
+    throw new Error(`the card store's graph was extracted under mapping ${row ? row.value : "(none recorded)"}, but this server's ` + `closure and zone tables are mapping ${MAPPING_VERSION}; rebuild the store from a corpus of mapping ${MAPPING_VERSION}`);
+  }
+}
+function subtypeFacts(db) {
+  const rows = db.query("SELECT subtype, creature_only, land_only FROM subtype_facts ORDER BY subtype").all();
+  if (!rows.length)
+    throw new Error("the card store has no subtype facts (subtype_facts is empty)");
+  return {
+    creatureOnly: new Set(rows.filter((r) => r.creature_only).map((r) => r.subtype)),
+    landOnly: new Set(rows.filter((r) => r.land_only).map((r) => r.subtype)),
+    known: new Set(rows.map((r) => r.subtype))
+  };
+}
+function buildGraph(db) {
+  checkMappingVersion(db);
+  const rows = db.query(`SELECT c.id, c.oracle_id, c.name, c.layout, c.type_line, c.mana_cost, c.keywords, c.color_identity,
+      s.colors, s.card_faces, s.edhrec_rank, g.abilities
+    FROM card_graph g JOIN cards c ON c.id = g.card_id LEFT JOIN card_scryfall s ON s.card_id = c.id ORDER BY c.id`).all();
+  if (!rows.length)
+    throw new Error("the card store has no card graph (card_graph is empty)");
+  const infos = rows.map((r) => {
+    const abilities = JSON.parse(r.abilities);
+    if (!Array.isArray(abilities))
+      throw new Error(`card_graph row for ${r.name} is not an ability list`);
+    const graph = { name: r.name, oracleId: r.oracle_id, abilities };
+    return cardInfo(graph, {
+      id: r.id,
+      layout: r.layout,
+      typeLine: r.type_line,
+      manaCost: r.mana_cost,
+      keywords: JSON.parse(r.keywords),
+      colorIdentity: [...r.color_identity],
+      colors: r.colors === null ? null : JSON.parse(r.colors),
+      faces: r.card_faces === null ? null : JSON.parse(r.card_faces),
+      edhrecRank: r.edhrec_rank
+    });
+  });
+  const index = new InteractionIndex(infos, new Closure, loadSupply(), subtypeFacts(db));
+  return { index, positionOf: new Map(infos.map((c, i) => [c.id, i])) };
+}
+var GRAPHS = new WeakMap;
+function graphOf(db) {
+  let g = GRAPHS.get(db);
+  if (!g)
+    GRAPHS.set(db, g = buildGraph(db));
+  return g;
+}
+
+// server/graph/strategy.ts
+var STRATEGY_DEFAULTS = { minShare: 0.15, minThemeDecks: 20, minCardDecks: 3, minLift: 1.25, minCards: 3, minCommanders: 10, top: 25, evidence: 12 };
+
+class UnknownThemeError extends ToolInputError {
+  theme;
+  closest;
+  constructor(theme, closest) {
+    super(`no theme named "${theme}" in the commander data${closest.length ? `; closest known themes: ${closest.join(", ")}` : ""}`);
+    this.theme = theme;
+    this.closest = closest;
+  }
+}
+
+class ThinThemeError extends ToolInputError {
+  theme;
+  commanders;
+  constructor(theme, commanders, detail) {
+    super(`the theme "${theme}" is known but has too little data to build a profile: ${detail}; ` + "name a few keystone cards of the deck instead and plan from those");
+    this.theme = theme;
+    this.commanders = commanders;
+  }
+}
+var PAGES = new WeakMap;
+function loadPages(db) {
+  const hit = PAGES.get(db);
+  if (hit)
+    return hit;
+  const rows = db.query(`SELECT cm.card_id, cm.edhrec_slug, cm.decks, c.name FROM commanders cm JOIN cards c ON c.id = cm.card_id
+    WHERE cm.decks > 0`).all();
+  rows.sort((a, b) => byteOrder(`${a.edhrec_slug}.json`, `${b.edhrec_slug}.json`));
+  const pages = rows.map((r) => ({ cardId: r.card_id, slug: r.edhrec_slug, name: r.name, decks: r.decks, tagMentions: 0, tags: new Map }));
+  if (!pages.length)
+    throw new Error("the card store has no commander data (commanders is empty)");
+  const byId = new Map(pages.map((p) => [p.cardId, p]));
+  for (const t of db.query(`SELECT ct.commander_id, t.slug, ct.decks FROM commander_themes ct JOIN themes t ON t.id = ct.theme_id
+    WHERE ct.decks > 0 ORDER BY ct.commander_id, t.slug`).all()) {
+    const p = byId.get(t.commander_id);
+    if (!p)
+      continue;
+    p.tags.set(t.slug, t.decks);
+    p.tagMentions += t.decks;
+  }
+  const themeNames = new Map(db.query("SELECT slug, name FROM themes ORDER BY slug").all().map((t) => [t.slug, t.name]));
+  const out = { pages, themeNames };
+  PAGES.set(db, out);
+  return out;
+}
+var share = (p, slug) => p.tagMentions ? (p.tags.get(slug) ?? 0) / p.tagMentions : 0;
+function qualifies(p, slug, minShare, minThemeDecks) {
+  return (p.tags.get(slug) ?? 0) >= minThemeDecks && share(p, slug) >= minShare;
+}
+function themeSlug(s) {
+  return s.toLowerCase().replace(/\+/g, " plus ").replace(/-/g, " minus ").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+function listThemes(db, opts = {}) {
+  const { pages, themeNames } = loadPages(db);
+  const minShare = opts.minShare ?? STRATEGY_DEFAULTS.minShare, minThemeDecks = opts.minThemeDecks ?? STRATEGY_DEFAULTS.minThemeDecks;
+  const minCommanders = opts.minCommanders ?? STRATEGY_DEFAULTS.minCommanders;
+  const by = new Map;
+  for (const p of pages)
+    for (const [slug, count] of p.tags) {
+      const t = by.get(slug) ?? by.set(slug, { slug, name: themeNames.get(slug) ?? slug, decks: 0, commanders: 0, qualifying: 0, usable: false }).get(slug);
+      t.decks += count;
+      t.commanders++;
+      if (qualifies(p, slug, minShare, minThemeDecks))
+        t.qualifying++;
+    }
+  for (const t of by.values())
+    t.usable = t.qualifying >= minCommanders;
+  return [...by.values()].sort((a, b) => b.decks - a.decks || byteOrder(a.slug, b.slug));
+}
+function closestThemes(db, theme) {
+  const want = themeSlug(theme);
+  const budget = Math.max(2, Math.floor(want.length / 3));
+  return listThemes(db).map((t) => ({ t, d: editDistance(want, t.slug), sub: !!want && (t.slug.includes(want) || want.includes(t.slug)) })).filter((x) => x.d <= budget || x.sub).sort((a, b) => a.d - b.d || Number(b.sub) - Number(a.sub) || b.t.decks - a.t.decks || byteOrder(a.t.name, b.t.name)).slice(0, 5).map((x) => x.t.name);
+}
+function resolveTheme(db, theme) {
+  const data = loadPages(db);
+  const want = themeSlug(theme);
+  if (!want)
+    throw new ToolInputError("a theme name is empty");
+  for (const [slug, name] of data.themeNames)
+    if (slug === want || themeSlug(name) === want || themeSlug(slug) === want)
+      return slug;
+  throw new UnknownThemeError(theme, closestThemes(db, theme));
+}
+function qualifyingCommanders(db, slug, opts = {}) {
+  const minShare = opts.minShare ?? STRATEGY_DEFAULTS.minShare, minThemeDecks = opts.minThemeDecks ?? STRATEGY_DEFAULTS.minThemeDecks;
+  return loadPages(db).pages.filter((p) => qualifies(p, slug, minShare, minThemeDecks)).map((page) => ({ page, share: share(page, slug) }));
+}
+function themeCommanders(db, theme, opts = {}) {
+  const o = { ...STRATEGY_DEFAULTS, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) };
+  const data = loadPages(db);
+  const slug = resolveTheme(db, theme);
+  const name = data.themeNames.get(slug) ?? slug;
+  const chosen = qualifyingCommanders(db, slug, o).map((c) => c.page);
+  if (chosen.length < Math.max(1, o.minCommanders)) {
+    const rule = `at least ${o.minShare} of their theme tags and ${o.minThemeDecks}+ decks`;
+    if (!chosen.length) {
+      const best = data.pages.filter((p) => p.tags.has(slug)).sort((a, b) => share(b, slug) - share(a, slug) || byteOrder(a.slug, b.slug))[0];
+      throw new ThinThemeError(name, 0, `0 commanders play it as a main theme (${rule}; ${o.minCommanders} needed)` + (best ? `; the most devoted is ${best.name}, ${best.tags.get(slug)} decks, share ${share(best, slug).toFixed(2)}` : ""));
+    }
+    throw new ThinThemeError(name, chosen.length, `only ${chosen.length} commander${chosen.length === 1 ? "" : "s"} play it as a main theme ` + `(${rule}; ${o.minCommanders} needed): ${chosen.map((p) => p.name).join("; ")}`);
+  }
+  return { slug, name, chosen: chosen.map((page) => ({ page, share: share(page, slug) })) };
+}
+var FACTS = new WeakMap;
+function cardFacts(graph) {
+  const hit = FACTS.get(graph);
+  if (hit)
+    return hit;
+  const idx = graph.index;
+  const keys = idx.cards.map((_, i) => {
+    const out = new Set;
+    for (const e of idx.emitsOf(i))
+      if (e.by !== "card" && !offProfile(e.hook))
+        out.add(`makes|${e.hook}`);
+    for (const l of idx.listensOf(i)) {
+      const hook = l.listener === "consumes" ? l.consumed ?? l.hook : l.hook;
+      if (!offProfile(hook))
+        out.add(`spends|${hook}`);
+    }
+    return [...out].sort();
+  });
+  FACTS.set(graph, keys);
+  return keys;
+}
+var MINED = new WeakMap;
+function mined(db, graph, minCardDecks) {
+  const per = MINED.get(graph) ?? MINED.set(graph, new Map).get(graph);
+  const hit = per.get(minCardDecks);
+  if (hit)
+    return hit;
+  const { pages } = loadPages(db);
+  const facts = cardFacts(graph);
+  const rows = new Map;
+  for (const r of db.query(`SELECT commander_id, card_id, synergy FROM commander_cards WHERE synergy > 0 AND decks >= ?
+    ORDER BY commander_id, card_id`).all(minCardDecks)) {
+    const i = graph.positionOf.get(r.card_id);
+    if (i === undefined)
+      continue;
+    (rows.get(r.commander_id) ?? rows.set(r.commander_id, []).get(r.commander_id)).push([i, r.synergy]);
+  }
+  const weighted = new Map;
+  const baseline = new Map;
+  let baselineMass = 0;
+  for (const p of pages) {
+    const w = rows.get(p.cardId) ?? [];
+    for (const [i, s] of w) {
+      baselineMass += s;
+      for (const k of facts[i])
+        baseline.set(k, (baseline.get(k) ?? 0) + s);
+    }
+    weighted.set(p.slug, w);
+  }
+  const out = { weighted, baseline, baselineMass };
+  per.set(minCardDecks, out);
+  return out;
+}
+function strategyProfile(db, graph, theme, opts = {}) {
+  const o = { ...STRATEGY_DEFAULTS, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) };
+  if (!(o.minLift > 1))
+    throw new Error(`minLift must be above 1 (got ${o.minLift})`);
+  const { name, chosen } = themeCommanders(db, theme, o);
+  const m = mined(db, graph, o.minCardDecks);
+  const keys = cardFacts(graph);
+  const idx = graph.index;
+  const mass = new Map;
+  const byCard = new Map;
+  let total = 0;
+  for (const { page, share: a } of chosen) {
+    for (const [i, w] of m.weighted.get(page.slug) ?? []) {
+      const x = a * w;
+      total += x;
+      for (const k of keys[i]) {
+        mass.set(k, (mass.get(k) ?? 0) + x);
+        const cards = byCard.get(k) ?? byCard.set(k, new Map).get(k);
+        cards.set(i, (cards.get(i) ?? 0) + x);
+      }
+    }
+  }
+  if (!(total > 0))
+    throw new ThinThemeError(name, chosen.length, `the ${chosen.length} commanders that play it have no positive-synergy cards in the card graph`);
+  const entries = [];
+  for (const [k, tMass] of [...mass.entries()].sort((a, b) => byteOrder(a[0], b[0]))) {
+    const t = tMass / total, b = (m.baseline.get(k) ?? 0) / m.baselineMass;
+    const lift = t / b;
+    if (!(lift >= o.minLift) || byCard.get(k).size < o.minCards)
+      continue;
+    const score = t * Math.log(lift);
+    const [side, hook] = k.split("|");
+    const top = [...byCard.get(k).entries()].sort((x, y) => y[1] - x[1] || byteOrder(idx.cards[x[0]].name, idx.cards[y[0]].name)).slice(0, o.evidence);
+    const kept = top.reduce((s, [, c]) => s + c, 0);
+    for (const [i, c] of top)
+      entries.push({ hook, side, weight: score * c / kept, card: idx.cards[i].name });
+  }
+  if (!entries.length)
+    throw new ThinThemeError(name, chosen.length, `no hook carried by ${o.minCards}+ of its cards is at least ${o.minLift}x as common there as across all commanders`);
+  return normalizeProfile({ kind: "strategy", theme: name, commanders: chosen.length }, entries, { top: o.top, gaps: false });
+}
+
+// server/plan.ts
+var TOP_TAGS = 25;
+var resolvePlanInput = exports_external.object({
+  commander: exports_external.string().min(1),
+  plan: planShape
+}).strict();
+function unpack(blob) {
+  if (blob.byteLength % 6 !== 0)
+    throw new Error(`Tagger vector of ${blob.byteLength} bytes is not n float32 + n uint16`);
+  const n = blob.byteLength / 6;
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
   const out = [];
-  const cand = new Map(me.nb.map((id, x) => [id, me.ns[x]]));
-  if (o.reverse) {
-    for (const [id, v] of reverseOf(space).get(me.id) ?? [])
-      if (!cand.has(id))
-        cand.set(id, v);
+  for (let i = 0;i < n; i++)
+    out.push([view.getUint16(n * 4 + i * 2, true), view.getFloat32(i * 4, true)]);
+  return out;
+}
+var TAGS = new WeakMap;
+function tagData(store) {
+  const hit = TAGS.get(store);
+  if (hit)
+    return hit;
+  const labels = new Map(store.db.query("SELECT id, label FROM tags").all().map((t) => [t.id, t.label]));
+  const sum = new Map;
+  let n = 0;
+  for (const r of store.db.query("SELECT tagger_deck FROM commanders WHERE decks > 0 ORDER BY card_id").iterate()) {
+    n++;
+    for (const [t, w] of unpack(r.tagger_deck))
+      sum.set(t, (sum.get(t) ?? 0) + w);
   }
-  for (const [id, sim0] of cand) {
-    const c = space.cards.get(id);
-    if (!c?.meta || deck.has(id) || !c.inSpace || !c.legal || c.land)
-      continue;
-    if (o.colorIdentity && !fitsIdentity(c, o.colorIdentity))
-      continue;
-    if (o.sameRegion && (reg < 0 || (c.r[o.method] ?? -1) !== reg))
-      continue;
-    const p = planScore(c, plan, o.weights);
-    if (p.score - mine.score < o.minGain || c.meta.cmc > me.meta.cmc + o.maxCmcUp)
-      continue;
-    const why = [
-      p.tokens > mine.tokens && `${p.tokens} token${p.tokens > 1 ? "s" : ""} per cast vs ${mine.tokens}`,
-      p.tribe > mine.tribe && `is a ${plan.tribe}`,
-      p.payoff > mine.payoff && "plan payoff"
-    ].filter((s) => !!s);
-    const sim = sim0, gain = p.score - mine.score;
-    const rank2 = (gain + o.tieFloor) * sim - o.cmcPenalty * Math.max(0, c.meta.cmc - me.meta.cmc);
-    out.push({ out: me, in: c, sim, gain, rank: rank2, why });
+  const meanDeck = new Map([...sum].map(([t, s]) => [t, s / n]));
+  const out = { labels, meanDeck };
+  TAGS.set(store, out);
+  return out;
+}
+function topTags(store, weights) {
+  const { labels } = tagData(store);
+  const max = Math.max(0, ...weights.values());
+  if (!(max > 0))
+    return [];
+  return [...weights].map(([t, w]) => ({ tag: labels.get(t) ?? String(t), weight: Math.round(w / max * 1000) / 1000 })).filter((t) => t.weight > 0).sort((a, b) => b.weight - a.weight || byteOrder(a.tag, b.tag)).slice(0, TOP_TAGS);
+}
+function themeTags(store, chosen) {
+  const { meanDeck } = tagData(store);
+  const q = store.db.query("SELECT tagger_deck FROM commanders WHERE card_id = ?");
+  const t = new Map;
+  let total = 0;
+  for (const { page, share: share2 } of chosen) {
+    total += share2;
+    const row = q.get(page.cardId);
+    for (const [tag, w] of row ? unpack(row.tagger_deck) : [])
+      t.set(tag, (t.get(tag) ?? 0) + share2 * w);
   }
-  return out.sort((a, b) => b.rank - a.rank || b.sim - a.sim || (a.in.name < b.in.name ? -1 : 1)).slice(0, o.perCard);
+  const scored = new Map;
+  for (const [tag, mass] of t) {
+    const tw = mass / total, b = meanDeck.get(tag) ?? 0;
+    if (!(b > 0))
+      continue;
+    const lift = tw / b;
+    if (lift >= STRATEGY_DEFAULTS.minLift)
+      scored.set(tag, tw * Math.log(lift));
+  }
+  return topTags(store, scored);
+}
+function cardTags(store, ids) {
+  const q = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?");
+  const sum = new Map;
+  ids.forEach((id, k) => {
+    const row = q.get(id);
+    for (const [tag, w] of row ? unpack(row.vector) : [])
+      sum.set(tag, (sum.get(tag) ?? 0) + (k === 0 ? COMMANDER_WEIGHT : 1) * w);
+  });
+  return topTags(store, sum);
+}
+function themeProfile(store, graph, theme) {
+  const hooks = strategyProfile(store.db, graph, theme);
+  return { ...hooks, tags: themeTags(store, themeCommanders(store.db, theme).chosen) };
+}
+function priorityCard(store, name) {
+  const r = resolveCard(store, name);
+  const hit = store.names[r.id - 1].name;
+  if (r.matchedBy !== "exact" && r.matchedBy !== "face") {
+    throw new ToolInputError(`priority card "${name}" is not an exact card name; candidates: ${[hit, ...r.alternatives].join("; ")}`);
+  }
+  return { id: r.id, name: hit };
+}
+function cardsProfile(store, graph, commander, priorities) {
+  for (const c of [commander, ...priorities]) {
+    if (!graph.positionOf.has(c.id))
+      throw new ToolInputError(`${c.name} has no card graph data (its card script could not be read), so it cannot anchor a plan; name another card`);
+  }
+  let hooks;
+  try {
+    hooks = cardProfile(graph.index, { commander: commander.name, priorities: priorities.map((p) => p.name) });
+  } catch (e) {
+    if (e instanceof Error && !(e instanceof ToolInputError))
+      throw new ToolInputError(e.message);
+    throw e;
+  }
+  return { ...hooks, tags: cardTags(store, [commander.id, ...priorities.map((p) => p.id)]) };
+}
+function resolvePlan(store, input2) {
+  const f = resolvePlanInput.parse(input2);
+  const themes = f.plan.themes ?? [], names = f.plan.priorities ?? [], avoid = f.plan.avoid ?? [];
+  if (!themes.length && !names.length)
+    throw new ToolInputError("a plan needs at least one theme or one priority card");
+  const { card } = resolveCommander(store, f.commander);
+  const commander = { id: store.names.findIndex((n) => n.oracleId === card.id) + 1, name: card.name };
+  const graph = graphOf(store.db);
+  const priorities = names.map((n) => priorityCard(store, n));
+  return {
+    commander: { ...commander, colorIdentity: card.ci.join("") },
+    themes: themes.map((t) => themeProfile(store, graph, t)),
+    priorities: priorities.map((p) => p.name),
+    cards: priorities.length ? cardsProfile(store, graph, commander, priorities) : null,
+    avoid: avoid.map((t) => themeProfile(store, graph, t))
+  };
+}
+var MAIN = 0.5;
+function planScorer(store, plan) {
+  const graph = graphOf(store.db);
+  const { labels } = tagData(store);
+  const profiles = [...plan.themes, ...plan.cards ? [plan.cards] : []].map((p) => ({
+    match: profileMatcher(graph.index, p),
+    tags: new Map(p.tags.filter((t) => t.weight > MAIN).map((t) => [t.tag, t.weight]))
+  }));
+  const vector = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?");
+  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  const memo2 = new Map;
+  return (oracleId) => {
+    const hit = memo2.get(oracleId);
+    if (hit)
+      return hit;
+    const id = idOf.get(oracleId);
+    if (id === undefined)
+      throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
+    const i = graph.positionOf.get(id);
+    const row = vector.get(id);
+    const cardTagSet = new Set((row ? unpack(row.vector) : []).map(([t]) => labels.get(t)));
+    let best = { score: 0, hooks: [], tags: [] };
+    for (const p of profiles) {
+      const fit = i === undefined ? { score: 0, counted: [] } : profileFit(p.match(i));
+      const tags = [...p.tags].filter(([t]) => cardTagSet.has(t));
+      const score = Math.round((fit.score + tags.reduce((s, [, w]) => s + w, 0)) * 1000) / 1000;
+      if (score > best.score)
+        best = { score, hooks: [...new Set(fit.counted.map((c) => `${c.side} ${hookWords(c.hook)}`))], tags: tags.map(([t]) => t) };
+    }
+    memo2.set(oracleId, best);
+    return best;
+  };
+}
+var themeName = (p) => p.source.kind === "strategy" ? p.source.theme : p.source.commander;
+function planContext(store, commander, plan) {
+  if (plan === undefined)
+    return null;
+  const resolved = resolvePlan(store, { commander, plan });
+  return {
+    plan: { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) },
+    fit: planScorer(store, resolved)
+  };
 }
 
 // server/paths.ts
@@ -35105,11 +39382,11 @@ function compileRoleMap(map3, tags) {
     throw new Error(`role map does not compile:
   ${problems.join(`
   `)}`);
-  const cardTags = new Map;
+  const cardTags2 = new Map;
   for (const t of tags)
     for (const g of t.taggings)
-      push(cardTags, g.oracle_id, t.id);
-  return { roleNames: map3.roles.map((r) => r.role), gives, label: new Map(tags.map((t) => [t.id, t.label])), cardTags };
+      push(cardTags2, g.oracle_id, t.id);
+  return { roleNames: map3.roles.map((r) => r.role), gives, label: new Map(tags.map((t) => [t.id, t.label])), cardTags: cardTags2 };
 }
 function rolesOf(index, oracleId) {
   const evidence = new Map, strong = new Set;
@@ -35152,7 +39429,6 @@ function roleSheet(index, entries) {
       counts[r.role] += c.qty;
   return { cards, unroled: cards.filter((c) => !c.roles.length).map((c) => c.name), counts, lands, unresolved };
 }
-
 // server/deck-tools.ts
 var ROLE_MAP_PATH = new URL("./roles.json", import.meta.url).pathname;
 function storeTagRecords(db) {
@@ -35200,9 +39476,6 @@ function openStore(path = DB_PATH, roleMapPath = ROLE_MAP_PATH) {
     names: rows.map((r) => ({ id: r.id, oracleId: r.oracle_id, name: r.name, norm: r.norm_name })),
     roles: compileRoleMap(map3, storeTagRecords(db))
   };
-}
-
-class ToolInputError extends Error {
 }
 function editDistance(a, b) {
   let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
@@ -35379,7 +39652,8 @@ var COLORS = ["W", "U", "B", "R", "G"];
 var deckStatsShape = {
   commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored); use the card tool to look a partial name up"),
   deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
-  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile")
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid); with it, planFit says which cards fit it")
 };
 var deckStatsInput = exports_external.object(deckStatsShape).strict();
 var deckPath = (deckFile) => isAbsolute(deckFile) ? deckFile : join2(DECK_ROOT, deckFile);
@@ -35419,7 +39693,7 @@ function unresolvedLines(store, misses) {
     return { line: e.line, text: e.text, closeMatches };
   });
 }
-function deckNumbers(store, commander, deckEntries) {
+function deckNumbers(store, commander, deckEntries, plan = null) {
   const entries = deckEntries.filter((e) => !!e.card);
   const nonland = entries.filter((e) => !e.card.land);
   const copies = (es) => es.reduce((n2, e) => n2 + e.qty, 0);
@@ -35437,9 +39711,8 @@ function deckNumbers(store, commander, deckEntries) {
   }
   const n = copies(nonland);
   const sheet = roleSheet(store.roles, deckEntries);
-  const plan = readPlan(commander);
   const scored = [...new Map(nonland.filter((e) => e.card.id !== commander.id).map((e) => [e.card.id, e.card])).values()];
-  const offPlan = scored.filter((c) => planScore(c, plan).score === 0).map((c) => c.name);
+  const offPlan = plan ? scored.filter((c) => plan.fit(c.id).score === 0).map((c) => c.name) : [];
   const distinct = [...new Map(entries.map((e) => [e.card.id, e.card])).values()];
   const offIdentity = distinct.filter((c) => !fitsIdentity(c, commander.ci)).map((c) => c.name);
   return {
@@ -35452,7 +39725,7 @@ function deckNumbers(store, commander, deckEntries) {
     roleCounts: sheet.counts,
     unroled: sheet.unroled,
     pipLoad,
-    planFit: { plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan },
+    planFit: plan ? { plan: plan.plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan } : null,
     offIdentity
   };
 }
@@ -35461,9 +39734,10 @@ function deckStats(store, input2) {
   const text = readDeck(f);
   const { card: commander, matchedBy } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
+  const plan = planContext(store, commander.name, f.plan);
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join(""), matchedBy },
-    ...deckNumbers(store, commander, deck.entries),
+    ...deckNumbers(store, commander, deck.entries, plan),
     unresolved: unresolvedLines(store, deck.unresolved)
   };
 }
@@ -35546,11 +39820,7 @@ var THEME_LIMIT = 10;
 var TAG_LIMIT = 12;
 var MATCH_THEMES = 5;
 var NAMED = 5;
-var MIN_SHARE = 0.15;
-var MIN_THEME_DECKS = 20;
-var MIN_CARD_DECKS = 3;
-var MIN_LIFT = 1.25;
-var MIN_COMMANDERS = 10;
+var { minShare: MIN_SHARE, minCardDecks: MIN_CARD_DECKS, minLift: MIN_LIFT, minCommanders: MIN_COMMANDERS } = STRATEGY_DEFAULTS;
 var commanderProfileShape = {
   commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
   deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory; with it (or `decklist`) the answer also says how strongly the deck matches each top theme"),
@@ -35572,28 +39842,30 @@ function unpackVector(blob) {
   const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
   return Array.from({ length: n }, (_, i) => ({ weight: view.getFloat32(i * 4, true), tagId: view.getUint16(n * 4 + i * 2, true) }));
 }
-var mined = new WeakMap;
+var mined2 = new WeakMap;
 function minedFor(store) {
-  const hit = mined.get(store.db);
+  const hit = mined2.get(store.db);
   if (hit)
     return hit;
-  const mentions = new Map(store.db.query("SELECT commander_id AS id, SUM(decks) AS n FROM commander_themes GROUP BY commander_id").all().map((r) => [r.id, r.n]));
   const baseline = new Map;
   let baselineMass = 0;
   for (const r of store.db.query("SELECT card_id AS id, SUM(synergy) AS s FROM commander_cards WHERE synergy > 0 AND decks >= ? GROUP BY card_id ORDER BY card_id").all(MIN_CARD_DECKS)) {
     baseline.set(r.id, r.s);
     baselineMass += r.s;
   }
-  const out = { mentions, baseline, baselineMass, profiles: new Map };
-  mined.set(store.db, out);
+  const out = { baseline, baselineMass, profiles: new Map };
+  mined2.set(store.db, out);
   return out;
 }
-function themeProfile(store, themeId) {
+function themeProfile2(store, themeId) {
   const m = minedFor(store);
   const hit = m.profiles.get(themeId);
   if (hit)
     return hit;
-  const chosen = store.db.query("SELECT commander_id AS id, decks FROM commander_themes WHERE theme_id = ? AND decks >= ? ORDER BY commander_id").all(themeId, MIN_THEME_DECKS).map((r) => ({ id: r.id, share: r.decks / m.mentions.get(r.id) })).filter((r) => r.share >= MIN_SHARE);
+  const slug = store.db.query("SELECT slug FROM themes WHERE id = ?").get(themeId)?.slug;
+  if (slug === undefined)
+    throw new Error(`card store is inconsistent: theme id ${themeId} has no row`);
+  const chosen = qualifyingCommanders(store.db, slug).map((q) => ({ id: q.page.cardId, share: q.share })).sort((a, b) => a.id - b.id);
   const weights = new Map;
   if (chosen.length >= MIN_COMMANDERS) {
     const mass = new Map;
@@ -35626,7 +39898,7 @@ function commanderProfile(store, raw) {
   const themed = reason !== "no page" && reason !== "thin";
   const rows = !themed ? [] : store.db.query("SELECT t.id AS themeId, t.name AS theme, t.slug, ct.decks FROM commander_themes ct JOIN themes t ON t.id = ct.theme_id WHERE ct.commander_id = ? ORDER BY ct.decks DESC, t.slug").all(id);
   const mentions = rows.reduce((n, r) => n + r.decks, 0);
-  const share = (n) => mentions ? n / mentions : 0;
+  const share2 = (n) => mentions ? n / mentions : 0;
   const shown = rows.slice(0, f.themeLimit ?? THEME_LIMIT);
   const rest = rows.slice(shown.length);
   const own2 = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(id);
@@ -35638,8 +39910,8 @@ function commanderProfile(store, raw) {
     commander: { name: card.name, colorIdentity: card.ci.join("") },
     decks: page?.decks ?? null,
     themeMentions: mentions,
-    themes: shown.map(({ themeId: _, ...r }) => ({ ...r, share: round(share(r.decks), 6) })),
-    otherThemes: rest.length ? { count: rest.length, decks: rest.reduce((n, r) => n + r.decks, 0), share: round(share(rest.reduce((n, r) => n + r.decks, 0)), 6) } : null,
+    themes: shown.map(({ themeId: _, ...r }) => ({ ...r, share: round(share2(r.decks), 6) })),
+    otherThemes: rest.length ? { count: rest.length, decks: rest.reduce((n, r) => n + r.decks, 0), share: round(share2(rest.reduce((n, r) => n + r.decks, 0)), 6) } : null,
     taggerDeck: { source: deckVector ? "deck" : "card", tags },
     fallback: reason ? { reason, note: NOTES[reason](page?.decks ?? 0) } : null
   };
@@ -35648,8 +39920,8 @@ function commanderProfile(store, raw) {
     const held = new Set(deck.entries.filter((e) => e.card && e.card.id !== card.id).map((e) => store.names.find((n) => n.oracleId === e.card.id).id));
     const storeId = new Map(store.names.map((n) => [n.id, n]));
     const themes = rows.slice(0, f.matchThemes ?? MATCH_THEMES).map((r) => {
-      const prof = themeProfile(store, r.themeId);
-      const base = { theme: r.theme, slug: r.slug, share: round(share(r.decks), 6) };
+      const prof = themeProfile2(store, r.themeId);
+      const base = { theme: r.theme, slug: r.slug, share: round(share2(r.decks), 6) };
       if (prof.commanders < MIN_COMMANDERS) {
         return { ...base, match: null, held: [], missing: [], note: `only ${prof.commanders} ${prof.commanders === 1 ? "commander plays" : "commanders play"} ${r.theme} as at least ${MIN_SHARE * 100}% of their themes, too few commanders to say what the theme looks like` };
       }
@@ -35749,6 +40021,53 @@ if (false) {}
 // server/swap-tools.ts
 import { appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "fs";
 import { dirname as dirname2 } from "path";
+
+// server/deck-swaps.ts
+var SWAP_DEFAULTS = { method: "leidenHi", maxCmcUp: 1, perCard: 3, sameRegion: true, minGain: 0.000000001, tieFloor: 0, cmcPenalty: 0, reverse: true };
+var REV = new WeakMap;
+function reverseOf(space) {
+  let m = REV.get(space);
+  if (m)
+    return m;
+  m = new Map;
+  for (const id of space.order) {
+    const c = space.cards.get(id);
+    c.nb.forEach((v, x) => {
+      const l = m.get(v) ?? [];
+      l.push([id, c.ns[x]]);
+      m.set(v, l);
+    });
+  }
+  REV.set(space, m);
+  return m;
+}
+function swapsFor(space, card, deck, fit, opts = {}) {
+  const o = { ...SWAP_DEFAULTS, ...opts };
+  const me = space.cards.get(card.id), mine = fit(me), reg = me.r[o.method] ?? -1;
+  const out = [];
+  const cand = new Map(me.nb.map((id, x) => [id, me.ns[x]]));
+  if (o.reverse) {
+    for (const [id, v] of reverseOf(space).get(me.id) ?? [])
+      if (!cand.has(id))
+        cand.set(id, v);
+  }
+  for (const [id, sim] of cand) {
+    const c = space.cards.get(id);
+    if (!c?.meta || deck.has(id) || !c.inSpace || !c.legal || c.land)
+      continue;
+    if (o.colorIdentity && !fitsIdentity(c, o.colorIdentity))
+      continue;
+    if (o.sameRegion && (reg < 0 || (c.r[o.method] ?? -1) !== reg))
+      continue;
+    const gain = fit(c) - mine;
+    if (gain < o.minGain || c.meta.cmc > me.meta.cmc + o.maxCmcUp)
+      continue;
+    const rank2 = (gain + o.tieFloor) * sim - o.cmcPenalty * Math.max(0, c.meta.cmc - me.meta.cmc);
+    out.push({ out: me, in: c, sim, gain, rank: rank2 });
+  }
+  return out.sort((a, b) => b.rank - a.rank || b.sim - a.sim || (a.in.name < b.in.name ? -1 : 1)).slice(0, o.perCard);
+}
+// server/swap-tools.ts
 var IN_COLOR_K = 30;
 var IN_COLOR = new WeakMap;
 function inColor(store, mask) {
@@ -35789,11 +40108,11 @@ function storeId(store, oracleId) {
     throw new Error(`card store is inconsistent: oracle id ${oracleId} has no store id`);
   return id;
 }
-var TAGS = new WeakMap;
+var TAGS2 = new WeakMap;
 function directTags(store, oracleId) {
-  let m = TAGS.get(store);
+  let m = TAGS2.get(store);
   if (!m)
-    TAGS.set(store, m = new Map);
+    TAGS2.set(store, m = new Map);
   let tags = m.get(oracleId);
   if (!tags) {
     tags = store.db.query("SELECT t.label FROM card_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.card_id = ? ORDER BY t.label").all(storeId(store, oracleId)).map((r) => r.label);
@@ -35836,8 +40155,8 @@ var swapStats = (n) => ({
   curve: n.curve,
   roleCounts: n.roleCounts,
   pipLoad: n.pipLoad,
-  onPlan: n.planFit.onPlan,
-  planOf: n.planFit.of
+  onPlan: n.planFit?.onPlan ?? null,
+  planOf: n.planFit?.of ?? null
 });
 function changed(a, b) {
   const out = {};
@@ -35850,7 +40169,7 @@ var round3 = (x) => Math.round(x * 1000) / 1000;
 var statsDelta = (a, b) => ({
   cards: b.cards - a.cards,
   averageManaValue: round3(b.averageManaValue - a.averageManaValue),
-  onPlan: b.onPlan - a.onPlan,
+  onPlan: a.onPlan === null || b.onPlan === null ? null : b.onPlan - a.onPlan,
   curve: changed(a.curve, b.curve),
   roleCounts: changed(a.roleCounts, b.roleCounts),
   pipLoad: changed(a.pipLoad, b.pipLoad)
@@ -35878,12 +40197,14 @@ var swapCandidatesShape = {
   commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
   deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory"),
   decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
-  lever: exports_external.enum(LEVERS).describe("plan: in-color Card Space neighbors in the same Region that score higher on the commander's plan, at most 1 mana value more; " + "cheaper: lower mana value; budget: lower Scryfall USD price; " + "roles: per-role counts against targets, and cards that fill roles under target; " + "redundancy: roles over target, and deck cards that could be cut"),
+  lever: exports_external.enum(LEVERS).describe("plan: in-color Card Space neighbors in the same Region that fit the player's plan better (needs `plan`), at most 1 mana value more; " + "cheaper: lower mana value; budget: lower Scryfall USD price; " + "roles: per-role counts against targets, and cards that fill roles under target; " + "redundancy: roles over target, and deck cards that could be cut"),
   card: exports_external.string().min(1).optional().describe("One card in the deck to replace (plan, cheaper and budget levers); omit for the whole deck"),
   limit: exports_external.number().int().min(1).max(50).optional().describe("Most candidates to return (default 5 for one card, 15 for the whole deck)"),
-  targets: exports_external.record(exports_external.string(), exports_external.number().int().min(0)).optional().describe('Role target counts, replacing the defaults for the roles named (e.g. {"ramp": 9}): the roles and redundancy levers ' + "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)")
+  targets: exports_external.record(exports_external.string(), exports_external.number().int().min(0)).optional().describe('Role target counts, replacing the defaults for the roles named (e.g. {"ramp": 9}): the roles and redundancy levers ' + "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid). The plan lever needs it; with it, " + "every lever reports plan fit before and after, and ties among cuts and fills go to the card that fits the plan")
 };
 var swapCandidatesInput = exports_external.object(swapCandidatesShape).strict();
+var fitOf = (ctx, c) => ctx.plan?.fit(c.id).score ?? 0;
 var swapCard = (store, c) => ({ name: c.name, manaValue: c.meta.cmc, usd: c.meta.usd, roles: countedRoles(store, c).map((r) => r.role) });
 var money = (x) => `$${x.toFixed(2)}`;
 var signed = (x, f = String) => x > 0 ? `+${f(x)}` : x < 0 ? `-${f(-x)}` : f(0);
@@ -35900,7 +40221,7 @@ var tagList = (tags) => `${tags.slice(0, 6).join(", ")}${tags.length > 6 ? ` (+$
 function candidate(ctx, out, inCard, why, roleTags = []) {
   if (!out && !inCard)
     throw new Error("candidate: needs an outgoing card, an incoming card, or both");
-  const { store, plan } = ctx;
+  const { store } = ctx;
   const l = out && inCard ? links(ctx, out, inCard) : { neighborRank: null, reverseRank: null, similarity: null };
   const outTags = new Set(out ? directTags(store, out.id) : []);
   const sharedTags = inCard ? directTags(store, inCard.id).filter((t) => outTags.has(t)) : [];
@@ -35909,9 +40230,10 @@ function candidate(ctx, out, inCard, why, roleTags = []) {
   const mvDelta = mv(inCard) - mv(out);
   const inUsd = usd(inCard), outUsd = usd(out);
   const priceDelta = inUsd !== null && outUsd !== null ? round3(inUsd - outUsd) : null;
-  const score = (c) => c ? planScore(c, plan).score : 0;
-  const evidence = { ...l, sharedTags, roleTags, planGain: score(inCard) - score(out), manaValueDelta: mvDelta, priceDelta };
-  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard)));
+  const score = (c) => c ? fitOf(ctx, c) : 0;
+  const planGain = ctx.plan ? Math.round((score(inCard) - score(out)) * 1000) / 1000 : null;
+  const evidence = { ...l, sharedTags, roleTags, planGain, manaValueDelta: mvDelta, priceDelta };
+  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard), ctx.plan));
   const roleDrops = ctx.store.roles.roleNames.filter((r) => after.roleCounts[r] < ctx.before.roleCounts[r]).map((r) => ({ role: r, before: ctx.before.roleCounts[r], after: after.roleCounts[r] }));
   const rolesBelowTarget = roleDrops.filter((d) => d.after < ctx.targets[d.role]).map((d) => ({ role: d.role, after: d.after, target: ctx.targets[d.role] }));
   const dropText = (d) => `${d.role} ${d.before} \u2192 ${d.after}, ` + (d.after < ctx.targets[d.role] ? `under its target ${ctx.targets[d.role]}` : `still at or above its target ${ctx.targets[d.role]}`);
@@ -35984,8 +40306,16 @@ function leverPicks(ctx, out, lever) {
   return [...pool.values()].filter((c) => !c.land && c.inSpace && fitsIdentity(c, ctx.commander.ci) && !ctx.inDeck.has(c.id) && c.id !== ctx.commander.id && passes(c)).map((c) => pick2(ctx, out, c, [], lever === "cheaper" ? out.meta.cmc - c.meta.cmc : out.meta.usd - c.meta.usd)).sort(LEVER_ORDER);
 }
 function planPicks(ctx, out, limit) {
+  const plan = ctx.plan;
+  if (!plan)
+    throw new Error("planPicks: the plan lever runs only with a plan (swapCandidates checks)");
   const deck = new Set([...ctx.inDeck, ctx.commander.id]);
-  return swapsFor(ctx.graph.space, out, deck, ctx.plan, { colorIdentity: ctx.commander.ci, perCard: limit }).map((s) => pick2(ctx, out, ctx.store.space.cards.get(s.in.id), [`plan: ${s.why.join(", ")} (plan score ${signed(s.gain)})`], 0, s.rank));
+  return swapsFor(ctx.graph.space, out, deck, (c) => plan.fit(c.id).score, { colorIdentity: ctx.commander.ci, perCard: limit }).map((s) => pick2(ctx, out, ctx.store.space.cards.get(s.in.id), [planWhy(plan, s.in, out, s.gain)], 0, s.rank));
+}
+function planWhy(plan, inCard, out, gain) {
+  const f = plan.fit(inCard.id);
+  const parts = [f.hooks.length > 0 && `works on ${f.hooks.slice(0, 4).join(", ")}`, f.tags.length > 0 && `plan tags: ${tagList(f.tags)}`].filter(Boolean);
+  return `plan: ${parts.join("; ")} (plan fit ${f.score} vs ${plan.fit(out.id).score}, ${signed(Math.round(gain * 1000) / 1000)})`;
 }
 var picksFor = (ctx, out, lever, limit) => lever === "plan" ? planPicks(ctx, out, limit) : leverPicks(ctx, out, lever).slice(0, limit);
 var PER_CARD_IN_DECK = 3;
@@ -36017,15 +40347,15 @@ function cuts(ctx, status) {
     if (!relieves.length || roles.some((r) => by.get(r.role).count - 1 < by.get(r.role).target))
       continue;
     const tags = [...new Set(roles.filter((r) => relieves.some((s) => s.role === r.role)).flatMap((r) => r.tags))].sort();
-    out.push({ card: c, relieves, tags, planScore: planScore(c, ctx.plan).score });
+    out.push({ card: c, relieves, tags, planScore: fitOf(ctx, c) });
   }
   return out.sort((a, b) => b.relieves.length - a.relieves.length || a.planScore - b.planScore || b.card.meta.cmc - a.card.meta.cmc || byName(a.card.name, b.card.name));
 }
-var cutWhy = (cut) => [
+var cutWhy = (ctx, cut) => [
   ...cut.relieves.map((s) => `${s.role} ${s.count} over target ${s.target}`),
   `gives it through Tagger tags: ${tagList(cut.tags)}`,
   "removing it keeps every role at or above target",
-  cut.planScore === 0 ? "off the commander's plan" : `plan score ${cut.planScore}`
+  ...ctx.plan ? [cut.planScore === 0 ? "off the player's plan" : `plan fit ${cut.planScore}`] : []
 ];
 var PER_ROLE = 3;
 function fills(ctx, status) {
@@ -36048,7 +40378,7 @@ function fills(ctx, status) {
   const gaps = status.filter((s) => s.status === "under").sort((a, b) => b.target - b.count - (a.target - a.count));
   const perRole = gaps.map((s) => pool.flatMap(({ c, roles }) => {
     const hit = roles.find((r) => r.role === s.role);
-    return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: planScore(c, ctx.plan).score }] : [];
+    return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: fitOf(ctx, c) }] : [];
   }).sort((a, b) => b.affinity - a.affinity || (b.nearest?.sim ?? -1) - (a.nearest?.sim ?? -1) || b.planScore - a.planScore || a.card.meta.cmc - b.card.meta.cmc || byName(a.card.name, b.card.name)).slice(0, PER_ROLE * 4));
   const used = new Set, out = [];
   for (let turn = 0;turn < PER_ROLE; turn++)
@@ -36064,7 +40394,7 @@ function fills(ctx, status) {
 function pairCuts(ctx, list, status) {
   const by = new Map(status.map((s) => [s.role, s]));
   const left = new Map(status.map((s) => [s.role, s.count]));
-  const deck = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== ctx.commander.id ? [[e.card.id, e.card]] : [])).values()].map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: planScore(card, ctx.plan).score }));
+  const deck = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== ctx.commander.id ? [[e.card.id, e.card]] : [])).values()].map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: fitOf(ctx, card) }));
   const used = new Set;
   return list.map((f) => {
     const fillRoles = new Set(countedRoles(ctx.store, f.card).map((r) => r.role));
@@ -36099,13 +40429,17 @@ function swapCandidates(store, input3) {
   const { card: commander } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
   const mask = ciMask(commander.ci);
-  const before = swapStats(deckNumbers(store, commander, deck.entries));
+  if (f.lever === "plan" && f.plan === undefined) {
+    throw new ToolInputError("the plan lever scores cards against the player's plan; pass plan (the confirmed themes or priority cards)");
+  }
+  const plan = planContext(store, commander.name, f.plan);
+  const before = swapStats(deckNumbers(store, commander, deck.entries, plan));
   const targets = targetsFor(store, f.targets);
   const ctx = {
     store,
     commander,
     mask,
-    plan: readPlan(commander),
+    plan,
     graph: inColor(store, mask),
     entries: deck.entries,
     inDeck: new Set(deck.entries.flatMap((e) => e.card ? [e.card.id] : [])),
@@ -36140,7 +40474,7 @@ function swapCandidates(store, input3) {
       if (s.status === "over" && !list.some((c) => c.relieves.includes(s))) {
         notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it also gives a role that would fall below target`);
       }
-    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(c), c.tags));
+    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(ctx, c), c.tags));
   }
   if (f.lever === "roles") {
     const list = fills(ctx, roles).slice(0, f.limit ?? 15);
@@ -36156,7 +40490,7 @@ function swapCandidates(store, input3) {
     commander: { name: commander.name, colorIdentity: commander.ci.join("") },
     lever: f.lever,
     card: card?.name ?? null,
-    plan: ctx.plan,
+    plan: plan?.plan ?? null,
     before,
     roles,
     candidates,
@@ -36307,7 +40641,7 @@ function createDeckServer(store) {
   }, async (args) => withStore(store, (s) => cardDetails(s, args)));
   server.registerTool("deck_stats", {
     title: "Deck stats",
-    description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load and plan fit against the commander's own text, plus unresolved lines and off-identity cards. " + "Give the commander and either a decklist file path or the pasted list.",
+    description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load, plus unresolved lines and off-identity cards; with the player's confirmed plan (`plan`: themes, " + "priority cards, themes to avoid), plan fit: which cards fit it and which do not. " + "Give the commander and either a decklist file path or the pasted list.",
     inputSchema: deckStatsShape
   }, async (args) => withStore(store, (s) => deckStats(s, args)));
   server.registerTool("commander_profile", {
@@ -36322,7 +40656,7 @@ function createDeckServer(store) {
   }, async (args) => withStore(store, (s) => neighbors(s, args)));
   server.registerTool("swap_candidates", {
     title: "Swap candidates",
-    description: "Swap candidates for one card in a Commander deck, or for the whole deck, under a lever: plan (better on the " + "commander's plan), cheaper (lower mana value), budget (lower USD price), roles (role counts against targets, and cards " + "that fill roles under target) or redundancy (roles over target, and cuts). Every candidate is a commander-legal card " + "inside the commander's color identity, with its reason, its evidence, the deck numbers after the swap (`before` is " + "given once), `dropsRole` when it leaves a role with fewer cards, and `belowTarget` when that leaves a role under its " + "target. Role targets are a proposal; pass `targets` to change them.",
+    description: "Swap candidates for one card in a Commander deck, or for the whole deck, under a lever: plan (fits the " + "player's confirmed plan better; needs `plan`), cheaper (lower mana value), budget (lower USD price), roles (role counts against targets, and cards " + "that fill roles under target) or redundancy (roles over target, and cuts). Every candidate is a commander-legal card " + "inside the commander's color identity, with its reason, its evidence, the deck numbers after the swap (`before` is " + "given once), `dropsRole` when it leaves a role with fewer cards, and `belowTarget` when that leaves a role under its " + "target. Role targets are a proposal; pass `targets` to change them. A plan that names a theme the data does not know, " + "or one with too little data to profile, comes back as an error saying which.",
     inputSchema: swapCandidatesShape
   }, async (args) => withStore(store, (s) => swapCandidates(s, args)));
   server.registerTool("accept_swap", {
