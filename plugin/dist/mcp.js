@@ -35542,9 +35542,11 @@ function findTags(store, input2) {
 }
 
 // server/store.ts
+import { Database as Database2 } from "bun:sqlite";
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "fs";
 import { dirname } from "path";
+var STORE_SCHEMA = 2;
 var MANIFEST_PATH = process.env.MTG_DECK_STORE_MANIFEST ?? new URL("./store.json", import.meta.url).pathname;
 var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 var stampPath = (dbPath) => `${dbPath}.sha256`;
@@ -35555,6 +35557,19 @@ function readManifest(path = MANIFEST_PATH) {
       throw new Error(`${path}: missing "${k}"`);
   }
   return m;
+}
+function checkStoreSchema(dbPath) {
+  const db = new Database2(dbPath, { readonly: true });
+  let found2;
+  try {
+    const hasMeta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get();
+    found2 = hasMeta ? db.query("SELECT value FROM meta WHERE key = 'schema'").get()?.value ?? null : null;
+  } finally {
+    db.close();
+  }
+  if (found2 !== String(STORE_SCHEMA)) {
+    throw new Error(`card data at ${dbPath} is ${found2 === null ? "a store with no schema" : `store schema ${found2}`}; this server needs schema ${STORE_SCHEMA}` + (IN_PLUGIN ? "" : " (rebuild it with mtg-vector's app/build-db.ts)"));
+  }
 }
 function storeIsCurrent(manifest, dbPath = DB_PATH) {
   return existsSync(dbPath) && existsSync(stampPath(dbPath)) && readFileSync2(stampPath(dbPath), "utf8").trim() === manifest.dbSha256;
@@ -35572,6 +35587,12 @@ async function installStore(manifest, dbPath = DB_PATH, fetchImpl = fetch) {
   mkdirSync(dirname(dbPath), { recursive: true });
   const tmp = `${dbPath}.download`;
   writeFileSync(tmp, db);
+  try {
+    checkStoreSchema(tmp);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
   renameSync(tmp, dbPath);
   writeFileSync(stampPath(dbPath), `${manifest.dbSha256}
 `);
@@ -35580,11 +35601,12 @@ async function ensureStore(dbPath = DB_PATH) {
   if (!IN_PLUGIN || process.env.MTG_DECK_DB) {
     if (!existsSync(dbPath))
       throw new Error(`no card store at ${dbPath}`);
+    checkStoreSchema(dbPath);
     return;
   }
   const manifest = readManifest();
   if (storeIsCurrent(manifest, dbPath))
-    return;
+    return checkStoreSchema(dbPath);
   rmSync(stampPath(dbPath), { force: true });
   await installStore(manifest, dbPath);
 }

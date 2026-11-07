@@ -11,9 +11,9 @@ A Claude Code plugin: the `deck-tune` skill plus the `mtg-deck` MCP server (type
 
 ## Development
 
-- The card store is built in the sibling `mtg-vector` repo (`app/build-db.ts`). In a checkout, `data` is a symlink to `../mtg-vector/data`, gitignored; the tests read the raw Scryfall and Card Space files there as their independent oracle.
+- The card store is built in the sibling `mtg-vector` repo (`app/build-db.ts`). In a checkout, `data` is a symlink to `../mtg-vector/data`, gitignored; the tests read the raw Scryfall, Card Space and EDHREC page files there, and the card graph corpus in `data/graph/`, as their independent oracle. `server/store.ts` lists the store schema (2: card rows plus the card graph per card and each commander's EDHREC Themes, synergy list and Tagger Deck vector); the server refuses a store of another schema.
 - `bun test server` runs every test. The session-check tests also need the recorded sessions in `docs/research/deck-tune/` (local only).
-- A new card-data release: build `cards.db` in mtg-vector, run `bun server/store.ts manifest <cards.db> <release asset url>`, write the output to `server/store.json`, upload the `.gz` it wrote as the Release asset, rebuild, run `bun scripts/plugin-smoke.ts <cards.db.gz>`.
+- A new card-data release: in the card graph repo (`mtg-graph-api`), `bun src/cli.ts extract --oracle <mtg-vector>/data/scryfall/oracle_cards.jsonl.gz --out <mtg-vector>/data/graph/corpus.json --facts <mtg-vector>/data/graph/subtype-facts.json`; build `cards.db` in mtg-vector; run `bun server/store.ts manifest <cards.db> <release asset url>`, write the output to `server/store.json`, upload the `.gz` it wrote as the Release asset, rebuild, run `bun scripts/plugin-smoke.ts <cards.db.gz>`.
 
 ## Rules
 
