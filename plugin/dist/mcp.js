@@ -39397,11 +39397,20 @@ function planScorer(store, plan) {
   const graph = graphOf(store.db);
   const score = profileScorer(store, graph, [...plan.themes, ...plan.cards ? [plan.cards] : []]);
   const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  const priority = new Set(plan.cards ? plan.priorities.map((name) => store.names.find((n) => n.name === name).id) : []);
+  const lifted = new Map;
   return (oracleId) => {
     const id = idOf.get(oracleId);
     if (id === undefined)
       throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
-    return score(id);
+    if (!priority.has(id))
+      return score(id);
+    let hit = lifted.get(id);
+    if (!hit) {
+      const f = score(id);
+      lifted.set(id, hit = { ...f, score: Math.max(f.score, 1), priority: true });
+    }
+    return hit;
   };
 }
 var themeName = (p) => p.source.kind === "strategy" ? p.source.theme : p.source.commander;
@@ -41148,10 +41157,79 @@ function offPlanCards(store, plan, cards, leansOn) {
   }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 }
 
+// server/cost-reduction.ts
+var COLORS2 = new Set(["white", "blue", "black", "red", "green"]);
+var TYPES = new Set(["artifact", "battle", "creature", "enchantment", "instant", "kindred", "land", "planeswalker", "sorcery", "tribal"]);
+var SUPERTYPES2 = new Set(["legendary", "snow", "basic"]);
+var PERMANENT = ["artifact", "battle", "creature", "enchantment", "land", "planeswalker"];
+var FILLER = new Set(["the", "first", "each", "a", "an", "other", "you", "cast"]);
+var CLAUSE = /^(.*?\bspells?\b.*?)\bcosts?\s+(?:\{[^}]*\})+\s+less\b/i;
+function spellDiscounts(text, subtypes) {
+  const out = [];
+  for (const sentence of text.split(/[.\n]/)) {
+    const m = CLAUSE.exec(sentence);
+    if (!m)
+      continue;
+    const subject = m[1].split(/,|\u2014/).pop().trim();
+    const lower = subject.toLowerCase();
+    if (/^(this|those|that|these)\b/.test(lower) || /\bopponents?\b/.test(lower))
+      continue;
+    const pieces = lower.split(/\bspells?\b/);
+    pieces.pop();
+    const alternatives = [];
+    let judged = true;
+    for (const piece of pieces) {
+      const group = piece.replace(/^\s*(and|or|,)\s+/, "").trim();
+      for (const alt of group.split(/\s*(?:,|\band\b|\bor\b)\s*/)) {
+        const words2 = alt.split(/\s+/).filter((w) => w && !FILLER.has(w));
+        if (!words2.length || !words2.every((w) => known2(w, subtypes)))
+          judged = false;
+        else
+          alternatives.push(words2);
+      }
+    }
+    out.push(judged && alternatives.length ? alternatives : null);
+  }
+  return out;
+}
+function known2(word, subtypes) {
+  const w = word.startsWith("non") && word.length > 3 ? word.slice(3).replace(/^-/, "") : word;
+  return COLORS2.has(w) || w === "colorless" || w === "multicolored" || w === "monocolored" || TYPES.has(w) || SUPERTYPES2.has(w) || w === "historic" || w === "permanent" || subtypes.has(w);
+}
+function holds(word, c) {
+  if (word.startsWith("non") && word.length > 3)
+    return !holds(word.slice(3).replace(/^-/, ""), c);
+  if (COLORS2.has(word))
+    return c.colors.has(word);
+  if (word === "colorless")
+    return c.colors.size === 0;
+  if (word === "multicolored")
+    return c.colors.size > 1;
+  if (word === "monocolored")
+    return c.colors.size === 1;
+  if (word === "kindred" || word === "tribal")
+    return c.types.has("kindred") || c.types.has("tribal");
+  if (TYPES.has(word))
+    return c.types.has(word);
+  if (SUPERTYPES2.has(word))
+    return c.supertypes.has(word);
+  if (word === "historic")
+    return c.types.has("artifact") || c.supertypes.has("legendary") || c.subtypes.has("saga");
+  if (word === "permanent")
+    return PERMANENT.some((t) => c.types.has(t));
+  return c.subtypes.has(word);
+}
+function discountUsable(clauses, deck) {
+  if (!clauses.length)
+    return true;
+  return clauses.some((clause) => clause === null || clause.some((words2) => deck.some((c) => words2.every((w) => holds(w, c)))));
+}
+
 // server/shortlist.ts
 var SHORTLIST_LABELS = ["fits this commander", "deeper cut", "widely played", "engine partner"];
 var PER_SOURCE = 10;
 var SHORTLIST_MAX = 30;
+var POPULAR_ONLY = 5;
 var problemShape = exports_external.union([
   exports_external.object({ role: exports_external.string().min(1).describe("A deck role, as diagnose and deck_stats name it (ramp, card draw, card selection, removal, board wipe, counterspell, protection, tutor, recursion, cost reducer): cards that hold it") }).strict(),
   exports_external.object({ engineGap: exports_external.string().min(1).describe("What an engine's payoffs wait on, in the words diagnose gives an engine gap's `mechanic` (e.g. \"a creature dying\"): cards that make it happen for the deck's payoffs") }).strict(),
@@ -41269,8 +41347,14 @@ function shortlist(store, input3) {
   const notes = [];
   const eligible = (c, allowLand) => (allowLand || !c.land) && c.id !== commander.id && !inDeck.has(c.id) && fitsIdentity(c, commander.ci) && (f.maxManaValue === undefined || c.meta.cmc <= f.maxManaValue) && (f.maxPrice === undefined || c.meta.usd !== null && c.meta.usd <= f.maxPrice);
   const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null, inference: null }));
-  let avoided = 0;
+  let avoided = 0, idleDiscounts = 0;
+  const casts = castFacts(store, [commander, ...entries.filter((e) => e.card && !e.card.land).map((e) => e.card)]);
+  const subtypes = new Set(store.vocab.subtypes.keys());
   const keep = (c) => {
+    if (/\bless\b/i.test(c.meta.text) && !discountUsable(spellDiscounts(c.meta.text, subtypes), casts)) {
+      idleDiscounts++;
+      return false;
+    }
     if (!avoid.length || fit(c.id).score > 0 || !avoid.some((a) => a(c.id).score > 0))
       return true;
     avoided++;
@@ -41296,8 +41380,8 @@ function shortlist(store, input3) {
     const hooks = [...payoffs.keys()].sort(byteOrder);
     const hook = hooks.find((h) => hookPhrase(h).toLowerCase() === want);
     if (hook === undefined) {
-      const known2 = hooks.map((h) => ({ words: hookPhrase(h), n: payoffs.get(h).size })).sort((a, b) => b.n - a.n || byteOrder(a.words, b.words));
-      throw new ToolInputError(`no deck card pays off on "${f.problem.engineGap}"; what this deck's payoffs wait on: ${known2.map((k) => `${k.words} (${k.n})`).join("; ") || "nothing"}`);
+      const known3 = hooks.map((h) => ({ words: hookPhrase(h), n: payoffs.get(h).size })).sort((a, b) => b.n - a.n || byteOrder(a.words, b.words));
+      throw new ToolInputError(`no deck card pays off on "${f.problem.engineGap}"; what this deck's payoffs wait on: ${known3.map((k) => `${k.words} (${k.n})`).join("; ") || "nothing"}`);
     }
     const feeders = outsideFeeders(idx, ctx, hook, payoffs.get(hook), (i) => {
       const c = store.space.cards.get(idx.cards[i].oracleId);
@@ -41309,18 +41393,21 @@ function shortlist(store, input3) {
     problem = { kind: "off plan" };
     pool = all().filter((c) => eligible(c, false) && fit(c.id).score > 0 && keep(c)).map(candidate2);
   }
+  if (idleDiscounts)
+    notes.push(`${idleDiscounts} cost reducer${idleDiscounts === 1 ? "" : "s"} left out: ${idleDiscounts === 1 ? "it only discounts" : "they only discount"} spells of a color or type the deck does not cast`);
   if (avoided)
     notes.push(`${avoided} card${avoided === 1 ? "" : "s"} left out: ${avoided === 1 ? "it fits" : "they fit"} a theme the plan avoids and not the plan`);
   const into = linksIntoDeck(store, d);
   const linksOf = (c) => c.pos === undefined ? [] : into(c.pos);
   const onPlanDeck = new Set(d.g.cards.filter((c) => c.name === idx.cards[d.commanderPos].name || fit(c.oracleId).score > 0).map((c) => c.name));
+  const priorityDeck = new Set(resolved.priorities.map((n) => graph.positionOf.get(store.names.find((x) => x.name === n).id)).filter((p) => p !== undefined && ctx.members.has(p)).map((p) => idx.cards[p].name));
   const partners = new Map;
   const partnersOf = (c) => {
     let p = partners.get(c.id);
     if (!p) {
       const name = c.pos === undefined ? "" : idx.cards[c.pos].name;
       const others = new Set(linksOf(c).filter(ctx.counts).map((l) => l.from === name ? l.to : l.from));
-      p = { all: others.size, plan: [...others].filter((n) => onPlanDeck.has(n)).length };
+      p = { all: others.size, plan: [...others].filter((n) => onPlanDeck.has(n)).length, priority: [...others].filter((n) => priorityDeck.has(n)).sort(byteOrder) };
       partners.set(c.id, p);
     }
     return p;
@@ -41335,20 +41422,32 @@ function shortlist(store, input3) {
   const byRank = pool.filter((c) => edhrecRank.has(c.id)).sort((a, b) => edhrecRank.get(a.id) - edhrecRank.get(b.id) || byName2(a, b));
   const again = (c) => c.feeds?.repeatable ? 0 : 1;
   const byEngine = pool.filter((c) => partnersOf(c).all > 0).sort((a, b) => (b.feeds?.feeds.size ?? 0) - (a.feeds?.feeds.size ?? 0) || again(a) - again(b) || partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName2(a, b));
+  const byPriority = priorityDeck.size ? pool.filter((c) => partnersOf(c).priority.length > 0).sort((a, b) => partnersOf(b).priority.length - partnersOf(a).priority.length || partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName2(a, b)) : [];
   const chosen = new Map;
-  for (const list of [bySynergy, byTagger, byRank])
+  for (const list of [bySynergy, byTagger])
     for (const c of list.slice(0, PER_SOURCE))
       chosen.set(c.id, c);
-  let engineTaken = Math.min(PER_SOURCE, byEngine.length);
-  for (let k = 0;k < byEngine.length && chosen.size < SHORTLIST_MAX; k++) {
-    chosen.set(byEngine[k].id, byEngine[k]);
-    engineTaken = Math.max(engineTaken, k + 1);
-  }
+  let popularOnly = 0;
+  for (const c of byRank.slice(0, PER_SOURCE))
+    if (!chosen.has(c.id) && popularOnly < POPULAR_ONLY) {
+      chosen.set(c.id, c);
+      popularOnly++;
+    }
+  const viaEngine = new Set(byEngine.slice(0, PER_SOURCE).map((c) => c.id));
+  for (const list of [byPriority, byEngine])
+    for (const c of list) {
+      if (chosen.size >= SHORTLIST_MAX)
+        break;
+      if (chosen.has(c.id))
+        continue;
+      chosen.set(c.id, c);
+      viaEngine.add(c.id);
+    }
   const taken = {
     "fits this commander": new Set(bySynergy.slice(0, PER_SOURCE).map((c) => c.id)),
     "deeper cut": new Set(byTagger.slice(0, PER_SOURCE).map((c) => c.id)),
     "widely played": new Set(byRank.slice(0, PER_SOURCE).map((c) => c.id)),
-    "engine partner": new Set(byEngine.slice(0, engineTaken).map((c) => c.id))
+    "engine partner": viaEngine
   };
   if (bySynergy.length < PER_SOURCE && synergy.size)
     notes.push(`the commander's page lists ${bySynergy.length} card${bySynergy.length === 1 ? "" : "s"} for this problem`);
@@ -41383,6 +41482,7 @@ function shortlist(store, input3) {
         edhrecRank: edhrecRank.get(c.id) ?? null,
         partners: p.all,
         planPartners: p.plan,
+        priorityLinks: p.priority,
         planFit: c.fit,
         ...c.feeds ? { feeds: [...c.feeds.feeds].sort(byteOrder) } : {}
       },
@@ -41408,6 +41508,16 @@ function shortlist(store, input3) {
     notes,
     unresolved: unresolvedLines(store, deck.unresolved)
   };
+}
+function castFacts(store, cards) {
+  const q = store.db.query("SELECT c.types, c.subtypes, c.supertypes, c.mana_cost, s.colors FROM cards c LEFT JOIN card_scryfall s ON s.card_id = c.id WHERE c.oracle_id = ?");
+  const words2 = (x) => new Set(x.toLowerCase().split(/\s+/).filter(Boolean));
+  const COLOR2 = { W: "white", U: "blue", B: "black", R: "red", G: "green" };
+  return [...new Map(cards.map((c) => [c.id, c])).values()].map((c) => {
+    const r = q.get(c.id);
+    const letters = r.colors !== null ? JSON.parse(r.colors) : [...new Set(r.mana_cost.match(/[WUBRG]/g) ?? [])];
+    return { types: words2(r.types), subtypes: words2(r.subtypes), supertypes: words2(r.supertypes), colors: new Set(letters.map((l) => COLOR2[l])) };
+  });
 }
 function outCard(store, name, entries) {
   const r = resolveCard(store, name);
@@ -41542,7 +41652,7 @@ function createDeckServer(store) {
   }, async (args) => withStore(store, (s) => diagnose2(s, args)));
   server.registerTool("shortlist", {
     title: "Shortlist for one problem",
-    description: "About 30 cards to add for one diagnosed problem, under the player's confirmed plan (`plan`, required). `problem` is " + "one of: {role} (cards holding a deck role), {engineGap} (cards that make an event happen for the deck's payoffs, in the words " + `diagnose gives an engine gap's mechanic, e.g. "a creature dying"), or {offPlan: true} (cards that fit the plan, to replace ` + "cards off it or doing the least). Every card is commander-legal, inside the commander's color identity and outside the deck, " + "and at or under `maxManaValue` and `maxPrice` when given. Each card is labeled by where it came from, with the evidence: " + "fits this commander (the commander's EDHREC synergy), deeper cut (fit to the tags of the commander's decks), widely played " + "(global EDHREC rank; at most 10 cards come in on popularity alone), engine partner (card graph links into the deck's cards " + "that fit the plan). Each also carries its links into the deck by event, its plan fit, and what adding it changes in the deck's " + "numbers; with `out` (a card in the deck), what swapping it in for that card changes, with the numbers after (`before` is " + "given once). The list narrows the pool; it does not judge card quality. Same deck, plan and problem, same answer.",
+    description: "About 30 cards to add for one diagnosed problem, under the player's confirmed plan (`plan`, required). `problem` is " + "one of: {role} (cards holding a deck role), {engineGap} (cards that make an event happen for the deck's payoffs, in the words " + `diagnose gives an engine gap's mechanic, e.g. "a creature dying"), or {offPlan: true} (cards that fit the plan, to replace ` + "cards off it or doing the least). Every card is commander-legal, inside the commander's color identity and outside the deck, " + "and at or under `maxManaValue` and `maxPrice` when given. Each card is labeled by where it came from, with the evidence: " + "fits this commander (the commander's EDHREC synergy), deeper cut (fit to the tags of the commander's decks), widely played " + "(global EDHREC rank; at most 5 cards come in on popularity alone), engine partner (card graph links into the deck: first to the " + "plan's priority cards, then to its cards that fit the plan). Cost reducers that discount only spells the deck does not cast are " + "left out. Each also carries its links into the deck by event, the priority cards it links to, its plan fit, and what adding it changes in the deck's " + "numbers; with `out` (a card in the deck), what swapping it in for that card changes, with the numbers after (`before` is " + "given once). The list narrows the pool; it does not judge card quality. Same deck, plan and problem, same answer.",
     inputSchema: shortlistShape
   }, async (args) => withStore(store, (s) => shortlist(s, args)));
   server.registerTool("neighbors", {
