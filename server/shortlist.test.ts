@@ -133,8 +133,7 @@ describe("ceilings (ISC-64)", () => {
 // ---------- leave-one-out (ISC-65) ----------
 // Each nonland, non-commander card of the list is taken out in turn, and for each role it holds the shortlist for that
 // role is asked of the list without it, under the deck's own plan; a held-out role slot counts when the card comes back.
-// A card holding two roles is two slots. The counts are reported with every shortlist change; the guard is within 4 of the graph
-// prototype's union on the same decks (30 of 57, 24 of 39): two decks guard against a collapse, never veto the plan (ISA ISC-65).
+// A card holding two roles is two slots. The floors are the graph prototype's union on the same decks (ISA ISC-65).
 function leaveOneOut(file: string, commander: string, plan: { themes: string[] }): { slots: number; found: number; missed: string[] } {
   const lines = fixture(file).split("\n");
   const entries = lines.map((l, k) => ({ k, name: l.trim().match(/^\d+\s+(.+)$/)?.[1] })).filter((e): e is { k: number; name: string } => !!e.name);
@@ -155,14 +154,14 @@ function leaveOneOut(file: string, commander: string, plan: { themes: string[] }
 }
 
 describe("recall on real decks (ISC-65)", () => {
-  test("ISC-65: on the Namor and Teysa leave-one-outs the shortlist reports its held-out role slots, at least 26 of 57 and 20 of 39", () => {
+  test("ISC-65: on the Namor and Teysa leave-one-outs the shortlist holds at least 30 of 57 and 24 of 39 held-out role slots", () => {
     const namor = leaveOneOut("namor.txt", "Namor the Sub-Mariner", SPELLSLINGER);
     const teysa = leaveOneOut("teysa.txt", "Teysa Karlov", ARISTOCRATS);
     console.log(`ISC-65: Namor ${namor.found} of ${namor.slots}, Teysa ${teysa.found} of ${teysa.slots}`);
     expect(namor.slots).toBe(57);
     expect(teysa.slots).toBe(39);
-    expect(namor.found).toBeGreaterThanOrEqual(26);
-    expect(teysa.found).toBeGreaterThanOrEqual(20);
+    expect(namor.found).toBeGreaterThanOrEqual(30);
+    expect(teysa.found).toBeGreaterThanOrEqual(24);
   }, 300_000);
 });
 
