@@ -34970,6 +34970,500 @@ var planShape = exports_external.object({
   priorities: exports_external.array(exports_external.string().min(1)).max(MAX_PRIORITIES).optional().describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}. With no theme, the plan is read under the usable theme these cards fit best, and the result names it`),
   avoid: exports_external.array(exports_external.string().min(1)).max(MAX_AVOID).optional().describe(`EDHREC themes the player does not want (e.g. ["Tokens"] for a deck that should not go wide), at most ${MAX_AVOID}`)
 }).strict().describe("The player's confirmed plan: at least one theme or one priority card");
+// server/graph/mapping/supply.yaml
+var supply_default = {
+  version: "1.0",
+  description: `What feeds a cost that spends something. A card that "consumes Sacrifice" needs a permanent on the battlefield, so anything that puts one there (ETB) feeds it. Used by src/interact.ts. ManaPaid is left out on purpose (ISA Decisions 2026-11-06): ramp is a role the Galaxy fills, and linking every mana source to every mana cost would drown the real interactions.
+`,
+  supply: [
+    {
+      consumes: "Sacrifice",
+      fed_by: [
+        "ETB"
+      ],
+      note: "Sacrifice outlets eat permanents: tokens, reanimation, anything entering."
+    },
+    {
+      consumes: "Exile",
+      fed_by: [
+        "ETB"
+      ],
+      note: "An exile-a-permanent cost, same source as sacrifice."
+    },
+    {
+      consumes: "Bounce",
+      fed_by: [
+        "ETB"
+      ],
+      note: "A return-a-permanent-to-hand cost."
+    },
+    {
+      consumes: "Tap",
+      fed_by: [
+        "Untap"
+      ],
+      note: "A {T} cost is paid again when the permanent untaps."
+    },
+    {
+      consumes: "Untap",
+      fed_by: [
+        "Tap"
+      ]
+    },
+    {
+      consumes: "Discard",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ],
+      note: "Discard costs spend cards in hand."
+    },
+    {
+      consumes: "ExileFromHand",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ]
+    },
+    {
+      consumes: "HandToLibrary",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ]
+    },
+    {
+      consumes: "ExileFromGraveyard",
+      fed_by: [
+        "PutIntoGraveyard",
+        "Mill",
+        "Discard"
+      ],
+      note: "Delve-style and escape-style costs spend graveyard cards."
+    },
+    {
+      consumes: "CollectEvidence",
+      fed_by: [
+        "PutIntoGraveyard",
+        "Mill",
+        "Discard"
+      ]
+    },
+    {
+      consumes: "LifeLoss",
+      fed_by: [
+        "LifeGain"
+      ],
+      note: "Paying life is spent from the life total."
+    },
+    {
+      consumes: "CounterRemoved",
+      fed_by: [
+        "CounterPlaced"
+      ],
+      note: "CounterRemoved:P1P1 is fed by CounterPlaced:P1P1; the subtype carries over (src/interact.ts)."
+    }
+  ]
+};
+
+// server/graph/interact.ts
+function loadSupply() {
+  const y = supply_default;
+  if (!Array.isArray(y?.supply))
+    throw new Error("supply.yaml: missing supply list");
+  return new Map(y.supply.map((s) => [s.consumes, s.fed_by]));
+}
+var PERMANENT_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Land", "Planeswalker"];
+var CARD_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Instant", "Kindred", "Land", "Planeswalker", "Sorcery"];
+var SUPERTYPES = ["Basic", "Legendary", "Snow"];
+var ALL_FACES_CAST = new Set(["split", "adventure", "modal_dfc", "omen"]);
+function costColors(cost) {
+  const out = new Set;
+  for (const m of (cost ?? "").matchAll(/\{([^}]+)\}/g))
+    for (const ch of m[1].split("/"))
+      if (/^[WUBRG]$/.test(ch))
+        out.add(ch);
+  return ["W", "U", "B", "R", "G"].filter((x) => out.has(x));
+}
+function costValue(cost) {
+  let v = 0;
+  for (const m of (cost ?? "").matchAll(/\{([^}]+)\}/g)) {
+    const sym = m[1];
+    if (/^\d+$/.test(sym))
+      v += Number(sym);
+    else if (/^[XYZ]$/.test(sym))
+      continue;
+    else if (/^H/.test(sym))
+      v += 0.5;
+    else if (/^\d+\//.test(sym))
+      v += Number(sym.split("/")[0]);
+    else
+      v += 1;
+  }
+  return v;
+}
+function faceOf(typeLine, colors, cost, anySubtype, manaValue) {
+  const [front, sub = ""] = typeLine.split("\u2014");
+  return { types: CARD_TYPES.filter((t) => front.includes(t)), supertypes: SUPERTYPES.filter((t) => front.includes(t)), subtypes: sub.trim().split(/\s+/).filter(Boolean), colors, costColors: costColors(cost), anySubtype, manaValue };
+}
+function cardInfo(g, c) {
+  const anySubtype = c.keywords.includes("Changeling");
+  const sides = c.faces?.length ? c.faces : [{ type_line: c.typeLine, colors: c.colors ?? undefined, mana_cost: c.manaCost }];
+  const ownCost = ALL_FACES_CAST.has(c.layout) && !!c.faces?.length;
+  const faces = sides.map((f) => faceOf(f.type_line ?? "", f.colors ?? (c.faces?.length ? costColors(f.mana_cost) : c.colors ?? []), f.mana_cost, anySubtype, ownCost ? costValue(f.mana_cost) : c.manaValue));
+  const front = faces[0];
+  return {
+    id: c.id,
+    name: g.name,
+    oracleId: g.oracleId,
+    types: front.types,
+    subtypes: front.subtypes,
+    supertypes: front.supertypes ?? [],
+    colors: front.colors ?? [],
+    costColors: front.costColors ?? [],
+    manaValue: front.manaValue ?? c.manaValue,
+    anySubtype,
+    faces: ALL_FACES_CAST.has(c.layout) ? faces : [front],
+    colorIdentity: c.colorIdentity,
+    edhrecRank: c.edhrecRank,
+    graph: g
+  };
+}
+var GENERIC = new Set(["Card", "Permanent", "Spell"]);
+var NO_FACTS = { creatureOnly: new Set, landOnly: new Set, known: new Set };
+var COLOR = { White: "W", Blue: "U", Black: "B", Red: "R", Green: "G" };
+function colorTests(props) {
+  const out = [];
+  for (const p of props) {
+    const m = /^(non)?(ManaCostPartial)?(White|Blue|Black|Red|Green|Colorless|MonoColor|Multicolor)$/.exec(p);
+    if (!m)
+      continue;
+    const pick2 = (me) => (m[2] ? me.costColors : me.colors) ?? [];
+    const base = m[3] === "Colorless" ? (me) => pick2(me).length === 0 : m[3] === "MonoColor" ? (me) => pick2(me).length === 1 : m[3] === "Multicolor" ? (me) => pick2(me).length > 1 : (me) => pick2(me).includes(COLOR[m[3]]);
+    out.push(m[1] ? (me) => !base(me) : base);
+  }
+  return out;
+}
+var BROAD = 1 / 3;
+var MANA_VALUE_PROP = /^cmc(GE|GT|LE|LT|EQ)(\d+)$/;
+function boundsManaValue(sel) {
+  return sel.any.some((a) => a.props.some((p) => MANA_VALUE_PROP.test(p)));
+}
+function manaValueTests(props) {
+  const out = [];
+  for (const p of props) {
+    const m = MANA_VALUE_PROP.exec(p);
+    if (!m)
+      continue;
+    const n = Number(m[2]);
+    const holds = { GE: (v) => v >= n, GT: (v) => v > n, LE: (v) => v <= n, LT: (v) => v < n, EQ: (v) => v === n }[m[1]];
+    out.push((me) => me.manaValue === undefined || holds(me.manaValue));
+  }
+  return out;
+}
+var CHANGES_HANDS = new Set(["GainControl", "ExchangeControl"]);
+function resolve(a, me, facts, hook) {
+  let types = a.types.filter((x) => !GENERIC.has(x) && !SUPERTYPES.includes(x));
+  const supertypes = a.types.filter((x) => SUPERTYPES.includes(x));
+  const nonSupertypes = a.props.flatMap((p) => {
+    const m = /^non([A-Z][a-z]+)$/.exec(p);
+    return m && SUPERTYPES.includes(m[1]) ? [m[1]] : [];
+  });
+  let subtypes = facts.known.size ? a.subtypes.filter((x) => facts.known.has(x)) : a.subtypes;
+  let token = a.token;
+  if (!types.length && supertypes.includes("Basic"))
+    types = ["Land"];
+  if (a.self) {
+    types = [...new Set([...types, ...me.types])];
+    subtypes = [...new Set([...subtypes, ...me.subtypes])];
+    token = false;
+  } else if (!types.length && subtypes.some((x) => facts.creatureOnly.has(x)))
+    types = ["Creature"];
+  else if (!types.length && subtypes.length && subtypes.every((x) => facts.landOnly.has(x)))
+    types = ["Land"];
+  const excluded = a.props.flatMap((p) => {
+    const m = /^non([A-Z][a-z]+)$/.exec(p);
+    return m && CARD_TYPES.includes(m[1]) ? [m[1]] : [];
+  });
+  const controller = a.controller === "any" && (a.props.includes("EquippedBy") || a.self && !CHANGES_HANDS.has(hook ?? "")) ? "you" : a.controller;
+  return { types, subtypes, supertypes, nonSupertypes, ...a.self && me.anySubtype ? { anySubtype: true } : {}, excluded, ...a.self ? { me } : {}, color: colorTests(a.props), manaValue: manaValueTests(a.props), controller, token, self: a.self, player: a.player };
+}
+function playerSide(p) {
+  if (p === "You")
+    return "you";
+  if (p === "Opponent")
+    return "opponent";
+  return "any";
+}
+function overlap(a, b) {
+  if (a.self && b.self)
+    return false;
+  if (a.controller !== "any" && b.controller !== "any" && a.controller !== b.controller)
+    return false;
+  if (a.token !== null && b.token !== null && a.token !== b.token)
+    return false;
+  const aPlayer = a.player !== undefined, bPlayer = b.player !== undefined;
+  if (aPlayer && bPlayer) {
+    const x = playerSide(a.player), y = playerSide(b.player);
+    return x === "any" || y === "any" || x === y;
+  }
+  if (aPlayer && b.types.length || bPlayer && a.types.length)
+    return false;
+  if (a.types.length && b.types.length && !a.types.some((t) => b.types.includes(t)))
+    return false;
+  const excludes = (x, y) => y.excluded.length > 0 && x.types.length > 0 && (x.self ? x.types.some((t) => y.excluded.includes(t)) : x.types.every((t) => y.excluded.includes(t)));
+  if (excludes(a, b) || excludes(b, a))
+    return false;
+  if (a.subtypes.length && b.subtypes.length && !a.anySubtype && !b.anySubtype && !a.subtypes.some((x) => b.subtypes.includes(x)))
+    return false;
+  const superOk = (me, y) => y.supertypes.every((t) => me.supertypes?.includes(t)) && !y.nonSupertypes.some((t) => me.supertypes?.includes(t));
+  if (a.supertypes.some((t) => b.nonSupertypes.includes(t)) || b.supertypes.some((t) => a.nonSupertypes.includes(t)))
+    return false;
+  if (a.me && !superOk(a.me, b))
+    return false;
+  if (b.me && !superOk(b.me, a))
+    return false;
+  if (a.me && !b.color.every((t) => t(a.me)))
+    return false;
+  if (b.me && !a.color.every((t) => t(b.me)))
+    return false;
+  if (a.me && !b.manaValue.every((t) => t(a.me)))
+    return false;
+  if (b.me && !a.manaValue.every((t) => t(b.me)))
+    return false;
+  return true;
+}
+function selectorsOverlap(a, aMe, b, bMe, facts = NO_FACTS, hook) {
+  if (!a.any.length || !b.any.length)
+    return true;
+  return a.any.some((x) => b.any.some((y) => overlap(resolve(x, aMe, facts, hook), resolve(y, bMe, facts, hook))));
+}
+function closureTypes(sel, me, facts) {
+  const out = new Set;
+  for (const a of sel.any) {
+    if (a.player)
+      continue;
+    const r = resolve(a, me, facts);
+    if (!r.types.length && !r.subtypes.length && !r.excluded.includes("Creature"))
+      out.add("creature");
+    for (const x of r.types)
+      out.add(x.toLowerCase());
+  }
+  return [...out];
+}
+
+class InteractionIndex {
+  cards;
+  emits = new Map;
+  listens = new Map;
+  emitsByCard = [];
+  listensByCard = [];
+  byName = new Map;
+  byLower = new Map;
+  hookCards = new Map;
+  facts;
+  constructor(cards, closure, supply, facts = NO_FACTS) {
+    this.cards = cards;
+    this.facts = facts;
+    cards.forEach((c, i) => {
+      this.byName.set(c.name, i);
+      for (const face of c.name.split(" // "))
+        if (!this.byName.has(face))
+          this.byName.set(face, i);
+      for (const n of [c.name, ...c.name.split(" // ")])
+        if (!this.byLower.has(n.toLowerCase()))
+          this.byLower.set(n.toLowerCase(), i);
+      const emits = [], listens = [];
+      const seen = new Set;
+      for (const [ability, ab] of c.graph.abilities.entries())
+        for (const [relation, r] of ab.relations.entries()) {
+          if (r.relation === "produces" || r.relation === "consumes") {
+            const by = r.relation === "produces" ? "effect" : "cost";
+            for (const hook of closure.expand(r.hook, closureTypes(r.selector, c, facts)))
+              emits.push({ card: i, hook, emitted: r.hook, by, sel: r.selector, ability, relation });
+          }
+          if (r.relation === "triggers_on" || r.relation === "replaces")
+            listens.push({ card: i, hook: r.hook, listener: r.relation, sel: r.selector, ability, relation });
+          if (r.relation === "consumes") {
+            const [base, sub] = r.hook.split(":");
+            for (const fed of supply.get(base) ?? []) {
+              if (sub && fed === "CounterPlaced") {
+                listens.push({ card: i, hook: `${fed}:${sub}`, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
+                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, onlyEmitted: fed, ability, relation });
+              } else
+                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
+            }
+          }
+        }
+      const self = { any: [{ types: [], subtypes: [], controller: "you", token: false, self: true, other: false, props: [] }], raw: "intrinsic" };
+      for (const f of c.faces) {
+        if (!f.types.length)
+          continue;
+        if (!f.types.includes("Land"))
+          emits.push({ card: i, hook: "SpellCast", emitted: "SpellCast", by: "card", sel: self, me: f });
+        if (f.types.some((t) => PERMANENT_TYPES.includes(t)))
+          emits.push({ card: i, hook: "ETB", emitted: "ETB", by: "card", sel: self, me: f });
+      }
+      for (const e of emits) {
+        (this.emits.get(e.hook) ?? this.emits.set(e.hook, []).get(e.hook)).push(e);
+        seen.add(e.hook);
+      }
+      for (const l of listens) {
+        (this.listens.get(l.hook) ?? this.listens.set(l.hook, []).get(l.hook)).push(l);
+        seen.add(l.hook);
+      }
+      for (const h of seen)
+        this.hookCards.set(h, (this.hookCards.get(h) ?? 0) + 1);
+      this.emitsByCard.push(emits);
+      this.listensByCard.push(listens);
+    });
+  }
+  emitsOf(i) {
+    return this.emitsByCard[i];
+  }
+  listensOf(i) {
+    return this.listensByCard[i];
+  }
+  selectorsMeet(a, aMe, b, bMe, hook) {
+    return selectorsOverlap(a, aMe, b, bMe, this.facts, hook);
+  }
+  indexOf(name) {
+    const i = this.byName.get(name) ?? this.byLower.get(name.toLowerCase());
+    if (i === undefined)
+      throw new Error(`no card named ${name} in the graph`);
+    return i;
+  }
+  link(e, l) {
+    if (e.card === l.card)
+      return null;
+    if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
+      return null;
+    const a = this.cards[e.card], b = this.cards[l.card];
+    if (!selectorsOverlap(e.sel, e.me ?? a, l.sel, b, this.facts, e.hook))
+      return null;
+    return { from: a.name, to: b.name, hook: e.hook, emittedBy: e.by, emitted: e.emitted, listener: l.listener, ...l.consumed ? { consumed: l.consumed } : {} };
+  }
+  linksFrom(i) {
+    const out = [];
+    for (const e of this.emitsByCard[i])
+      for (const l of this.listens.get(e.hook) ?? []) {
+        const k = this.link(e, l);
+        if (k)
+          out.push(k);
+      }
+    return dedupe(out);
+  }
+  linksTo(i) {
+    const out = [];
+    for (const l of this.listensByCard[i])
+      for (const e of this.emits.get(l.hook) ?? []) {
+        const k = this.link(e, l);
+        if (k)
+          out.push(k);
+      }
+    return dedupe(out);
+  }
+  feedersMemo = new Map;
+  feedersOf(l) {
+    const shared = !l.sel.any.some((a) => a.self);
+    const key = `${l.hook}|${l.consumed ?? ""}|${l.onlyEmitted ?? ""}|${l.sel.raw}`;
+    const hit = shared ? this.feedersMemo.get(key) : undefined;
+    if (hit)
+      return hit;
+    const from = new Set;
+    const b = this.cards[l.card];
+    for (const e of this.emits.get(l.hook) ?? []) {
+      if (e.by !== "card" || from.has(e.card))
+        continue;
+      if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
+        continue;
+      if (selectorsOverlap(e.sel, e.me ?? this.cards[e.card], l.sel, b, this.facts, e.hook))
+        from.add(e.card);
+    }
+    const sorted = Int32Array.from(from).sort();
+    if (shared)
+      this.feedersMemo.set(key, sorted);
+    return sorted;
+  }
+  castFeeders(l) {
+    const s = new Set(this.feedersOf(l));
+    s.delete(l.card);
+    return s;
+  }
+  castFeederCount(l) {
+    const f = this.feedersOf(l);
+    let lo = 0, hi = f.length;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (f[mid] < l.card)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+    return f.length - (lo < f.length && f[lo] === l.card ? 1 : 0);
+  }
+  linksWith(i, members2) {
+    const out = [];
+    for (const e of this.emitsByCard[i])
+      for (const l of this.listens.get(e.hook) ?? [])
+        if (members2.has(l.card)) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+    for (const l of this.listensByCard[i])
+      for (const e of this.emits.get(l.hook) ?? [])
+        if (members2.has(e.card)) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+    return dedupe(out);
+  }
+  linkerFor(members2) {
+    const emits = new Map, listens = new Map;
+    for (const [hook, es] of this.emits) {
+      const m = es.filter((e) => members2.has(e.card));
+      if (m.length)
+        emits.set(hook, m);
+    }
+    for (const [hook, ls] of this.listens) {
+      const m = ls.filter((l) => members2.has(l.card));
+      if (m.length)
+        listens.set(hook, m);
+    }
+    return (i) => {
+      const out = [];
+      for (const e of this.emitsByCard[i])
+        for (const l of listens.get(e.hook) ?? []) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+      for (const l of this.listensByCard[i])
+        for (const e of emits.get(l.hook) ?? []) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+      return dedupe(out);
+    };
+  }
+  linksBetween(a, b) {
+    const name = this.cards[this.indexOf(b)].name;
+    return this.linksFrom(this.indexOf(a)).filter((l) => l.to === name);
+  }
+}
+function dedupe(links) {
+  const seen = new Set;
+  return links.filter((l) => {
+    const k = `${l.from}|${l.to}|${l.hook}|${l.emittedBy}|${l.emitted}|${l.listener}|${l.consumed ?? ""}`;
+    if (seen.has(k))
+      return false;
+    seen.add(k);
+    return true;
+  });
+}
 
 // server/graph/profile.ts
 var byteOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -35040,6 +35534,12 @@ function touches(idx, i) {
   }
   return out;
 }
+function sizedPayoff(idx, l) {
+  return boundsManaValue(l.sel) && idx.castFeederCount(l) / idx.cards.length < BROAD;
+}
+function ownTouches(idx, i) {
+  return idx.emitsOf(i).filter((e) => e.by === "card").map((e) => ({ card: i, hook: e.hook, side: "makes", sel: e.sel, me: e.me ?? idx.cards[i], source: `own.${e.hook}`, emit: e }));
+}
 function tokenness(sel) {
   if (!sel.any.length)
     return null;
@@ -35066,12 +35566,23 @@ function cardProfile(idx, plan) {
   for (const p of planIdx)
     for (const t of touches(idx, p))
       (byHook.get(t.hook) ?? byHook.set(t.hook, []).get(t.hook)).push(t);
+  const sized = [...byHook.values()].flat().filter((t) => t.side === "spends").flatMap((s) => s.listens.filter((l) => sizedPayoff(idx, l)).map((l) => ({ s, l })));
+  for (const p of planIdx) {
+    const seen = new Set;
+    for (const m of ownTouches(idx, p)) {
+      if (seen.has(m.hook) || !sized.some(({ s, l }) => s.card !== p && l.hook === m.hook && feeds(idx, m, s, l)))
+        continue;
+      seen.add(m.hook);
+      (byHook.get(m.hook) ?? byHook.set(m.hook, []).get(m.hook)).push(m);
+    }
+  }
   const planMakes = [...byHook.values()].flat().filter((t) => t.side === "makes");
   const entries = [];
   for (const [hook, ts] of byHook) {
     const makers = ts.filter((t) => t.side === "makes"), spenders = ts.filter((t) => t.side === "spends");
     const engine = spenders.some((s) => s.listens.some((l) => planMakes.some((m) => m.card !== s.card && m.hook === l.hook && feeds(idx, m, s, l))));
-    const deciding = (makers.length ? makers : spenders).map((t) => tokenness(t.sel));
+    const deciders = makers.filter((t) => !t.source.startsWith("own."));
+    const deciding = (deciders.length ? deciders : makers.length && !spenders.length ? makers : spenders).map((t) => tokenness(t.sel));
     const token = deciding.every((x) => x === true) ? true : deciding.every((x) => x === false) ? false : null;
     const key = profileHookKey(hook, token);
     for (const card of new Set(ts.map((t) => t.card))) {
@@ -35097,6 +35608,7 @@ function profileMatcher(idx, profile) {
   const main = profile.hooks.filter(isMainHook).map((h) => {
     const { hook, token } = parseProfileHook(h.hook);
     const evidence = { makes: [], spends: [] };
+    const cards = [];
     for (const name of h.evidence) {
       let j;
       try {
@@ -35104,17 +35616,24 @@ function profileMatcher(idx, profile) {
       } catch {
         continue;
       }
+      cards.push(j);
       for (const t of touches(idx, j))
         if (t.hook === hook)
-          evidence[t.side].push({ sel: t.sel, me: t.me });
+          evidence[t.side].push({ sel: t.sel, me: t.me, card: j, sized: t.side === "spends" && t.listens.some((l) => sizedPayoff(idx, l)) });
     }
+    const sizedEvidence = evidence.spends.filter((e) => e.sized);
+    for (const j of cards)
+      for (const m of ownTouches(idx, j)) {
+        if (m.hook === hook && sizedEvidence.some((e) => e.card !== j && idx.selectorsMeet(m.sel, m.me, e.sel, e.me, hook)))
+          evidence.makes.push({ sel: m.sel, me: m.me, card: j, sized: false });
+      }
     const definer = evidence.makes.length ? "makes" : "spends";
     for (const side of ["makes", "spends"]) {
       if (side !== definer)
         continue;
       evidence[side] = evidence[side].flatMap((e) => {
         const sel = onSide(e.sel, token);
-        return sel ? [{ sel, me: e.me }] : [];
+        return sel ? [{ ...e, sel }] : [];
       });
     }
     const against = (side) => {
@@ -35140,6 +35659,20 @@ function profileMatcher(idx, profile) {
         const own2 = qualified ? h.key : profileHookKey(h.hook, tokenness(sel));
         if (!out.has(k))
           out.set(k, { hook: h.key, side: t.side, weight: h.weight, cards: h.cards, source: t.source, ...own2 !== h.key ? { as: own2 } : {} });
+      }
+    for (const t of ownTouches(idx, i))
+      for (const h of main) {
+        if (t.hook !== h.hook)
+          continue;
+        const { envelope, qualified } = h.makes;
+        const sized = envelope.filter((e) => e.sized && e.card !== i);
+        if (!sized.length || qualified && !onSide(t.sel, h.token))
+          continue;
+        if (!sized.some((e) => idx.selectorsMeet(t.sel, t.me, e.sel, e.me, h.hook)))
+          continue;
+        const k = `${h.key}|makes|${t.source}`;
+        if (!out.has(k))
+          out.set(k, { hook: h.key, side: "makes", weight: h.weight, cards: h.cards, source: t.source });
       }
     return [...out.values()];
   };
@@ -38476,460 +39009,6 @@ class Closure {
     return [...out].sort();
   }
 }
-// server/graph/mapping/supply.yaml
-var supply_default = {
-  version: "1.0",
-  description: `What feeds a cost that spends something. A card that "consumes Sacrifice" needs a permanent on the battlefield, so anything that puts one there (ETB) feeds it. Used by src/interact.ts. ManaPaid is left out on purpose (ISA Decisions 2026-11-06): ramp is a role the Galaxy fills, and linking every mana source to every mana cost would drown the real interactions.
-`,
-  supply: [
-    {
-      consumes: "Sacrifice",
-      fed_by: [
-        "ETB"
-      ],
-      note: "Sacrifice outlets eat permanents: tokens, reanimation, anything entering."
-    },
-    {
-      consumes: "Exile",
-      fed_by: [
-        "ETB"
-      ],
-      note: "An exile-a-permanent cost, same source as sacrifice."
-    },
-    {
-      consumes: "Bounce",
-      fed_by: [
-        "ETB"
-      ],
-      note: "A return-a-permanent-to-hand cost."
-    },
-    {
-      consumes: "Tap",
-      fed_by: [
-        "Untap"
-      ],
-      note: "A {T} cost is paid again when the permanent untaps."
-    },
-    {
-      consumes: "Untap",
-      fed_by: [
-        "Tap"
-      ]
-    },
-    {
-      consumes: "Discard",
-      fed_by: [
-        "CardDrawn",
-        "Regrowth"
-      ],
-      note: "Discard costs spend cards in hand."
-    },
-    {
-      consumes: "ExileFromHand",
-      fed_by: [
-        "CardDrawn",
-        "Regrowth"
-      ]
-    },
-    {
-      consumes: "HandToLibrary",
-      fed_by: [
-        "CardDrawn",
-        "Regrowth"
-      ]
-    },
-    {
-      consumes: "ExileFromGraveyard",
-      fed_by: [
-        "PutIntoGraveyard",
-        "Mill",
-        "Discard"
-      ],
-      note: "Delve-style and escape-style costs spend graveyard cards."
-    },
-    {
-      consumes: "CollectEvidence",
-      fed_by: [
-        "PutIntoGraveyard",
-        "Mill",
-        "Discard"
-      ]
-    },
-    {
-      consumes: "LifeLoss",
-      fed_by: [
-        "LifeGain"
-      ],
-      note: "Paying life is spent from the life total."
-    },
-    {
-      consumes: "CounterRemoved",
-      fed_by: [
-        "CounterPlaced"
-      ],
-      note: "CounterRemoved:P1P1 is fed by CounterPlaced:P1P1; the subtype carries over (src/interact.ts)."
-    }
-  ]
-};
-
-// server/graph/interact.ts
-function loadSupply() {
-  const y = supply_default;
-  if (!Array.isArray(y?.supply))
-    throw new Error("supply.yaml: missing supply list");
-  return new Map(y.supply.map((s) => [s.consumes, s.fed_by]));
-}
-var PERMANENT_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Land", "Planeswalker"];
-var CARD_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Instant", "Kindred", "Land", "Planeswalker", "Sorcery"];
-var SUPERTYPES = ["Basic", "Legendary", "Snow"];
-var ALL_FACES_CAST = new Set(["split", "adventure", "modal_dfc", "omen"]);
-function costColors(cost) {
-  const out = new Set;
-  for (const m of (cost ?? "").matchAll(/\{([^}]+)\}/g))
-    for (const ch of m[1].split("/"))
-      if (/^[WUBRG]$/.test(ch))
-        out.add(ch);
-  return ["W", "U", "B", "R", "G"].filter((x) => out.has(x));
-}
-function faceOf(typeLine, colors, cost, anySubtype) {
-  const [front, sub = ""] = typeLine.split("\u2014");
-  return { types: CARD_TYPES.filter((t) => front.includes(t)), supertypes: SUPERTYPES.filter((t) => front.includes(t)), subtypes: sub.trim().split(/\s+/).filter(Boolean), colors, costColors: costColors(cost), anySubtype };
-}
-function cardInfo(g, c) {
-  const anySubtype = c.keywords.includes("Changeling");
-  const sides = c.faces?.length ? c.faces : [{ type_line: c.typeLine, colors: c.colors ?? undefined, mana_cost: c.manaCost }];
-  const faces = sides.map((f) => faceOf(f.type_line ?? "", f.colors ?? (c.faces?.length ? costColors(f.mana_cost) : c.colors ?? []), f.mana_cost, anySubtype));
-  const front = faces[0];
-  return {
-    id: c.id,
-    name: g.name,
-    oracleId: g.oracleId,
-    types: front.types,
-    subtypes: front.subtypes,
-    supertypes: front.supertypes ?? [],
-    colors: front.colors ?? [],
-    costColors: front.costColors ?? [],
-    anySubtype,
-    faces: ALL_FACES_CAST.has(c.layout) ? faces : [front],
-    colorIdentity: c.colorIdentity,
-    edhrecRank: c.edhrecRank,
-    graph: g
-  };
-}
-var GENERIC = new Set(["Card", "Permanent", "Spell"]);
-var NO_FACTS = { creatureOnly: new Set, landOnly: new Set, known: new Set };
-var COLOR = { White: "W", Blue: "U", Black: "B", Red: "R", Green: "G" };
-function colorTests(props) {
-  const out = [];
-  for (const p of props) {
-    const m = /^(non)?(ManaCostPartial)?(White|Blue|Black|Red|Green|Colorless|MonoColor|Multicolor)$/.exec(p);
-    if (!m)
-      continue;
-    const pick2 = (me) => (m[2] ? me.costColors : me.colors) ?? [];
-    const base = m[3] === "Colorless" ? (me) => pick2(me).length === 0 : m[3] === "MonoColor" ? (me) => pick2(me).length === 1 : m[3] === "Multicolor" ? (me) => pick2(me).length > 1 : (me) => pick2(me).includes(COLOR[m[3]]);
-    out.push(m[1] ? (me) => !base(me) : base);
-  }
-  return out;
-}
-var CHANGES_HANDS = new Set(["GainControl", "ExchangeControl"]);
-function resolve(a, me, facts, hook) {
-  let types = a.types.filter((x) => !GENERIC.has(x) && !SUPERTYPES.includes(x));
-  const supertypes = a.types.filter((x) => SUPERTYPES.includes(x));
-  const nonSupertypes = a.props.flatMap((p) => {
-    const m = /^non([A-Z][a-z]+)$/.exec(p);
-    return m && SUPERTYPES.includes(m[1]) ? [m[1]] : [];
-  });
-  let subtypes = facts.known.size ? a.subtypes.filter((x) => facts.known.has(x)) : a.subtypes;
-  let token = a.token;
-  if (!types.length && supertypes.includes("Basic"))
-    types = ["Land"];
-  if (a.self) {
-    types = [...new Set([...types, ...me.types])];
-    subtypes = [...new Set([...subtypes, ...me.subtypes])];
-    token = false;
-  } else if (!types.length && subtypes.some((x) => facts.creatureOnly.has(x)))
-    types = ["Creature"];
-  else if (!types.length && subtypes.length && subtypes.every((x) => facts.landOnly.has(x)))
-    types = ["Land"];
-  const excluded = a.props.flatMap((p) => {
-    const m = /^non([A-Z][a-z]+)$/.exec(p);
-    return m && CARD_TYPES.includes(m[1]) ? [m[1]] : [];
-  });
-  const controller = a.controller === "any" && (a.props.includes("EquippedBy") || a.self && !CHANGES_HANDS.has(hook ?? "")) ? "you" : a.controller;
-  return { types, subtypes, supertypes, nonSupertypes, ...a.self && me.anySubtype ? { anySubtype: true } : {}, excluded, ...a.self ? { me } : {}, color: colorTests(a.props), controller, token, self: a.self, player: a.player };
-}
-function playerSide(p) {
-  if (p === "You")
-    return "you";
-  if (p === "Opponent")
-    return "opponent";
-  return "any";
-}
-function overlap(a, b) {
-  if (a.self && b.self)
-    return false;
-  if (a.controller !== "any" && b.controller !== "any" && a.controller !== b.controller)
-    return false;
-  if (a.token !== null && b.token !== null && a.token !== b.token)
-    return false;
-  const aPlayer = a.player !== undefined, bPlayer = b.player !== undefined;
-  if (aPlayer && bPlayer) {
-    const x = playerSide(a.player), y = playerSide(b.player);
-    return x === "any" || y === "any" || x === y;
-  }
-  if (aPlayer && b.types.length || bPlayer && a.types.length)
-    return false;
-  if (a.types.length && b.types.length && !a.types.some((t) => b.types.includes(t)))
-    return false;
-  const excludes = (x, y) => y.excluded.length > 0 && x.types.length > 0 && (x.self ? x.types.some((t) => y.excluded.includes(t)) : x.types.every((t) => y.excluded.includes(t)));
-  if (excludes(a, b) || excludes(b, a))
-    return false;
-  if (a.subtypes.length && b.subtypes.length && !a.anySubtype && !b.anySubtype && !a.subtypes.some((x) => b.subtypes.includes(x)))
-    return false;
-  const superOk = (me, y) => y.supertypes.every((t) => me.supertypes?.includes(t)) && !y.nonSupertypes.some((t) => me.supertypes?.includes(t));
-  if (a.supertypes.some((t) => b.nonSupertypes.includes(t)) || b.supertypes.some((t) => a.nonSupertypes.includes(t)))
-    return false;
-  if (a.me && !superOk(a.me, b))
-    return false;
-  if (b.me && !superOk(b.me, a))
-    return false;
-  if (a.me && !b.color.every((t) => t(a.me)))
-    return false;
-  if (b.me && !a.color.every((t) => t(b.me)))
-    return false;
-  return true;
-}
-function selectorsOverlap(a, aMe, b, bMe, facts = NO_FACTS, hook) {
-  if (!a.any.length || !b.any.length)
-    return true;
-  return a.any.some((x) => b.any.some((y) => overlap(resolve(x, aMe, facts, hook), resolve(y, bMe, facts, hook))));
-}
-function closureTypes(sel, me, facts) {
-  const out = new Set;
-  for (const a of sel.any) {
-    if (a.player)
-      continue;
-    const r = resolve(a, me, facts);
-    if (!r.types.length && !r.subtypes.length && !r.excluded.includes("Creature"))
-      out.add("creature");
-    for (const x of r.types)
-      out.add(x.toLowerCase());
-  }
-  return [...out];
-}
-
-class InteractionIndex {
-  cards;
-  emits = new Map;
-  listens = new Map;
-  emitsByCard = [];
-  listensByCard = [];
-  byName = new Map;
-  byLower = new Map;
-  hookCards = new Map;
-  facts;
-  constructor(cards, closure, supply, facts = NO_FACTS) {
-    this.cards = cards;
-    this.facts = facts;
-    cards.forEach((c, i) => {
-      this.byName.set(c.name, i);
-      for (const face of c.name.split(" // "))
-        if (!this.byName.has(face))
-          this.byName.set(face, i);
-      for (const n of [c.name, ...c.name.split(" // ")])
-        if (!this.byLower.has(n.toLowerCase()))
-          this.byLower.set(n.toLowerCase(), i);
-      const emits = [], listens = [];
-      const seen = new Set;
-      for (const [ability, ab] of c.graph.abilities.entries())
-        for (const [relation, r] of ab.relations.entries()) {
-          if (r.relation === "produces" || r.relation === "consumes") {
-            const by = r.relation === "produces" ? "effect" : "cost";
-            for (const hook of closure.expand(r.hook, closureTypes(r.selector, c, facts)))
-              emits.push({ card: i, hook, emitted: r.hook, by, sel: r.selector, ability, relation });
-          }
-          if (r.relation === "triggers_on" || r.relation === "replaces")
-            listens.push({ card: i, hook: r.hook, listener: r.relation, sel: r.selector, ability, relation });
-          if (r.relation === "consumes") {
-            const [base, sub] = r.hook.split(":");
-            for (const fed of supply.get(base) ?? []) {
-              if (sub && fed === "CounterPlaced") {
-                listens.push({ card: i, hook: `${fed}:${sub}`, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
-                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, onlyEmitted: fed, ability, relation });
-              } else
-                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
-            }
-          }
-        }
-      const self = { any: [{ types: [], subtypes: [], controller: "you", token: false, self: true, other: false, props: [] }], raw: "intrinsic" };
-      for (const f of c.faces) {
-        if (!f.types.length)
-          continue;
-        if (!f.types.includes("Land"))
-          emits.push({ card: i, hook: "SpellCast", emitted: "SpellCast", by: "card", sel: self, me: f });
-        if (f.types.some((t) => PERMANENT_TYPES.includes(t)))
-          emits.push({ card: i, hook: "ETB", emitted: "ETB", by: "card", sel: self, me: f });
-      }
-      for (const e of emits) {
-        (this.emits.get(e.hook) ?? this.emits.set(e.hook, []).get(e.hook)).push(e);
-        seen.add(e.hook);
-      }
-      for (const l of listens) {
-        (this.listens.get(l.hook) ?? this.listens.set(l.hook, []).get(l.hook)).push(l);
-        seen.add(l.hook);
-      }
-      for (const h of seen)
-        this.hookCards.set(h, (this.hookCards.get(h) ?? 0) + 1);
-      this.emitsByCard.push(emits);
-      this.listensByCard.push(listens);
-    });
-  }
-  emitsOf(i) {
-    return this.emitsByCard[i];
-  }
-  listensOf(i) {
-    return this.listensByCard[i];
-  }
-  selectorsMeet(a, aMe, b, bMe, hook) {
-    return selectorsOverlap(a, aMe, b, bMe, this.facts, hook);
-  }
-  indexOf(name) {
-    const i = this.byName.get(name) ?? this.byLower.get(name.toLowerCase());
-    if (i === undefined)
-      throw new Error(`no card named ${name} in the graph`);
-    return i;
-  }
-  link(e, l) {
-    if (e.card === l.card)
-      return null;
-    if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
-      return null;
-    const a = this.cards[e.card], b = this.cards[l.card];
-    if (!selectorsOverlap(e.sel, e.me ?? a, l.sel, b, this.facts, e.hook))
-      return null;
-    return { from: a.name, to: b.name, hook: e.hook, emittedBy: e.by, emitted: e.emitted, listener: l.listener, ...l.consumed ? { consumed: l.consumed } : {} };
-  }
-  linksFrom(i) {
-    const out = [];
-    for (const e of this.emitsByCard[i])
-      for (const l of this.listens.get(e.hook) ?? []) {
-        const k = this.link(e, l);
-        if (k)
-          out.push(k);
-      }
-    return dedupe(out);
-  }
-  linksTo(i) {
-    const out = [];
-    for (const l of this.listensByCard[i])
-      for (const e of this.emits.get(l.hook) ?? []) {
-        const k = this.link(e, l);
-        if (k)
-          out.push(k);
-      }
-    return dedupe(out);
-  }
-  feedersMemo = new Map;
-  feedersOf(l) {
-    const shared = !l.sel.any.some((a) => a.self);
-    const key = `${l.hook}|${l.consumed ?? ""}|${l.onlyEmitted ?? ""}|${l.sel.raw}`;
-    const hit = shared ? this.feedersMemo.get(key) : undefined;
-    if (hit)
-      return hit;
-    const from = new Set;
-    const b = this.cards[l.card];
-    for (const e of this.emits.get(l.hook) ?? []) {
-      if (e.by !== "card" || from.has(e.card))
-        continue;
-      if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
-        continue;
-      if (selectorsOverlap(e.sel, e.me ?? this.cards[e.card], l.sel, b, this.facts, e.hook))
-        from.add(e.card);
-    }
-    const sorted = Int32Array.from(from).sort();
-    if (shared)
-      this.feedersMemo.set(key, sorted);
-    return sorted;
-  }
-  castFeeders(l) {
-    const s = new Set(this.feedersOf(l));
-    s.delete(l.card);
-    return s;
-  }
-  castFeederCount(l) {
-    const f = this.feedersOf(l);
-    let lo = 0, hi = f.length;
-    while (lo < hi) {
-      const mid = lo + hi >> 1;
-      if (f[mid] < l.card)
-        lo = mid + 1;
-      else
-        hi = mid;
-    }
-    return f.length - (lo < f.length && f[lo] === l.card ? 1 : 0);
-  }
-  linksWith(i, members2) {
-    const out = [];
-    for (const e of this.emitsByCard[i])
-      for (const l of this.listens.get(e.hook) ?? [])
-        if (members2.has(l.card)) {
-          const k = this.link(e, l);
-          if (k)
-            out.push(k);
-        }
-    for (const l of this.listensByCard[i])
-      for (const e of this.emits.get(l.hook) ?? [])
-        if (members2.has(e.card)) {
-          const k = this.link(e, l);
-          if (k)
-            out.push(k);
-        }
-    return dedupe(out);
-  }
-  linkerFor(members2) {
-    const emits = new Map, listens = new Map;
-    for (const [hook, es] of this.emits) {
-      const m = es.filter((e) => members2.has(e.card));
-      if (m.length)
-        emits.set(hook, m);
-    }
-    for (const [hook, ls] of this.listens) {
-      const m = ls.filter((l) => members2.has(l.card));
-      if (m.length)
-        listens.set(hook, m);
-    }
-    return (i) => {
-      const out = [];
-      for (const e of this.emitsByCard[i])
-        for (const l of listens.get(e.hook) ?? []) {
-          const k = this.link(e, l);
-          if (k)
-            out.push(k);
-        }
-      for (const l of this.listensByCard[i])
-        for (const e of emits.get(l.hook) ?? []) {
-          const k = this.link(e, l);
-          if (k)
-            out.push(k);
-        }
-      return dedupe(out);
-    };
-  }
-  linksBetween(a, b) {
-    const name = this.cards[this.indexOf(b)].name;
-    return this.linksFrom(this.indexOf(a)).filter((l) => l.to === name);
-  }
-}
-function dedupe(links) {
-  const seen = new Set;
-  return links.filter((l) => {
-    const k = `${l.from}|${l.to}|${l.hook}|${l.emittedBy}|${l.emitted}|${l.listener}|${l.consumed ?? ""}`;
-    if (seen.has(k))
-      return false;
-    seen.add(k);
-    return true;
-  });
-}
 
 // server/graph/store-graph.ts
 function checkMappingVersion(db) {
@@ -38950,7 +39029,7 @@ function subtypeFacts(db) {
 }
 function buildGraph(db) {
   checkMappingVersion(db);
-  const rows = db.query(`SELECT c.id, c.oracle_id, c.name, c.layout, c.type_line, c.mana_cost, c.keywords, c.color_identity,
+  const rows = db.query(`SELECT c.id, c.oracle_id, c.name, c.layout, c.type_line, c.mana_cost, c.mana_value, c.keywords, c.color_identity,
       s.colors, s.card_faces, s.edhrec_rank, g.abilities
     FROM card_graph g JOIN cards c ON c.id = g.card_id LEFT JOIN card_scryfall s ON s.card_id = c.id ORDER BY c.id`).all();
   if (!rows.length)
@@ -38965,6 +39044,7 @@ function buildGraph(db) {
       layout: r.layout,
       typeLine: r.type_line,
       manaCost: r.mana_cost,
+      manaValue: r.mana_value,
       keywords: JSON.parse(r.keywords),
       colorIdentity: [...r.color_identity],
       colors: r.colors === null ? null : JSON.parse(r.colors),
@@ -39796,6 +39876,26 @@ var deckStatsShape = {
   plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid); with it, planFit says which cards fit it")
 };
 var deckStatsInput = exports_external.object(deckStatsShape).strict();
+var STORE_IDS = new WeakMap;
+function storeIdOf(store, oracleId) {
+  let m = STORE_IDS.get(store);
+  if (!m)
+    STORE_IDS.set(store, m = new Map(store.names.map((n) => [n.oracleId, n.id])));
+  const id = m.get(oracleId);
+  if (id === undefined)
+    throw new Error(`card store is inconsistent: oracle id ${oracleId} has no store id`);
+  return id;
+}
+function cardFacts2(store, commander, entries) {
+  const ids = new Set([commander.id, ...entries.flatMap((e) => e.card ? [e.card.id] : [])]);
+  const q = store.db.query("SELECT name, mana_value, type_line, oracle_text FROM cards WHERE id = ?");
+  return [...ids].map((oracleId) => {
+    const r = q.get(storeIdOf(store, oracleId));
+    if (!r)
+      throw new Error(`card store is inconsistent: oracle id ${oracleId} resolved but has no row`);
+    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, oracleText: r.oracle_text };
+  }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
 var deckPath = (deckFile) => isAbsolute(deckFile) ? deckFile : join2(DECK_ROOT, deckFile);
 function readDeck(input2) {
   if (input2.deckFile === undefined === (input2.decklist === undefined))
@@ -39878,6 +39978,7 @@ function deckStats(store, input2) {
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join(""), matchedBy },
     ...deckNumbers(store, commander, deck.entries, plan),
+    cardFacts: cardFacts2(store, commander, deck.entries),
     unresolved: unresolvedLines(store, deck.unresolved)
   };
 }
@@ -40151,7 +40252,6 @@ var GAME_FED = new Set([
   "ExcessDamage",
   "CumulativeUpkeep"
 ]);
-var BROAD = 1 / 3;
 var selfOnly = (l) => l.sel.any.length > 0 && l.sel.any.every((a) => a.self);
 var selfOnlySel = (s) => s.any.length > 0 && s.any.every((a) => a.self);
 var opponentOnly = (l) => l.sel.any.length > 0 && l.sel.any.every((a) => a.controller === "opponent" || a.player === "Opponent");
@@ -40575,10 +40675,11 @@ var swapCandidatesShape = {
   card: exports_external.string().min(1).optional().describe("One card in the deck to replace (plan, cheaper and budget levers); omit for the whole deck"),
   limit: exports_external.number().int().min(1).max(50).optional().describe("Most candidates to return (default 5 for one card, 15 for the whole deck)"),
   targets: exports_external.record(exports_external.string(), exports_external.number().int().min(0)).optional().describe('Role target counts, replacing the defaults for the roles named (e.g. {"ramp": 9}): the roles and redundancy levers ' + "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)"),
-  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid). The plan lever needs it; with it, " + "every lever reports plan fit before and after, and ties among cuts and fills go to the card that fits the plan")
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid). The plan lever needs it; with it, " + "every lever reports plan fit before and after, ties among cuts and fills go to the card that fits the plan, and its priority cards " + "are never offered as the card to cut")
 };
 var swapCandidatesInput = exports_external.object(swapCandidatesShape).strict();
 var fitOf = (ctx, c) => ctx.plan?.fit(c.id).score ?? 0;
+var isPriority = (ctx, c) => ctx.plan?.fit(c.id).priority === true;
 var swapCard = (store, c) => ({ name: c.name, manaValue: c.meta.cmc, usd: c.meta.usd, roles: countedRoles(store, c).map((r) => r.role) });
 var money = (x) => `$${x.toFixed(2)}`;
 var signed = (x, f = String) => x > 0 ? `+${f(x)}` : x < 0 ? `-${f(-x)}` : f(0);
@@ -40694,7 +40795,7 @@ function planWhy(plan, inCard, out, gain) {
 var picksFor = (ctx, out, lever, limit) => lever === "plan" ? planPicks(ctx, out, limit) : leverPicks(ctx, out, lever).slice(0, limit);
 var PER_CARD_IN_DECK = 3;
 function deckPicks(ctx, lever, limit) {
-  const outs = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id ? [[e.card.id, e.card]] : [])).values()].sort((a, b) => byName(a.name, b.name));
+  const outs = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card]] : [])).values()].sort((a, b) => byName(a.name, b.name));
   const all = outs.flatMap((c) => picksFor(ctx, c, lever, PER_CARD_IN_DECK)).sort(lever === "plan" ? PLAN_ORDER : LEVER_ORDER);
   const usedOut = new Set, usedIn = new Set, top = [];
   for (const p of all) {
@@ -40713,7 +40814,7 @@ function cuts(ctx, status) {
   const seen = new Set, out = [];
   for (const e of ctx.entries) {
     const c = e.card;
-    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id))
+    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id) || isPriority(ctx, c))
       continue;
     seen.add(c.id);
     const roles = countedRoles(ctx.store, c);
@@ -40768,7 +40869,7 @@ function fills(ctx, status) {
 function pairCuts(ctx, list, status) {
   const by = new Map(status.map((s) => [s.role, s]));
   const left = new Map(status.map((s) => [s.role, s.count]));
-  const deck = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== ctx.commander.id ? [[e.card.id, e.card]] : [])).values()].map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: fitOf(ctx, card) }));
+  const deck = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card]] : [])).values()].map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: fitOf(ctx, card) }));
   const used = new Set;
   return list.map((f) => {
     const fillRoles = new Set(countedRoles(ctx.store, f.card).map((r) => r.role));
@@ -40834,6 +40935,9 @@ function swapCandidates(store, input3) {
       throw new ToolInputError(`${card.name} is a land; swap candidates cover nonland cards`);
     if (card.id === commander.id)
       throw new ToolInputError(`${card.name} is the commander`);
+    if (isPriority(ctx, card)) {
+      throw new ToolInputError(`${card.name} is one of the plan's priority cards, so it is never offered as a cut; if the player wants it replaced, take it out of the plan's priorities first`);
+    }
     if (f.lever === "budget" && card.meta.usd === null)
       notes.push(`${card.name} has no Scryfall price, so no card is cheaper in dollars`);
     picks = picksFor(ctx, card, f.lever, f.limit ?? 5);
@@ -40846,7 +40950,8 @@ function swapCandidates(store, input3) {
     const list = cuts(ctx, roles);
     for (const s of roles)
       if (s.status === "over" && !list.some((c) => c.relieves.includes(s))) {
-        notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it also gives a role that would fall below target`);
+        const kept = [...new Map(deck.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== commander.id && isPriority(ctx, e.card) && countedRoles(store, e.card).some((r) => r.role === s.role) ? [[e.card.id, e.card.name]] : [])).values()].sort(byName);
+        notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it ${kept.length ? `is a priority card of the plan (${kept.join(", ")}) or ` : ""}also gives a role that would fall below target`);
       }
     candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(ctx, c), c.tags));
   }
@@ -41045,6 +41150,7 @@ function diagnose2(store, input3) {
       if (!gapOf.has(name))
         gapOf.set(name, s.hook);
   const leansOn = mainParts([...plan.themes, ...plan.cards ? [plan.cards] : []]);
+  const priority = new Set(plan.priorities);
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join("") },
     plan: { ...planEcho(plan), leansOn },
@@ -41058,10 +41164,10 @@ function diagnose2(store, input3) {
       waitingOnIt: d.engine.filter((e) => e.bucket === "starved" && gapOf.get(e.name) === s.hook).map((e) => e.name)
     })),
     roles,
-    over: (d.roles?.over ?? []).map((o) => ({ ...read.get(o.role), trims: (o.trims ?? []).map((t) => isStatic(t.name) ? { ...t, unread: true } : t) })),
+    over: (d.roles?.over ?? []).map((o) => ({ ...read.get(o.role), trims: (o.trims ?? []).filter((t) => !priority.has(t.name)).map((t) => isStatic(t.name) ? { ...t, unread: true } : t) })),
     under: (d.roles?.under ?? []).map((u) => read.get(u.role)),
     offPlan: offPlanCards(store, plan, nonlandCards.filter((c) => c.id !== plan.commander.id), leansOn),
-    doingLeast: d.engine.filter((e) => e.bucket === "cut").map((e) => ({ name: e.name, partners: e.partners, links: linksOf(e.name), reason: e.reason })),
+    doingLeast: d.engine.filter((e) => e.bucket === "cut" && !priority.has(e.name)).map((e) => ({ name: e.name, partners: e.partners, links: linksOf(e.name), reason: e.reason })),
     unread: d.engine.filter((e) => isStatic(e.name)).map((e) => ({
       name: e.name,
       reason: "works through a static effect (a lord, an anthem, a keyword grant, a cost or trigger change) the graph does not link yet, so its links undercount it" + (e.bucket === "unread" ? "" : `; it still reads as ${e.bucket} from the links it does have`)
@@ -41069,6 +41175,7 @@ function diagnose2(store, input3) {
     cards: d.engine.map(({ degree: _d, ...e }) => e),
     lowPartners: d.lowPartners,
     noGraphData: [...noGraphData].sort(),
+    cardFacts: cardFacts2(store, commander, deck.entries),
     unresolved: unresolvedLines(store, deck.unresolved)
   };
 }
@@ -41666,7 +41773,7 @@ function createDeckServer(store) {
   }, async (args) => withStore(store, (s) => cardDetails(s, args)));
   server.registerTool("deck_stats", {
     title: "Deck stats",
-    description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load, plus unresolved lines and off-identity cards; with the player's confirmed plan (`plan`: themes, " + "priority cards, themes to avoid), plan fit: which cards fit it and which do not. " + "Give the commander and either a decklist file path or the pasted list.",
+    description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load, plus unresolved lines and off-identity cards; with the player's confirmed plan (`plan`: themes, " + "priority cards, themes to avoid), plan fit: which cards fit it and which do not. Also every deck card's mana value, " + "type line and rules text (`cardFacts`, the commander included): quote card facts from there. " + "Give the commander and either a decklist file path or the pasted list.",
     inputSchema: deckStatsShape
   }, async (args) => withStore(store, (s) => deckStats(s, args)));
   server.registerTool("commander_profile", {
@@ -41676,7 +41783,7 @@ function createDeckServer(store) {
   }, async (args) => withStore(store, (s) => commanderProfile(s, args)));
   server.registerTool("diagnose", {
     title: "Diagnose a deck against the plan",
-    description: "What a Commander deck lacks and overdoes against the player's confirmed plan (`plan`, required: themes, " + "priority cards, themes to avoid). Returns engine gaps (payoffs waiting on something too few cards make happen, with both " + "counts and in-color cards that would feed them), every role against its target with the target's source (the plan's " + "theme decks, or the default table when the plan's themes do not cover it) and the roles over and under, cards off the " + "plan with the reason, the cards doing the least with their links into the deck, and the cards the card graph cannot " + "read (static effects), which are never judged by their links. Give the commander and either a decklist file path or " + "the pasted list. Same deck and plan, same answer.",
+    description: "What a Commander deck lacks and overdoes against the player's confirmed plan (`plan`, required: themes, " + "priority cards, themes to avoid). Returns engine gaps (payoffs waiting on something too few cards make happen, with both " + "counts and in-color cards that would feed them), every role against its target with the target's source (the plan's " + "theme decks, or the default table when the plan's themes do not cover it) and the roles over and under, cards off the " + "plan with the reason, the cards doing the least with their links into the deck, and the cards the card graph cannot " + "read (static effects), which are never judged by their links, and every deck card's mana value, type line and rules " + "text (`cardFacts`). Give the commander and either a decklist file path or " + "the pasted list. Same deck and plan, same answer.",
     inputSchema: diagnoseShape
   }, async (args) => withStore(store, (s) => diagnose2(s, args)));
   server.registerTool("shortlist", {
