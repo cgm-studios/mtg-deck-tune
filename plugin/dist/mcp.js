@@ -38830,11 +38830,12 @@ class InteractionIndex {
     return dedupe(out);
   }
   feedersMemo = new Map;
-  castFeeders(l) {
+  feedersOf(l) {
     const shared = !l.sel.any.some((a) => a.self);
     const key = `${l.hook}|${l.consumed ?? ""}|${l.onlyEmitted ?? ""}|${l.sel.raw}`;
-    if (shared && this.feedersMemo.has(key))
-      return this.withoutSelf(this.feedersMemo.get(key), l.card);
+    const hit = shared ? this.feedersMemo.get(key) : undefined;
+    if (hit)
+      return hit;
     const from = new Set;
     const b = this.cards[l.card];
     for (const e of this.emits.get(l.hook) ?? []) {
@@ -38845,16 +38846,27 @@ class InteractionIndex {
       if (selectorsOverlap(e.sel, e.me ?? this.cards[e.card], l.sel, b, this.facts, e.hook))
         from.add(e.card);
     }
+    const sorted = Int32Array.from(from).sort();
     if (shared)
-      this.feedersMemo.set(key, from);
-    return this.withoutSelf(from, l.card);
+      this.feedersMemo.set(key, sorted);
+    return sorted;
   }
-  withoutSelf(s, card) {
-    if (!s.has(card))
-      return s;
-    const t = new Set(s);
-    t.delete(card);
-    return t;
+  castFeeders(l) {
+    const s = new Set(this.feedersOf(l));
+    s.delete(l.card);
+    return s;
+  }
+  castFeederCount(l) {
+    const f = this.feedersOf(l);
+    let lo = 0, hi = f.length;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (f[mid] < l.card)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+    return f.length - (lo < f.length && f[lo] === l.card ? 1 : 0);
   }
   linksWith(i, members2) {
     const out = [];
@@ -38873,6 +38885,35 @@ class InteractionIndex {
             out.push(k);
         }
     return dedupe(out);
+  }
+  linkerFor(members2) {
+    const emits = new Map, listens = new Map;
+    for (const [hook, es] of this.emits) {
+      const m = es.filter((e) => members2.has(e.card));
+      if (m.length)
+        emits.set(hook, m);
+    }
+    for (const [hook, ls] of this.listens) {
+      const m = ls.filter((l) => members2.has(l.card));
+      if (m.length)
+        listens.set(hook, m);
+    }
+    return (i) => {
+      const out = [];
+      for (const e of this.emitsByCard[i])
+        for (const l of listens.get(e.hook) ?? []) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+      for (const l of this.listensByCard[i])
+        for (const e of emits.get(l.hook) ?? []) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+      return dedupe(out);
+    };
   }
   linksBetween(a, b) {
     const name = this.cards[this.indexOf(b)].name;
@@ -40142,33 +40183,72 @@ function makesOwn(idx, i, hook) {
 function worksThroughStatic(idx, i) {
   return idx.cards[i].graph.abilities.some((a) => a.relations.some((r) => r.relation === "modifies" && !selfOnlySel(r.selector)));
 }
+function payoffsOf(idx, cards) {
+  const payoffs = new Map;
+  for (const i of cards)
+    for (const l of idx.listensOf(i))
+      if (isPayoff(l))
+        (payoffs.get(l.hook) ?? payoffs.set(l.hook, new Set).get(l.hook)).add(i);
+  return payoffs;
+}
+function outsideFeeders(idx, ctx, hook, payoffs, eligible) {
+  const feeds2 = new Map;
+  const ok = new Map;
+  for (const pi of payoffs)
+    for (const l of idx.linksTo(pi)) {
+      if (l.hook !== hook || ctx.generic(l))
+        continue;
+      const from = idx.indexOf(l.from);
+      if (ctx.members.has(from))
+        continue;
+      let pass = ok.get(from);
+      if (pass === undefined)
+        ok.set(from, pass = eligible(from) && makesOwn(idx, from, hook).own);
+      if (!pass)
+        continue;
+      let f = feeds2.get(from);
+      if (!f)
+        feeds2.set(from, f = { feeds: new Set, repeatable: makesOwn(idx, from, hook).repeatable });
+      f.feeds.add(idx.cards[pi].name);
+    }
+  return feeds2;
+}
+var BROAD_MEMO = new WeakMap;
+function isBroad(idx, i, key) {
+  let byCard = BROAD_MEMO.get(idx);
+  if (!byCard)
+    BROAD_MEMO.set(idx, byCard = new Map);
+  let keys = byCard.get(i);
+  if (!keys)
+    byCard.set(i, keys = new Map);
+  let broad = keys.get(key);
+  if (broad === undefined) {
+    const ls = idx.listensOf(i).filter((l) => `${l.hook}|${l.consumed ?? ""}` === key);
+    let n;
+    if (ls.length === 1)
+      n = idx.castFeederCount(ls[0]);
+    else {
+      const from = new Set;
+      for (const l of ls)
+        for (const f of idx.castFeeders(l))
+          from.add(f);
+      n = from.size;
+    }
+    keys.set(key, broad = n / idx.cards.length >= BROAD);
+  }
+  return broad;
+}
 function deckContext(idx, g) {
   const members2 = new Set(g.cards.map((c) => idx.indexOf(c.name)));
   const nameIdx = new Map([...members2].map((i) => [idx.cards[i].name, i]));
-  const broadMemo = new Map;
-  const broadOf = (i) => {
-    let s = broadMemo.get(i);
-    if (s)
-      return s;
-    const by = new Map;
-    for (const l of idx.listensOf(i)) {
-      const key = `${l.hook}|${l.consumed ?? ""}`;
-      const acc = by.get(key) ?? by.set(key, new Set).get(key);
-      for (const f of idx.castFeeders(l))
-        acc.add(f);
-    }
-    s = new Set([...by].filter(([, from]) => from.size / idx.cards.length >= BROAD).map(([key]) => key));
-    broadMemo.set(i, s);
-    return s;
-  };
   const byName = (name) => nameIdx.get(name) ?? idx.indexOf(name);
-  const generic = (l) => l.emittedBy === "card" && broadOf(byName(l.to)).has(`${l.hook}|${l.consumed ?? ""}`);
+  const generic = (l) => l.emittedBy === "card" && isBroad(idx, byName(l.to), `${l.hook}|${l.consumed ?? ""}`);
   const counts = (l) => !offProfile(l.hook) && !generic(l);
   return { members: members2, nameIdx, generic, counts };
 }
 function diagnose(idx, g, opts = {}, ctx = deckContext(idx, g)) {
   const top = opts.top ?? 10;
-  const { members: members2, nameIdx, generic, counts } = ctx;
+  const { members: members2, nameIdx, counts } = ctx;
   const commanders = new Set(g.commanders);
   const ci = new Set(commanders.size ? g.commanders.flatMap((c) => idx.cards[nameIdx.get(c)].colorIdentity) : [...members2].flatMap((i) => idx.cards[i].colorIdentity));
   const inColor = (i) => idx.cards[i].colorIdentity.every((x) => ci.has(x));
@@ -40196,13 +40276,7 @@ function diagnose(idx, g, opts = {}, ctx = deckContext(idx, g)) {
     }
     return v;
   };
-  const payoffs = new Map;
-  for (const c of nonland) {
-    const i = nameIdx.get(c.name);
-    for (const l of idx.listensOf(i))
-      if (isPayoff(l))
-        (payoffs.get(l.hook) ?? payoffs.set(l.hook, new Set).get(l.hook)).add(i);
-  }
+  const payoffs = payoffsOf(idx, nonland.map((c) => nameIdx.get(c.name)));
   const enablers = new Map;
   for (const l of g.links) {
     const to = nameIdx.get(l.to);
@@ -40217,18 +40291,9 @@ function diagnose(idx, g, opts = {}, ctx = deckContext(idx, g)) {
     const es = enablers.get(hook) ?? new Set;
     if (ps.size < 2 || ps.size <= es.size)
       continue;
-    const feeds2 = new Map;
-    for (const pi of ps)
-      for (const l of idx.linksTo(pi)) {
-        if (l.hook !== hook || generic(l))
-          continue;
-        const from = idx.indexOf(l.from);
-        if (members2.has(from) || !inColor(from) || !own2(from, hook).own)
-          continue;
-        (feeds2.get(from) ?? feeds2.set(from, new Set).get(from)).add(idx.cards[pi].name);
-      }
-    const rep = (i) => own2(i, hook).repeatable ? 0 : 1;
-    const candidates = [...feeds2].filter(([, s]) => s.size >= 2).sort(([a, x], [b, y]) => y.size - x.size || rep(a) - rep(b) || (idx.cards[a].edhrecRank ?? Infinity) - (idx.cards[b].edhrecRank ?? Infinity) || byteOrder(idx.cards[a].name, idx.cards[b].name)).slice(0, top).map(([i, s]) => ({ name: idx.cards[i].name, feeds: names(s), repeatable: own2(i, hook).repeatable }));
+    const feeds2 = outsideFeeders(idx, ctx, hook, ps, inColor);
+    const rep = (i) => feeds2.get(i).repeatable ? 0 : 1;
+    const candidates = [...feeds2].filter(([, f]) => f.feeds.size >= 2).sort(([a, x], [b, y]) => y.feeds.size - x.feeds.size || rep(a) - rep(b) || (idx.cards[a].edhrecRank ?? Infinity) - (idx.cards[b].edhrecRank ?? Infinity) || byteOrder(idx.cards[a].name, idx.cards[b].name)).slice(0, top).map(([i, f]) => ({ name: idx.cards[i].name, feeds: names(f.feeds), repeatable: f.repeatable }));
     starved.push({ hook, payoffs: names([...ps].map((i) => idx.cards[i].name)), enablers: names(es), ratio: `${ps.size}:${es.size}`, candidates });
   }
   starved.sort((a, b) => b.payoffs.length / Math.max(1, b.enablers.length) - a.payoffs.length / Math.max(1, a.enablers.length) || byteOrder(a.hook, b.hook));
@@ -40912,13 +40977,8 @@ var diagnoseShape = {
   plan: planShape.describe("The player's confirmed plan (themes, priority cards, themes to avoid): the diagnosis is measured against it")
 };
 var diagnoseInput = exports_external.object(diagnoseShape).strict();
-function diagnose2(store, input3) {
-  const f = diagnoseInput.parse(input3);
-  const text = readDeck(f);
-  const { card: commander } = resolveCommander(store, f.commander);
-  const plan = resolvePlan(store, { commander: commander.name, plan: f.plan });
-  const graph = graphOf(store.db);
-  const idx = graph.index;
+function deckOnGraph(store, commander, text) {
+  const { index: idx, positionOf } = graphOf(store.db);
   const deck = parseDecklist(store.space, text);
   const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
   const counts = new Map;
@@ -40926,40 +40986,49 @@ function diagnose2(store, input3) {
   for (const e of deck.entries) {
     if (!e.card)
       continue;
-    const pos = graph.positionOf.get(idOf.get(e.card.id));
+    const pos = positionOf.get(idOf.get(e.card.id));
     if (pos !== undefined)
       counts.set(pos, (counts.get(pos) ?? 0) + e.qty);
     else
       noGraphData.add(e.card.name);
   }
-  const commanderPos = graph.positionOf.get(plan.commander.id);
+  const commanderPos = positionOf.get(idOf.get(commander.id));
   if (commanderPos === undefined)
     throw new ToolInputError(`${commander.name} has no card graph data (its card script could not be read), so the deck's engine cannot be read around it`);
   if (!counts.has(commanderPos))
     counts.set(commanderPos, 1);
   const entries = [...counts].map(([pos, count]) => ({ name: idx.cards[pos].name, count }));
   const g = deckGraph(idx, entries, [idx.cards[commanderPos].name], store.roles);
+  return { deck, idOf, g, ctx: deckContext(idx, g), commanderPos, noGraphData };
+}
+function deckLinks(ctx, name, links2) {
+  const seen = new Set;
+  return links2.filter((l) => l.from === name || l.to === name).map((l) => ({
+    card: l.from === name ? l.to : l.from,
+    direction: l.from === name ? "feeds" : "fed by",
+    on: hookPhrase(l.hook),
+    generic: ctx.generic(l)
+  })).filter((l) => {
+    const k = `${l.card}|${l.direction}|${l.on}|${l.generic}`;
+    return !seen.has(k) && !!seen.add(k);
+  }).sort((a, b) => byteOrder(a.card, b.card) || byteOrder(a.direction, b.direction) || byteOrder(a.on, b.on));
+}
+function diagnose2(store, input3) {
+  const f = diagnoseInput.parse(input3);
+  const text = readDeck(f);
+  const { card: commander } = resolveCommander(store, f.commander);
+  const plan = resolvePlan(store, { commander: commander.name, plan: f.plan });
+  const idx = graphOf(store.db).index;
+  const { deck, idOf, g, ctx, noGraphData } = deckOnGraph(store, commander, text);
   const sheet = roleSheet(store.roles, deck.entries.map((e) => ({ ...e, card: e.card && { id: e.card.id, name: e.card.name, land: e.card.land } })));
   g.roles = { counts: sheet.counts, unroled: sheet.unroled };
   const nonland = sheet.cards.reduce((n, c) => n + c.qty, 0);
   const targets = roleTargets(store, plan, commander.ci, nonland);
-  const ctx = deckContext(idx, g);
   const d = diagnose(idx, g, { targets: { targets: Object.fromEntries(targets.map((t) => [t.role, t.target])), source: "plan" } }, ctx);
   const roles = targets.map((t) => ({ role: t.role, count: sheet.counts[t.role] ?? 0, target: t.target, source: t.source, basis: t.basis, ...t.expected !== undefined ? { expected: t.expected } : {} }));
   const read = new Map(roles.map((r) => [r.role, r]));
   const isStatic = (name) => worksThroughStatic(idx, idx.indexOf(name));
-  const linksOf = (name) => {
-    const seen = new Set;
-    return g.links.filter((l) => l.from === name || l.to === name).map((l) => ({
-      card: l.from === name ? l.to : l.from,
-      direction: l.from === name ? "feeds" : "fed by",
-      on: hookPhrase(l.hook),
-      generic: ctx.generic(l)
-    })).filter((l) => {
-      const k = `${l.card}|${l.direction}|${l.on}|${l.generic}`;
-      return !seen.has(k) && !!seen.add(k);
-    }).sort((a, b) => (a.card < b.card ? -1 : a.card > b.card ? 1 : 0) || (a.direction < b.direction ? -1 : a.direction > b.direction ? 1 : 0) || (a.on < b.on ? -1 : a.on > b.on ? 1 : 0));
-  };
+  const linksOf = (name) => deckLinks(ctx, name, g.links);
   const nonlandCards = [...new Map(deck.entries.filter((e) => e.card && !e.card.land).map((e) => [e.card.id, { id: idOf.get(e.card.id), oracleId: e.card.id, name: e.card.name }])).values()];
   const gapOf = new Map;
   for (const s of d.starved)
@@ -41077,6 +41146,277 @@ function offPlanCards(store, plan, cards, leansOn) {
     const reason = `nothing it does is something the ${planName} plan leans on (${leaning})` + (fitsAvoided.length ? `, and it fits ${fitsAvoided.join(" and ")}, which the plan avoids` : "");
     return { name: c.name, reason, does, tags: strongestTags(store, c.id, TAGS_SHOWN), roles: rolesOf(store.roles, c.oracleId).roles.map((r) => r.role), fitsAvoided };
   }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
+// server/shortlist.ts
+var SHORTLIST_LABELS = ["fits this commander", "deeper cut", "widely played", "engine partner"];
+var PER_SOURCE = 10;
+var SHORTLIST_MAX = 30;
+var problemShape = exports_external.union([
+  exports_external.object({ role: exports_external.string().min(1).describe("A deck role, as diagnose and deck_stats name it (ramp, card draw, card selection, removal, board wipe, counterspell, protection, tutor, recursion, cost reducer): cards that hold it") }).strict(),
+  exports_external.object({ engineGap: exports_external.string().min(1).describe("What an engine's payoffs wait on, in the words diagnose gives an engine gap's `mechanic` (e.g. \"a creature dying\"): cards that make it happen for the deck's payoffs") }).strict(),
+  exports_external.object({ offPlan: exports_external.literal(true).describe("Cards that fit the plan, to replace cards off the plan or doing the least") }).strict()
+]).describe("The one diagnosed problem the shortlist answers: { role }, { engineGap } or { offPlan: true }");
+var shortlistShape = {
+  commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
+  deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.describe("The player's confirmed plan (themes, priority cards, themes to avoid): the engine partners lean on it, and every card's plan fit is read against it"),
+  problem: problemShape,
+  maxManaValue: exports_external.number().min(0).optional().describe("Only cards with mana value at most this"),
+  maxPrice: exports_external.number().min(0).optional().describe("Only cards with a Scryfall USD price at most this (an unpriced card is left out)"),
+  out: exports_external.string().min(1).optional().describe("A card in the deck to swap out, exact name: each shortlist card then carries the swap, the deck numbers after swapping it in for this one (`after`) and what changed, instead of what adding it changes")
+};
+var shortlistInput = exports_external.object(shortlistShape).strict();
+var FACTS2 = new WeakMap;
+function storeFacts(store) {
+  const hit = FACTS2.get(store);
+  if (hit)
+    return hit;
+  const edhrecRank = new Map(store.db.query("SELECT card_id, edhrec_rank FROM card_scryfall WHERE edhrec_rank IS NOT NULL").all().map((r) => [r.card_id, r.edhrec_rank]));
+  const off = store.db.query("SELECT value FROM meta WHERE key = 'tagger_deck_synergy_offset'").get();
+  const synergyOffset = off ? Number(off.value) : NaN;
+  if (!Number.isFinite(synergyOffset))
+    throw new Error("the card store records no tagger_deck_synergy_offset in meta");
+  const out = { edhrecRank, synergyOffset, vectors: new Map };
+  FACTS2.set(store, out);
+  return out;
+}
+function unpackVector2(blob) {
+  if (blob.byteLength % 6 !== 0)
+    throw new Error(`Tagger vector of ${blob.byteLength} bytes is not n float32 + n uint16`);
+  const n = blob.byteLength / 6;
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const out = new Map;
+  for (let i = 0;i < n; i++)
+    out.set(view.getUint16(n * 4 + i * 2, true), view.getFloat32(i * 4, true));
+  return out;
+}
+function cardVector(store, cardId) {
+  const f = storeFacts(store);
+  if (f.vectors.has(cardId))
+    return f.vectors.get(cardId);
+  const row = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(cardId);
+  const v = row ? unpackVector2(row.vector) : null;
+  f.vectors.set(cardId, v);
+  return v;
+}
+function commanderSignals(store, commanderId) {
+  const { synergyOffset } = storeFacts(store);
+  const page = store.db.query("SELECT tagger_deck, tagger_deck_fallback FROM commanders WHERE card_id = ?").get(commanderId);
+  const notes = [];
+  if (!page) {
+    notes.push("the commander has no EDHREC page: no card fits this commander by synergy, and the deeper cuts are fit to the commander's own card tags");
+    return { synergy: new Map, deckVector: cardVector(store, commanderId), notes };
+  }
+  if (page.tagger_deck_fallback)
+    notes.push(`the commander's page is ${page.tagger_deck_fallback === "thin" ? "thin (under 20 decks)" : "without kept tags"}: the deeper cuts are fit to the commander's own card tags`);
+  const rows = store.db.query("SELECT card_id, decks, potential_decks, synergy FROM commander_cards WHERE commander_id = ? ORDER BY card_id").all(commanderId);
+  const synergy = new Map;
+  for (const r of rows) {
+    const w = (r.potential_decks ? r.decks / r.potential_decks : 0) * Math.max(0, r.synergy + synergyOffset);
+    if (w > 0)
+      synergy.set(r.card_id, w);
+  }
+  return { synergy, deckVector: unpackVector2(page.tagger_deck), notes };
+}
+function taggerFit(store, deckVector, cardId) {
+  if (!deckVector)
+    return 0;
+  let s = 0;
+  for (const [t, w] of cardVector(store, cardId) ?? [])
+    s += w * (deckVector.get(t) ?? 0);
+  return s;
+}
+var RECENT_DECKS = 4;
+var LINKS = new WeakMap;
+function linksIntoDeck(store, d) {
+  let byDeck = LINKS.get(store);
+  if (!byDeck)
+    LINKS.set(store, byDeck = new Map);
+  const key = [...d.ctx.members].sort((a, b) => a - b).join(",");
+  let memo2 = byDeck.get(key);
+  if (memo2)
+    byDeck.delete(key);
+  else
+    memo2 = { linker: graphOf(store.db).index.linkerFor(d.ctx.members), links: new Map };
+  byDeck.set(key, memo2);
+  while (byDeck.size > RECENT_DECKS)
+    byDeck.delete(byDeck.keys().next().value);
+  const { linker, links: links2 } = memo2;
+  return (pos) => {
+    let ls = links2.get(pos);
+    if (!ls)
+      links2.set(pos, ls = linker(pos));
+    return ls;
+  };
+}
+function shortlist(store, input3) {
+  const f = shortlistInput.parse(input3);
+  const text = readDeck(f);
+  const { card: commander } = resolveCommander(store, f.commander);
+  const resolved = resolvePlan(store, { commander: commander.name, plan: f.plan });
+  const fit = planScorer(store, resolved);
+  const planCtx = { plan: planEcho(resolved), fit };
+  const graph = graphOf(store.db);
+  const idx = graph.index;
+  const d = deckOnGraph(store, commander, text);
+  const { deck, idOf, ctx } = d;
+  const commanderId = idOf.get(commander.id);
+  const inDeck = new Set(deck.entries.filter((e) => e.card).map((e) => e.card.id));
+  const entries = deck.entries;
+  const out = f.out === undefined ? null : outCard(store, f.out, entries);
+  const notes = [];
+  const eligible = (c, allowLand) => (allowLand || !c.land) && c.id !== commander.id && !inDeck.has(c.id) && fitsIdentity(c, commander.ci) && (f.maxManaValue === undefined || c.meta.cmc <= f.maxManaValue) && (f.maxPrice === undefined || c.meta.usd !== null && c.meta.usd <= f.maxPrice);
+  const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null }));
+  let avoided = 0;
+  const keep = (c) => {
+    if (!avoid.length || fit(c.id).score > 0 || !avoid.some((a) => a(c.id).score > 0))
+      return true;
+    avoided++;
+    return false;
+  };
+  const candidate2 = (c) => {
+    const id = idOf.get(c.id);
+    return { card: c, id, pos: graph.positionOf.get(id), fit: fit(c.id) };
+  };
+  let problem;
+  let pool;
+  const all = () => store.names.map((n) => store.space.cards.get(n.oracleId));
+  if ("role" in f.problem) {
+    const role = store.roles.roleNames.find((r) => r.toLowerCase() === f.problem.role.trim().toLowerCase());
+    if (role === undefined)
+      throw new ToolInputError(`unknown role "${f.problem.role}"; roles: ${store.roles.roleNames.join(", ")}`);
+    problem = { kind: "role", role };
+    pool = all().filter((c) => eligible(c, false) && rolesOf(store.roles, c.id).roles.some((r) => r.role === role) && keep(c)).map(candidate2);
+  } else if ("engineGap" in f.problem) {
+    const nonland = d.g.cards.filter((c) => !c.isLand).map((c) => ctx.nameIdx.get(c.name));
+    const payoffs = payoffsOf(idx, nonland);
+    const want = f.problem.engineGap.trim().toLowerCase();
+    const hooks = [...payoffs.keys()].sort(byteOrder);
+    const hook = hooks.find((h) => hookPhrase(h).toLowerCase() === want);
+    if (hook === undefined) {
+      const known2 = hooks.map((h) => ({ words: hookPhrase(h), n: payoffs.get(h).size })).sort((a, b) => b.n - a.n || byteOrder(a.words, b.words));
+      throw new ToolInputError(`no deck card pays off on "${f.problem.engineGap}"; what this deck's payoffs wait on: ${known2.map((k) => `${k.words} (${k.n})`).join("; ") || "nothing"}`);
+    }
+    const feeders = outsideFeeders(idx, ctx, hook, payoffs.get(hook), (i) => {
+      const c = store.space.cards.get(idx.cards[i].oracleId);
+      return !!c && eligible(c, true);
+    });
+    problem = { kind: "engine gap", mechanic: hookPhrase(hook), payoffs: [...payoffs.get(hook)].map((i) => idx.cards[i].name).sort(byteOrder) };
+    pool = [...feeders].map(([i, fd]) => ({ c: store.space.cards.get(idx.cards[i].oracleId), fd })).sort((a, b) => byteOrder(a.c.name, b.c.name)).filter(({ c }) => keep(c)).map(({ c, fd }) => ({ ...candidate2(c), feeds: fd }));
+  } else {
+    problem = { kind: "off plan" };
+    pool = all().filter((c) => eligible(c, false) && fit(c.id).score > 0 && keep(c)).map(candidate2);
+  }
+  if (avoided)
+    notes.push(`${avoided} card${avoided === 1 ? "" : "s"} left out: ${avoided === 1 ? "it fits" : "they fit"} a theme the plan avoids and not the plan`);
+  const into = linksIntoDeck(store, d);
+  const linksOf = (c) => c.pos === undefined ? [] : into(c.pos);
+  const onPlanDeck = new Set(d.g.cards.filter((c) => c.name === idx.cards[d.commanderPos].name || fit(c.oracleId).score > 0).map((c) => c.name));
+  const partners = new Map;
+  const partnersOf = (c) => {
+    let p = partners.get(c.id);
+    if (!p) {
+      const name = c.pos === undefined ? "" : idx.cards[c.pos].name;
+      const others = new Set(linksOf(c).filter(ctx.counts).map((l) => l.from === name ? l.to : l.from));
+      p = { all: others.size, plan: [...others].filter((n) => onPlanDeck.has(n)).length };
+      partners.set(c.id, p);
+    }
+    return p;
+  };
+  const { synergy, deckVector, notes: pageNotes } = commanderSignals(store, commanderId);
+  notes.push(...pageNotes);
+  const { edhrecRank } = storeFacts(store);
+  const tagger = new Map(pool.map((c) => [c.id, taggerFit(store, deckVector, c.id)]));
+  const byName2 = (a, b) => byteOrder(a.card.name, b.card.name);
+  const bySynergy = pool.filter((c) => synergy.has(c.id)).sort((a, b) => synergy.get(b.id) - synergy.get(a.id) || byName2(a, b));
+  const byTagger = pool.filter((c) => tagger.get(c.id) > 0).sort((a, b) => tagger.get(b.id) - tagger.get(a.id) || byName2(a, b));
+  const byRank = pool.filter((c) => edhrecRank.has(c.id)).sort((a, b) => edhrecRank.get(a.id) - edhrecRank.get(b.id) || byName2(a, b));
+  const again = (c) => c.feeds?.repeatable ? 0 : 1;
+  const byEngine = pool.filter((c) => partnersOf(c).all > 0).sort((a, b) => (b.feeds?.feeds.size ?? 0) - (a.feeds?.feeds.size ?? 0) || again(a) - again(b) || partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName2(a, b));
+  const chosen = new Map;
+  for (const list of [bySynergy, byTagger, byRank])
+    for (const c of list.slice(0, PER_SOURCE))
+      chosen.set(c.id, c);
+  let engineTaken = Math.min(PER_SOURCE, byEngine.length);
+  for (let k = 0;k < byEngine.length && chosen.size < SHORTLIST_MAX; k++) {
+    chosen.set(byEngine[k].id, byEngine[k]);
+    engineTaken = Math.max(engineTaken, k + 1);
+  }
+  const taken = {
+    "fits this commander": new Set(bySynergy.slice(0, PER_SOURCE).map((c) => c.id)),
+    "deeper cut": new Set(byTagger.slice(0, PER_SOURCE).map((c) => c.id)),
+    "widely played": new Set(byRank.slice(0, PER_SOURCE).map((c) => c.id)),
+    "engine partner": new Set(byEngine.slice(0, engineTaken).map((c) => c.id))
+  };
+  if (bySynergy.length < PER_SOURCE && synergy.size)
+    notes.push(`the commander's page lists ${bySynergy.length} card${bySynergy.length === 1 ? "" : "s"} for this problem`);
+  const before = swapStats(deckNumbers(store, commander, entries, planCtx));
+  const outFit = out ? fit(out.card.id).score : 0;
+  const round2 = (x) => Math.round(x * 1e4) / 1e4;
+  const cards = [...chosen.values()].map((c) => {
+    const labels = SHORTLIST_LABELS.filter((l) => taken[l].has(c.id));
+    const name = c.pos === undefined ? c.card.name : idx.cards[c.pos].name;
+    const all2 = deckLinks(ctx, name, linksOf(c).filter((l) => !offProfile(l.hook)));
+    const genericLinks = all2.filter((l) => l.generic).length;
+    const byEvent = new Map;
+    for (const l of all2) {
+      if (l.generic)
+        continue;
+      const row = byEvent.get(l.on) ?? byEvent.set(l.on, { on: l.on, feeds: [], fedBy: [] }).get(l.on);
+      (l.direction === "feeds" ? row.feeds : row.fedBy).push(l.card);
+    }
+    const links2 = [...byEvent.values()].sort((a, b) => byteOrder(a.on, b.on));
+    const after = swapStats(deckNumbers(store, commander, applySwap(entries, out?.card ?? null, c.card), planCtx));
+    const p = partnersOf(c);
+    return {
+      name: c.card.name,
+      manaValue: c.card.meta.cmc,
+      usd: c.card.meta.usd,
+      typeLine: c.card.meta.type,
+      roles: rolesOf(store.roles, c.card.id).roles.map((r) => r.role),
+      labels,
+      evidence: {
+        commanderSynergy: synergy.has(c.id) ? round2(synergy.get(c.id)) : null,
+        taggerFit: tagger.get(c.id) > 0 ? round2(tagger.get(c.id)) : null,
+        edhrecRank: edhrecRank.get(c.id) ?? null,
+        partners: p.all,
+        planPartners: p.plan,
+        planFit: c.fit,
+        ...c.feeds ? { feeds: [...c.feeds.feeds].sort(byteOrder) } : {}
+      },
+      links: links2,
+      genericLinks,
+      ...links2.length ? {} : {
+        noLinks: c.pos === undefined ? "the card graph cannot read this card, so its links are unknown" : genericLinks ? "only generic links: it is cast or enters into deck cards that any card would feed" : "links to no card in the deck"
+      },
+      ...out ? { after } : {},
+      delta: statsDelta(before, after),
+      planGain: Math.round((c.fit.score - outFit) * 1000) / 1000
+    };
+  }).sort((a, b) => b.labels.length - a.labels.length || b.evidence.planFit.score - a.evidence.planFit.score || byteOrder(a.name, b.name));
+  return {
+    commander: { name: commander.name, colorIdentity: commander.ci.join("") },
+    plan: planEcho(resolved),
+    problem,
+    ceilings: { maxManaValue: f.maxManaValue ?? null, maxPrice: f.maxPrice ?? null },
+    out: out && { name: out.card.name, manaValue: out.card.meta.cmc, usd: out.card.meta.usd, planFit: outFit },
+    pool: pool.length,
+    before,
+    cards,
+    notes,
+    unresolved: unresolvedLines(store, deck.unresolved)
+  };
+}
+function outCard(store, name, entries) {
+  const r = resolveCard(store, name);
+  const hit = store.space.cards.get(store.names[r.id - 1].oracleId);
+  if (r.matchedBy !== "exact" && r.matchedBy !== "face")
+    throw new ToolInputError(`out card "${name}" is not an exact card name; candidates: ${[hit.name, ...r.alternatives].join("; ")}`);
+  if (!entries.some((e) => e.card?.id === hit.id))
+    throw new ToolInputError(`${hit.name} is not in the deck, so it cannot be swapped out`);
+  return { card: hit };
 }
 
 // server/store.ts
@@ -41200,6 +41540,11 @@ function createDeckServer(store) {
     description: "What a Commander deck lacks and overdoes against the player's confirmed plan (`plan`, required: themes, " + "priority cards, themes to avoid). Returns engine gaps (payoffs waiting on something too few cards make happen, with both " + "counts and in-color cards that would feed them), every role against its target with the target's source (the plan's " + "theme decks, or the default table when the plan's themes do not cover it) and the roles over and under, cards off the " + "plan with the reason, the cards doing the least with their links into the deck, and the cards the card graph cannot " + "read (static effects), which are never judged by their links. Give the commander and either a decklist file path or " + "the pasted list. Same deck and plan, same answer.",
     inputSchema: diagnoseShape
   }, async (args) => withStore(store, (s) => diagnose2(s, args)));
+  server.registerTool("shortlist", {
+    title: "Shortlist for one problem",
+    description: "About 30 cards to add for one diagnosed problem, under the player's confirmed plan (`plan`, required). `problem` is " + "one of: {role} (cards holding a deck role), {engineGap} (cards that make an event happen for the deck's payoffs, in the words " + `diagnose gives an engine gap's mechanic, e.g. "a creature dying"), or {offPlan: true} (cards that fit the plan, to replace ` + "cards off it or doing the least). Every card is commander-legal, inside the commander's color identity and outside the deck, " + "and at or under `maxManaValue` and `maxPrice` when given. Each card is labeled by where it came from, with the evidence: " + "fits this commander (the commander's EDHREC synergy), deeper cut (fit to the tags of the commander's decks), widely played " + "(global EDHREC rank; at most 10 cards come in on popularity alone), engine partner (card graph links into the deck's cards " + "that fit the plan). Each also carries its links into the deck by event, its plan fit, and what adding it changes in the deck's " + "numbers; with `out` (a card in the deck), what swapping it in for that card changes, with the numbers after (`before` is " + "given once). The list narrows the pool; it does not judge card quality. Same deck, plan and problem, same answer.",
+    inputSchema: shortlistShape
+  }, async (args) => withStore(store, (s) => shortlist(s, args)));
   server.registerTool("neighbors", {
     title: "Card Space neighbors",
     description: "A card's nearest Card Space neighbors that a commander can play, nearest first, each with its similarity " + "score, mana value, type line, color identity, price and deck roles (up to 30). The card must be inside the " + "commander's color identity; lands have no neighbors.",
