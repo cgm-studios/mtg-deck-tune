@@ -294,8 +294,21 @@ describe("role targets from the plan (ISC-50 to ISC-52)", () => {
     }
   }, 60_000);
 
-  test("ISC-51: a plan of priority cards alone has no theme decks to read, so every target is the default table's and says so", () => {
+  test("ISC-51 (DT-6.12): a plan of priority cards alone is read under the theme they fit best, which sets the targets when covered, and the basis says it was inferred", () => {
     const d = diagnose(store, { ...teysaDeck, plan: { priorities: ["Blood Artist", "Viscera Seer"] } });
+    const inferred = d.plan.inferred?.theme;
+    expect(inferred).toBeTruthy();
+    expect(d.roles.map((r) => r.role)).toEqual(ROLES);
+    for (const r of d.roles) {
+      expect(r.source).toBe("plan");
+      expect(r.basis).toContain(`${inferred} decks, the theme inferred from the priority cards`);
+      expect(r.target).toBe(Math.round(r.expected!));
+    }
+  }, 60_000);
+
+  test("ISC-51: a colorless commander's card plan has no theme whose commanders share its colors, so every target stays the default table's", () => {
+    // a colorless commander shares no color with a theme's commanders, so no theme sets its targets: the default table does
+    const d = diagnose(store, { commander: "Karn, Silver Golem", decklist: "1 Karn, Silver Golem\n1 Sol Ring\n1 Mind Stone", plan: { priorities: ["Sol Ring"] } });
     expect(d.roles.map((r) => [r.role, r.target, r.source])).toEqual(ROLES.map((r) => [r, DEFAULT_TARGETS.targets[r], "default"]));
     for (const r of d.roles) expect(r.expected).toBeUndefined();
   }, 60_000);
@@ -310,9 +323,9 @@ describe("role targets from the plan (ISC-50 to ISC-52)", () => {
     const d = diagnose(store, { ...teysaDeck, plan: ARISTOCRATS });
     expect(d.under.map((r) => r.role)).not.toContain("counterspell");
     expect(d.roles.find((r) => r.role === "counterspell")).toMatchObject({ count: 0, target: 0, source: "plan" });
-    // under the default table the same deck is short on counterspells: the plan is what changes it
-    const byDefault = diagnose(store, { ...teysaDeck, plan: { priorities: ["Blood Artist"] } });
-    expect(byDefault.under.find((r) => r.role === "counterspell")).toMatchObject({ count: 0, target: 6, source: "default" });
+    // under the default table the same deck would be short on counterspells (0 against 6): the plan is what changes it
+    expect(DEFAULT_TARGETS.targets.counterspell).toBe(6);
+    expect(d.roles.find((r) => r.role === "counterspell")!.count).toBeLessThan(DEFAULT_TARGETS.targets.counterspell);
   }, 60_000);
 
   test("ISC-50: Namor under a Spellslinger plan flags counterspells over and removal under, each with count and target", () => {

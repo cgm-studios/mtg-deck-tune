@@ -281,3 +281,91 @@ export function checkNoToolTalk(t: Transcript): CheckResult {
   }
   return { pass: details.length === 0, details: details.length ? details : ["no tool or code vocabulary in any reply"] };
 }
+
+// ISC-83 (code probe for the no-overfitting constraint): product code names no specific commander or card as a rule, a
+// constant or a branch. A card name in a string literal is how such a rule is written (`if (name === "...")`, a table
+// keyed by names, a list of exempt cards), so the check reads every string literal of the product source and looks for
+// card names from the store. Comments are not literals and are never read; a regular expression's source is read as one.
+
+/** The text of every string literal in some TypeScript source (single, double and template literals, the static parts of
+ * a template each as their own, and the source of every regular expression), skipping comments. A lexer, not a parser:
+ * it knows what a slash after an identifier or a closing bracket means (division) against one after an operator (a
+ * regex). */
+export function stringLiterals(src: string): string[] {
+  const out: string[] = [];
+  const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^]$/;
+  let last = ""; // the last significant token's tail, to tell a regex from a division
+  const templ = (i: number): number => {
+    // i is just past the opening backtick or a closing `}` of a substitution; read static text up to `${` or the closing backtick
+    let text = "";
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (c === "\\") { text += src[i + 1] ?? ""; i++; continue; }
+      if (c === "`") { out.push(text); return i + 1; }
+      if (c === "$" && src[i + 1] === "{") {
+        out.push(text); text = "";
+        i = code(i + 2, true);
+        i--; // the loop's i++ steps over the position code() returned (just past the closing brace)
+        continue;
+      }
+      text += c;
+    }
+    return i;
+  };
+  const code = (start: number, inSubst: boolean): number => {
+    let depth = 0;
+    let i = start;
+    for (; i < src.length; i++) {
+      const c = src[i], n = src[i + 1];
+      if (c === "/" && n === "/") { while (i < src.length && src[i] !== "\n") i++; continue; }
+      if (c === "/" && n === "*") { i = src.indexOf("*/", i + 2); if (i < 0) return src.length; i++; continue; }
+      if (c === "'" || c === '"') {
+        let text = "";
+        for (i++; i < src.length && src[i] !== c && src[i] !== "\n"; i++) { if (src[i] === "\\") { text += src[i + 1] ?? ""; i++; } else text += src[i]; }
+        out.push(text); last = "s"; continue;
+      }
+      if (c === "`") { i = templ(i + 1) - 1; last = "s"; continue; }
+      if (c === "/" && (last === "" || REGEX_AFTER.test(last) || /(?:return|typeof|case|in|of)$/.test(last))) {
+        let cls = false, body = "";
+        for (i++; i < src.length && src[i] !== "\n"; i++) {
+          if (src[i] === "\\") { body += src[i] + (src[i + 1] ?? ""); i++; continue; }
+          if (src[i] === "[") cls = true;
+          else if (src[i] === "]") cls = false;
+          else if (src[i] === "/" && !cls) break;
+          body += src[i];
+        }
+        out.push(body); last = "r"; continue;
+      }
+      if (inSubst) {
+        if (c === "{") depth++;
+        else if (c === "}") { if (depth === 0) return i + 1; depth--; }
+      }
+      if (!/\s/.test(c)) last = /[\w$]/.test(c) ? (/[\w$]$/.test(last) ? last + c : c) : c;
+    }
+    return i;
+  };
+  code(0, false);
+  return out;
+}
+
+/** Card names (and each face of a multi-face card) found in string literals: a multi-word name anywhere in a literal, at
+ * word edges and in the card's own capitals; a one-word name only when it is the whole literal. Names `scannableNames`
+ * drops (one word under five letters) never count. `names` comes from scannableNames over the card store. */
+export function cardNamesInLiterals(literals: string[], names: string[]): { name: string; literal: string }[] {
+  const hits: { name: string; literal: string }[] = [];
+  const multi = names.filter((n) => n.includes(" "));
+  const single = new Set(names.filter((n) => !n.includes(" ")));
+  for (const literal of new Set(literals)) {
+    const whole = literal.trim();
+    if (single.has(whole)) hits.push({ name: whole, literal });
+    for (const n of multi) {
+      let at = literal.indexOf(n);
+      while (at >= 0) {
+        const before = literal[at - 1], after = literal[at + n.length];
+        if (!(before && /\w/.test(before)) && !(after && /\w/.test(after))) { hits.push({ name: n, literal }); break; }
+        at = literal.indexOf(n, at + 1);
+      }
+    }
+  }
+  return hits;
+}
