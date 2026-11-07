@@ -14,6 +14,7 @@ import { loadSpace, normName as normNameOf, parseDecklist, resolveName } from ".
 import { cardDetails, deckStats, findCards, findTags, neighbors, openStore, ToolInputError, type FindCardsInput, type FoundCard, type Store } from "./deck-tools";
 import { acceptSwap, LABELS_PATH, rejectSwap, swapCandidates } from "./swap-tools";
 import { diagnose } from "./diagnose";
+import { shortlist } from "./shortlist";
 import { createDeckServer } from "./mcp";
 import { loadRoleIndex, roleSheet } from "./roles";
 import { readJSONL } from "./scryfall";
@@ -462,6 +463,15 @@ const DATA_STRINGS: Record<string, string> = {
   "diagnose.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
   "diagnose.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
   "diagnose.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "shortlist.commander": "a card name, resolved in TypeScript (exact or front face only)",
+  "shortlist.deckFile": "a file path, read from disk",
+  "shortlist.decklist": "decklist text, parsed in TypeScript",
+  "shortlist.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "shortlist.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "shortlist.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "shortlist.problem.role": "a role name from roles.json, checked in TypeScript (unknown names are an error)",
+  "shortlist.problem.engineGap": "an event in words, matched in TypeScript against what the deck's payoffs wait on (unknown words are an error)",
+  "shortlist.out": "a card name, resolved in TypeScript (exact or front face only) and checked to be in the deck",
   "swap_candidates.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
   "swap_candidates.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
   "swap_candidates.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
@@ -487,9 +497,9 @@ const DATA_STRINGS: Record<string, string> = {
 };
 const SQLISH = /sql|query|where|statement|clause|expr|order_?by|raw/i;
 
-test("no raw sql: the MCP has exactly its ten tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
+test("no raw sql: the MCP has exactly its eleven tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
   const { tools } = await client.listTools();
-  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "shortlist", "swap_candidates", "tags"]);
   const strings: string[] = [];
   const walk = (s: JsonSchema & { enum?: unknown[]; propertyNames?: JsonSchema; additionalProperties?: JsonSchema | boolean }, path: string) => {
     if (s.type === "string" && !s.enum) strings.push(path);
@@ -541,7 +551,7 @@ test("stdio smoke: .mcp.json registers mtg-deck, and the registered command answ
   await stdio.connect(new StdioClientTransport({ command: entry.command, args: entry.args, cwd: root, stderr: "pipe" }));
   try {
     const { tools } = await stdio.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "shortlist", "swap_candidates", "tags"]);
     const res = await stdio.callTool({ name: "find_cards", arguments: { colorIdentity: "U", types: ["Legendary", "Creature"], subtypes: ["Merfolk"], keywords: ["Flying"], manaValue: { max: 3 } } });
     expect(res.isError).toBeFalsy();
     const out = res.structuredContent as { cards: { name: string }[] };
@@ -1114,3 +1124,70 @@ test("diagnose over MCP: the tool answers with the same result as the function; 
   expect(bad.isError).toBe(true);
   expect((bad.content as { text: string }[])[0].text).toContain("Spellslinger");
 }, 60_000);
+
+// ---------- shortlist (DT-6.5) ----------
+
+test("ISC-41: the shortlist tool's input schema takes the plan (themes, priority cards, themes to avoid) and the problem, and a call without a plan is refused", async () => {
+  const schema = (await toolSchema("shortlist")) as JsonSchema & { required?: string[] };
+  expect(schema.required).toEqual(expect.arrayContaining(["commander", "plan", "problem"]));
+  const plan = schema.properties!.plan;
+  expect(Object.keys(plan.properties ?? {}).sort()).toEqual(["avoid", "priorities", "themes"]);
+  for (const k of ["avoid", "priorities", "themes"]) expect(plan.properties![k].type).toBe("array");
+  // the problem is one of three shapes: a role, an engine gap's words, or cards off the plan
+  const alts = (schema.properties!.problem.anyOf ?? []).map((a) => Object.keys(a.properties ?? {}).join(","));
+  expect(alts.sort()).toEqual(["engineGap", "offPlan", "role"]);
+  const base = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", problem: { role: "removal" } };
+  const noPlan = await client.callTool({ name: "shortlist", arguments: base });
+  expect(noPlan.isError).toBe(true);
+  const emptyPlan = await client.callTool({ name: "shortlist", arguments: { ...base, plan: {} } });
+  expect(emptyPlan.isError).toBe(true);
+  expect((emptyPlan.content as { text: string }[])[0].text).toMatch(/at least one theme or one priority card/);
+});
+
+test("shortlist over MCP: the tool answers with the function's result; an unknown role or engine event is a tool error listing what is known", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: NAMOR_PLAN, problem: { role: "removal" } };
+  const res = await client.callTool({ name: "shortlist", arguments: args });
+  expect(res.isError).toBeFalsy();
+  expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(shortlist(store, args))));
+  const role = await client.callTool({ name: "shortlist", arguments: { ...args, problem: { role: "removals" } } });
+  expect(role.isError).toBe(true);
+  expect((role.content as { text: string }[])[0].text).toMatch(/unknown role "removals".*removal/);
+  const gap = await client.callTool({ name: "shortlist", arguments: { ...args, problem: { engineGap: "a dragon roaring" } } });
+  expect(gap.isError).toBe(true);
+  expect((gap.content as { text: string }[])[0].text).toMatch(/no deck card pays off on "a dragon roaring".*casting a spell/);
+  const out = await client.callTool({ name: "shortlist", arguments: { ...args, out: "Lightning Bolt" } });
+  expect(out.isError).toBe(true);
+  expect((out.content as { text: string }[])[0].text).toMatch(/Lightning Bolt is not in the deck/);
+}, 60_000);
+
+test("ISC-67: a swap built from a Teysa shortlist carries the deck before and after, plan fit included, and both sides agree with deck_stats on the lists themselves", async () => {
+  const TEYSA = { commander: "Teysa Karlov", deckFile: "fixtures/teysa.txt" };
+  const plan = { themes: ["Aristocrats"] };
+  // the card to swap out: the first off-plan card the diagnosis names
+  const off = diagnose(store, { ...TEYSA, plan }).offPlan[0].name;
+  const res = await client.callTool({ name: "shortlist", arguments: { ...TEYSA, plan, problem: { engineGap: "a creature dying" }, out: off } });
+  expect(res.isError).toBeFalsy();
+  const r = res.structuredContent as { before: { onPlan: number; planOf: number; cards: number }; out: { name: string; planFit: number }; cards: { name: string; after: { onPlan: number; planOf: number; cards: number; averageManaValue: number; roleCounts: Record<string, number> }; delta: { onPlan: number; cards: number }; planGain: number; evidence: { planFit: { score: number } } }[] };
+  expect(r.out).toMatchObject({ name: off, planFit: 0 });
+  // before: deck_stats on the list as it is
+  const text = readFileSync(new URL("../fixtures/teysa.txt", import.meta.url), "utf8");
+  const statsBefore = deckStats(store, { ...TEYSA, plan }).planFit!;
+  expect(r.before).toMatchObject({ onPlan: statsBefore.onPlan, planOf: statsBefore.of, cards: 100 });
+  const swapped = r.cards.filter((c) => c.evidence.planFit.score > 0).slice(0, 3);
+  expect(swapped.length).toBe(3);
+  for (const c of swapped) {
+    // after: deck_stats on the list with the swap written into it by hand
+    const lines = text.split("\n");
+    const k = lines.findIndex((l) => l.replace(/^\d+\s+/, "").trim() === off);
+    expect(k).toBeGreaterThanOrEqual(0);
+    lines[k] = `1 ${c.name}`;
+    const after = deckStats(store, { commander: TEYSA.commander, decklist: lines.join("\n"), plan });
+    expect([c.name, c.after]).toMatchObject([c.name, { cards: 100, onPlan: after.planFit!.onPlan, planOf: after.planFit!.of, averageManaValue: after.averageManaValue, roleCounts: after.roleCounts }]);
+    // an on-plan card in for an off-plan one: one more card on plan, and the plan gain is the card's own fit
+    expect([c.name, c.delta.onPlan, c.delta.cards]).toEqual([c.name, 1, 0]);
+    expect(c.planGain).toBeCloseTo(c.evidence.planFit.score, 3);
+  }
+  // without out, each card is an add: no after, and the delta adds one card
+  const adds = shortlist(store, { ...TEYSA, plan, problem: { engineGap: "a creature dying" } });
+  for (const c of adds.cards) { expect(c.after).toBeUndefined(); expect(c.delta.cards).toBe(1); }
+}, 120_000);

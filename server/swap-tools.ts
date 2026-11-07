@@ -116,7 +116,7 @@ export type StatsDelta = {
   curve: Record<string, number>; roleCounts: Record<string, number>; pipLoad: Record<string, number>;
 };
 
-const swapStats = (n: DeckNumbers): SwapStats => ({
+export const swapStats = (n: DeckNumbers): SwapStats => ({
   cards: n.cards, nonland: n.nonland, averageManaValue: n.averageManaValue, curve: n.curve, roleCounts: n.roleCounts, pipLoad: n.pipLoad,
   onPlan: n.planFit?.onPlan ?? null, planOf: n.planFit?.of ?? null,
 });
@@ -127,13 +127,13 @@ function changed(a: Record<string, number>, b: Record<string, number>): Record<s
   return out;
 }
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
-const statsDelta = (a: SwapStats, b: SwapStats): StatsDelta => ({
+export const statsDelta = (a: SwapStats, b: SwapStats): StatsDelta => ({
   cards: b.cards - a.cards, averageManaValue: round3(b.averageManaValue - a.averageManaValue), onPlan: a.onPlan === null || b.onPlan === null ? null : b.onPlan - a.onPlan,
   curve: changed(a.curve, b.curve), roleCounts: changed(a.roleCounts, b.roleCounts), pipLoad: changed(a.pipLoad, b.pipLoad),
 });
 
 // The list with one copy of `out` taken away and one `in` added (either may be absent: a cut or an add).
-function applySwap(entries: DeckEntry[], out: SpaceCard | null, inCard: SpaceCard | null): DeckEntry[] {
+export function applySwap(entries: DeckEntry[], out: SpaceCard | null, inCard: SpaceCard | null): DeckEntry[] {
   const next: DeckEntry[] = [];
   let taken = !out;
   for (const e of entries) {

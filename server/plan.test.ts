@@ -195,26 +195,9 @@ describe("the same deck and plan give the same diagnosis (ISC-45.1)", () => {
     const { diagnose } = await import("./diagnose");
     const cold = openStore(DB_PATH);
     try {
-      const lists = (["namor.txt", "teysa.txt"] as const).map((f) => readFileSync(new URL(`../fixtures/${f}`, import.meta.url), "utf8").split("\n").map((l) => l.trim()).filter((l) => /^\d+ /.test(l)));
-      const commanders = ["Namor the Sub-Mariner", "Teysa Karlov"];
-      const extras = commanders.map((c) => {
-        const ci = new Set(store.space.cards.get(store.names.find((n) => n.name === c)!.oracleId)!.ci);
-        return [...store.space.cards.values()].filter((x) => !x.land && x.ci.every((k) => ci.has(k))).map((x) => x.name).sort().slice(0, 4000);
-      });
-      const THEMES = ["Aristocrats", "Tokens", "Spellslinger", "+1/+1 Counters", "Voltron"];
-      const arb = fc.integer({ min: 0, max: 1 }).chain((k) => fc.record({
-        k: fc.constant(k),
-        lines: fc.subarray(lists[k], { minLength: 10, maxLength: lists[k].length }),
-        extra: fc.subarray(extras[k], { maxLength: 4 }),
-        themes: fc.subarray(THEMES, { maxLength: 2 }),
-        priorities: fc.subarray(lists[k].map((l) => l.replace(/^\d+ /, "")).filter((n) => n !== commanders[k]).slice(0, 30), { maxLength: 2 }),
-        avoid: fc.subarray(THEMES, { maxLength: 1 }),
-        seed: fc.integer(),
-      })).filter((r) => r.themes.length + r.priorities.length > 0 && !r.avoid.some((a) => r.themes.includes(a)));
-      fc.assert(fc.property(arb, (r) => {
-        const lines = [...r.lines, ...r.extra.map((n) => `1 ${n}`)];
-        const plan = { ...(r.themes.length ? { themes: r.themes } : {}), ...(r.priorities.length ? { priorities: r.priorities } : {}), ...(r.avoid.length ? { avoid: r.avoid } : {}) };
-        const input = { commander: commanders[r.k], decklist: lines.join("\n"), plan };
+      fc.assert(fc.property(deckAndPlan(fc), (r) => {
+        const { lines, plan } = deckOf(r);
+        const input = { commander: COMMANDERS[r.k], decklist: lines.join("\n"), plan };
         let a: unknown;
         try { a = diagnose(store, input); } catch (e) {
           // a priority card without graph data, or an avoided theme too thin to profile, is the caller's to fix: the same error every time
@@ -232,6 +215,84 @@ describe("the same deck and plan give the same diagnosis (ISC-45.1)", () => {
     }
   }, 300_000);
 });
+
+describe("the same deck, plan and problem give the same shortlist (ISC-45.2)", () => {
+  // The same pool of decks and plans as ISC-45.1, each with a random problem (a role, an engine event, or cards off the
+  // plan) and random mana value and price ceilings. Each run asks for the shortlist twice on one store, once more with the
+  // deck's lines shuffled, and once on a second store opened cold (its own index, link memos and caches): all four must
+  // agree card for card, labels, links and numbers included. A shortlist call is a few hundred milliseconds once a deck's
+  // links are read, so the run count matches ISC-45.1's.
+  test("ISC-45.2: for random decks, plans and problems, repeated, reordered and cold-store shortlists are identical", async () => {
+    const fc = (await import("fast-check")).default;
+    const { shortlist } = await import("./shortlist");
+    const EVENTS = ["a creature dying", "casting a spell", "drawing a card", "making a token", "something entering the battlefield"];
+    const problem = fc.oneof(
+      fc.constantFrom(...store.roles.roleNames).map((role) => ({ role })),
+      fc.constantFrom(...EVENTS).map((engineGap) => ({ engineGap })),
+      fc.constant({ offPlan: true as const }),
+    );
+    const ceilings = fc.record({
+      mv: fc.option(fc.integer({ min: 1, max: 12 }).map((x) => x / 2), { nil: undefined, freq: 3 }),
+      usd: fc.option(fc.integer({ min: 25, max: 4000 }).map((x) => x / 100), { nil: undefined, freq: 3 }),
+    });
+    const cold = openStore(DB_PATH);
+    let answered = 0, runs = 0;
+    try {
+      fc.assert(fc.property(deckAndPlan(fc), problem, ceilings, (r, p, c) => {
+        runs++;
+        const { lines, plan } = deckOf(r);
+        const input = { commander: COMMANDERS[r.k], decklist: lines.join("\n"), plan, problem: p, ...(c.mv !== undefined ? { maxManaValue: c.mv } : {}), ...(c.usd !== undefined ? { maxPrice: c.usd } : {}) };
+        let a: unknown;
+        try { a = shortlist(store, input); } catch (e) {
+          // an engine event the deck has no payoff on, or a priority card without graph data: the same error every time
+          if (!(e instanceof ToolInputError)) throw e;
+          expect(() => shortlist(store, input)).toThrow(e.message);
+          expect(() => shortlist(cold, input)).toThrow(e.message);
+          return;
+        }
+        answered++;
+        const shuffled = [...lines].sort((x, y) => ((hash(x + r.seed) - hash(y + r.seed)) || (x < y ? -1 : 1)));
+        expect(shortlist(store, input)).toEqual(a);
+        expect(shortlist(store, { ...input, decklist: shuffled.join("\n") })).toEqual(a);
+        expect(shortlist(cold, input)).toEqual(a);
+      }), { numRuns: 12, seed: 4502 });
+    } finally {
+      cold.db.close();
+    }
+    console.log(`ISC-45.2: ${runs} runs, ${answered} answered`);
+    expect(answered).toBeGreaterThan(runs / 2);
+  }, 300_000);
+});
+
+// ---------- random decks and plans, shared by ISC-45.1 and ISC-45.2 ----------
+// Random subsets of the Namor and Teysa lists plus up to four random in-color cards, under random plans drawn from five
+// usable themes, each deck's own cards as priorities, and themes to avoid.
+const COMMANDERS = ["Namor the Sub-Mariner", "Teysa Karlov"];
+const THEMES = ["Aristocrats", "Tokens", "Spellslinger", "+1/+1 Counters", "Voltron"];
+type FastCheck = typeof import("fast-check").default;
+
+function deckAndPlan(fc: FastCheck) {
+  const lists = (["namor.txt", "teysa.txt"] as const).map((f) => readFileSync(new URL(`../fixtures/${f}`, import.meta.url), "utf8").split("\n").map((l) => l.trim()).filter((l) => /^\d+ /.test(l)));
+  const extras = COMMANDERS.map((c) => {
+    const ci = new Set(store.space.cards.get(store.names.find((n) => n.name === c)!.oracleId)!.ci);
+    return [...store.space.cards.values()].filter((x) => !x.land && x.ci.every((k) => ci.has(k))).map((x) => x.name).sort().slice(0, 4000);
+  });
+  return fc.integer({ min: 0, max: 1 }).chain((k) => fc.record({
+    k: fc.constant(k),
+    lines: fc.subarray(lists[k], { minLength: 10, maxLength: lists[k].length }),
+    extra: fc.subarray(extras[k], { maxLength: 4 }),
+    themes: fc.subarray(THEMES, { maxLength: 2 }),
+    priorities: fc.subarray(lists[k].map((l) => l.replace(/^\d+ /, "")).filter((n) => n !== COMMANDERS[k]).slice(0, 30), { maxLength: 2 }),
+    avoid: fc.subarray(THEMES, { maxLength: 1 }),
+    seed: fc.integer(),
+  })).filter((r) => r.themes.length + r.priorities.length > 0 && !r.avoid.some((a) => r.themes.includes(a)));
+}
+
+function deckOf(r: { lines: string[]; extra: string[]; themes: string[]; priorities: string[]; avoid: string[] }) {
+  const lines = [...r.lines, ...r.extra.map((n) => `1 ${n}`)];
+  const plan = { ...(r.themes.length ? { themes: r.themes } : {}), ...(r.priorities.length ? { priorities: r.priorities } : {}), ...(r.avoid.length ? { avoid: r.avoid } : {}) };
+  return { lines, plan };
+}
 
 /** A small string hash (FNV-1a), for a seeded shuffle. */
 function hash(s: string): number {

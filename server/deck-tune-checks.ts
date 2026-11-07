@@ -257,11 +257,12 @@ export function checkSearchesNotDeferred(t: Transcript): CheckResult {
 
 // Tool and code vocabulary a reply to the player never carries (SKILL.md "Talk Magic, not tools"). Each entry is a name the
 // MCP or the repo uses and a player would not: tool names, tool arguments and JSON fields, file paths, tag talk, search
-// match counts and the plumbing words.
+// match counts and the plumbing words. "diagnose" and "shortlist" are tool names and also plain words a player says, so
+// they count only in backticks.
 const TOOL_TALK: [string, RegExp][] = [
-  ["tool name", /\b(?:deck_stats|swap_candidates|find_cards|accept_swap|reject_swap|commander_profile)\b/],
+  ["tool name", /\b(?:deck_stats|swap_candidates|find_cards|accept_swap|reject_swap|commander_profile)\b|`(?:diagnose|shortlist)`/],
   ["tool lever in backticks", new RegExp("`(?:" + LEVERS.join("|") + ")`")],
-  ["tool argument or field", /\b(?:belowTarget|dropsRole|deckFile|decklist|colorIdentity|manaValue)\b|`(?:card|targets|tags|neighbors)`/],
+  ["tool argument or field", /\b(?:belowTarget|dropsRole|deckFile|decklist|colorIdentity|manaValue|engineGap|offPlan|maxManaValue|maxPrice|planPartners|planGain|genericLinks|noLinks)\b|`(?:card|targets|tags|neighbors)`/],
   ["file path", /(?:^|[\s(`])(?:app|labels|evals|data)\/\S+|\S+\.(?:json|jsonl|ts|yaml)\b/],
   ["tag talk", /\b(?:Tagger|tags?)\b/i],
   ["match count", /\b\d+\s+match(?:es|ed)?\b/i],

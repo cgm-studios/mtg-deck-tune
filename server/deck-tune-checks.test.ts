@@ -228,6 +228,16 @@ describe("ISC-29: no reply carries tool or code vocabulary", () => {
     expect(checkLeversBeforeSwaps(t).pass).toBe(true);
   });
 
+  test("ISC-29 flags the diagnose and shortlist tools by name and their arguments, but not the words diagnose or shortlist in a player's sentence", () => {
+    const said = (line: string) => checkNoToolTalk(editAssistant(real, () => line));
+    for (const line of ["I ran `shortlist` for removal.", "Calling `diagnose` now.", "With engineGap set to dying:", "Under maxManaValue 3,", "offPlan cards first", "maxPrice 5 keeps it cheap", "its planPartners count is 4"]) {
+      expect([line, said(line).pass]).toEqual([line, false]);
+    }
+    for (const line of ["Here's a shortlist of removal that fits.", "Let me diagnose the deck against that plan first.", "Three cards on the shortlist feed your death triggers."]) {
+      expect([line, said(line).pass]).toEqual([line, true]);
+    }
+  });
+
   test("SKILL.md's lever table names each lever exactly as the checks do", async () => {
     const skill = await Bun.file(new URL("../plugin/skills/deck-tune/SKILL.md", import.meta.url).pathname).text();
     for (const [lever, name] of Object.entries(LEVER_NAMES)) expect(skill).toContain(`| \`${lever}\` | ${name} |`);

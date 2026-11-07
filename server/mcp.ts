@@ -12,6 +12,7 @@ import { diagnose, diagnoseShape } from "./diagnose";
 import {
   cardDetails, cardShape, deckStats, deckStatsShape, findCards, findCardsShape, findTags, neighbors, neighborsShape, openStore, tagsShape, type Store,
 } from "./deck-tools";
+import { shortlist, shortlistShape } from "./shortlist";
 import { ensureStore } from "./store";
 import { acceptSwap, acceptSwapShape, rejectSwap, rejectSwapShape, swapCandidates, swapCandidatesShape } from "./swap-tools";
 
@@ -93,6 +94,20 @@ export function createDeckServer(store: Store | Promise<Store>): McpServer {
       "the pasted list. Same deck and plan, same answer.",
     inputSchema: diagnoseShape,
   }, async (args) => withStore(store, (s) => diagnose(s, args)));
+  server.registerTool("shortlist", {
+    title: "Shortlist for one problem",
+    description: "About 30 cards to add for one diagnosed problem, under the player's confirmed plan (`plan`, required). `problem` is " +
+      "one of: {role} (cards holding a deck role), {engineGap} (cards that make an event happen for the deck's payoffs, in the words " +
+      "diagnose gives an engine gap's mechanic, e.g. \"a creature dying\"), or {offPlan: true} (cards that fit the plan, to replace " +
+      "cards off it or doing the least). Every card is commander-legal, inside the commander's color identity and outside the deck, " +
+      "and at or under `maxManaValue` and `maxPrice` when given. Each card is labeled by where it came from, with the evidence: " +
+      "fits this commander (the commander's EDHREC synergy), deeper cut (fit to the tags of the commander's decks), widely played " +
+      "(global EDHREC rank; at most 10 cards come in on popularity alone), engine partner (card graph links into the deck's cards " +
+      "that fit the plan). Each also carries its links into the deck by event, its plan fit, and what adding it changes in the deck's " +
+      "numbers; with `out` (a card in the deck), what swapping it in for that card changes, with the numbers after (`before` is " +
+      "given once). The list narrows the pool; it does not judge card quality. Same deck, plan and problem, same answer.",
+    inputSchema: shortlistShape,
+  }, async (args) => withStore(store, (s) => shortlist(s, args)));
   server.registerTool("neighbors", {
     title: "Card Space neighbors",
     description: "A card's nearest Card Space neighbors that a commander can play, nearest first, each with its similarity " +
