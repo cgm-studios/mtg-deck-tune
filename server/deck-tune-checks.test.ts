@@ -2,7 +2,9 @@
 // broken copy per check that must go red, so a check that passes everything cannot hide here.
 
 import { beforeAll, describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
 import {
+  cardNamesInLiterals, stringLiterals,
   checkLeversBeforeSwaps, checkNoSwapsWithoutPick, checkSearchesNotDeferred, checkNumbersBeforeSwaps, checkProposalsFromTools, checkReadsLabeled,
   checkNoToolTalk, LEVER_NAMES, leverLists, scannableNames, swapBlocks,
 } from "./deck-tune-checks";
@@ -242,4 +244,81 @@ describe("ISC-29: no reply carries tool or code vocabulary", () => {
     const skill = await Bun.file(new URL("../plugin/skills/deck-tune/SKILL.md", import.meta.url).pathname).text();
     for (const [lever, name] of Object.entries(LEVER_NAMES)) expect(skill).toContain(`| \`${lever}\` | ${name} |`);
   });
+});
+
+// DT-6.12, ISC-83 (the code probe for the no-overfitting constraint, Sage 2026-11-07): product code under server/ names no
+// specific commander or card as a rule, a constant or a branch. How it reads: every string literal (and regex source) of
+// every non-test, non-fixture server/**/*.ts file is checked against the card store's names. Comments are not read.
+// What counts as a hit, and what does not:
+//   multi-word names (and each face of a multi-face card)  a hit anywhere in a literal, at word edges, in the card's capitals
+//   one-word names                                         a hit only as the whole literal, in the card's capitals
+//   one-word names under five letters (Opt, Cut, Fog)      never: ordinary words (the same cut scannableNames makes)
+// Exempt: nothing but the documented examples in DOC_EXAMPLES, each a card named in a tool description's example, not in a
+// rule. The check is deliberately a floor, not a proof: a rule that names no card (a mana-value test that happens to match
+// one commander) is outside it, and ISC-82's measurement on commanders other than the probes is the other half.
+const SERVER = new URL("./", import.meta.url).pathname;
+const productFiles = (readdirSync(SERVER, { recursive: true }) as string[])
+  .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && !/fixture/i.test(f))
+  .sort();
+/** A card named inside a longer sentence of a tool description, as an example for the reader: not a rule. */
+const DOC_EXAMPLES: { file: string; name: string }[] = [
+  { file: "deck-tools.ts", name: "Fire // Ice" }, // the manaSymbols description: "Reads the front face's cost, so Fire // Ice is {1}{R}"
+];
+
+describe("ISC-83: product code names no commander or card as a rule", () => {
+  test("ISC-83: the string-literal reader sees strings, templates and regex sources, and skips comments and division", () => {
+    const src = [
+      'const a = "one"; // "comment string"',
+      "const b = 'two' /* \"block\" */ + 'th\\'ree';",
+      "const c = `pre ${f(\"inner\")} mid ${`nested ${g('deep')}`} end`;",
+      "const d = x / 2 / y; const e = /re\"gex[/]x/.test(s);",
+      "const f = [1, 2].map((n) => n / 2); const g = a ? /yes/ : 'no';",
+    ].join("\n");
+    expect(stringLiterals(src)).toEqual(["one", "two", "th'ree", "pre ", "inner", " mid ", "nested ", "deep", "", " end", 're"gex[/]x', "yes", "no"]);
+  });
+
+  test("ISC-83: the matcher takes whole one-word names and multi-word names at word edges, in the card's capitals only", () => {
+    const n = ["Sol Ring", "Teysa Karlov", "Fire // Ice", "Doubling Season", "Harvest"];
+    const hit = (...lits: string[]) => cardNamesInLiterals(lits, n).map((h) => h.name);
+    expect(hit("Sol Ring")).toEqual(["Sol Ring"]);
+    expect(hit("if Teysa Karlov is the commander")).toEqual(["Teysa Karlov"]);
+    expect(hit("Harvest")).toEqual(["Harvest"]);
+    expect(hit(" Doubling Season ")).toEqual(["Doubling Season"]);
+    expect(hit("a Sol Ringer", "Sol Rings", "sol ring", "Teysa  Karlov", "the Harvest moon", "Teysa", "harvest")).toEqual([]);
+  });
+
+  test("ISC-83: no non-test, non-fixture server/**/*.ts string literal names a commander or card", () => {
+    expect(productFiles.length).toBeGreaterThanOrEqual(25);
+    expect(productFiles).toContain("plan.ts");
+    expect(productFiles).toContain("graph/strategy.ts");
+    expect(productFiles.some((f) => f.endsWith(".test.ts"))).toBe(false);
+    const hits = productFiles.flatMap((f) => cardNamesInLiterals(stringLiterals(readFileSync(SERVER + f, "utf8")), names)
+      .filter((h) => !DOC_EXAMPLES.some((d) => d.file === f && d.name === h.name))
+      .map((h) => `${f}: "${h.name}" in "${h.literal.slice(0, 100)}"`));
+    expect(hits).toEqual([]);
+    // the one documented example is still there and still seen, so the exemption cannot hide a different hit
+    const seen = productFiles.flatMap((f) => cardNamesInLiterals(stringLiterals(readFileSync(SERVER + f, "utf8")), names).map((h) => ({ file: f, name: h.name })));
+    expect(seen).toEqual(DOC_EXAMPLES);
+  });
+
+  test("ISC-83 goes red on a rule that names a card, in every product file and every way of writing one", () => {
+    const rules = [
+      'const RULE = "Teysa Karlov";',
+      'if (card.name === "Sol Ring") skip();',
+      'const EXEMPT = new Set(["Doubling Season", "Rhystic Study"]);',
+      "const msg = `${n} Sol Ring is a staple`;",
+      "const re = /Namor the Sub-Mariner/;",
+      "const table = { 'Sol Ring': 1 };",
+    ];
+    for (const f of productFiles) {
+      const src = readFileSync(SERVER + f, "utf8");
+      for (const rule of rules) {
+        // at the end of the file and at the start: the reader must be back in code state after the whole file
+        for (const mutant of [src + "\n" + rule + "\n", rule + "\n" + src]) {
+          const hits = cardNamesInLiterals(stringLiterals(mutant), names).filter((h) => !DOC_EXAMPLES.some((d) => d.file === f && d.name === h.name));
+          expect({ f, rule, caught: hits.length > 0 }).toEqual({ f, rule, caught: true });
+        }
+      }
+    }
+  }, 60_000);
 });

@@ -11,7 +11,7 @@ export const planShape = z.object({
   themes: z.array(z.string().min(1)).max(MAX_THEMES).optional()
     .describe(`EDHREC themes the deck is built around, by name (e.g. ["Aristocrats"]), at most ${MAX_THEMES}`),
   priorities: z.array(z.string().min(1)).max(MAX_PRIORITIES).optional()
-    .describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}`),
+    .describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}. With no theme, the plan is read under the usable theme these cards fit best, and the result names it`),
   avoid: z.array(z.string().min(1)).max(MAX_AVOID).optional()
     .describe(`EDHREC themes the player does not want (e.g. ["Tokens"] for a deck that should not go wide), at most ${MAX_AVOID}`),
 }).strict().describe("The player's confirmed plan: at least one theme or one priority card");

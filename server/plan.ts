@@ -14,6 +14,12 @@
 //              Tagger Card vectors, the commander counted double as its hooks are (COMMANDER_WEIGHT).
 // Weights are 0 to 1 (the heaviest is 1), rounded to 3 places; at most 25 hooks and 25 tags.
 //
+// A plan of priority cards and no theme is read under a theme (DT-6.12, ISA ISC-82): the usable theme whose profile the
+// priority cards fit best, named in the result (ThemeInference). A card plan alone reads too thin: its profile is only
+// what four or six cards happen to do, so most of a deck that plays the commander's way reads off plan. Inference
+// adds the theme to the plan's themes, so every tool that reads the plan (diagnose, deck_stats, the swap lever, the
+// shortlist) reads the same one; the priority cards stay priorities and their card profile still counts.
+//
 // Errors are ToolInputError, so a tool returns them as tool errors the skill can act on: an unknown theme lists the
 // closest known themes (UnknownThemeError, ISC-43); a known theme under the data floor says so with its commander count
 // (ThinThemeError, ISC-77), the case where the skill asks the player for keystone cards instead (ISC-78).
@@ -24,7 +30,7 @@ import { ToolInputError } from "./errors";
 import { planShape } from "./plan-input";
 import { byteOrder, cardProfile, COMMANDER_WEIGHT, hookWords, profileFit, profileMatcher, type HookProfile } from "./graph/profile";
 import { graphOf, type Graph } from "./graph/store-graph";
-import { STRATEGY_DEFAULTS, strategyProfile, themeCommanders } from "./graph/strategy";
+import { listThemes, qualifyingCommanders, resolveTheme, STRATEGY_DEFAULTS, strategyProfile, themeCommanders } from "./graph/strategy";
 
 export { ThinThemeError, UnknownThemeError } from "./graph/strategy";
 
@@ -53,6 +59,26 @@ export type ResolvedPlan = {
   cards: PlanProfile | null;
   /** One profile per avoided theme, in the order given. */
   avoid: PlanProfile[];
+  /** Set when the plan named priority cards and no theme: the theme the cards were read under (it is then the only entry
+   * of `themes`, and `theme` is null when no usable theme could be chosen). Null when the player named a theme. */
+  inference: ThemeInference | null;
+};
+
+/** Which theme a plan of cards alone was read under, and the facts it was chosen on. */
+export type ThemeInference = {
+  /** The theme the plan is read under; null when none could be chosen (`note` says why). */
+  theme: string | null;
+  /** The priority cards' mean plan fit against that theme (hooks plus tags, as planScorer scores a card), 3 places. */
+  fit: number;
+  /** How many of the priority cards fit it at all. */
+  fits: number;
+  /** The number of priority cards. */
+  of: number;
+  /** Usable themes with data for the commander's colors, not avoided, that were measured. */
+  considered: number;
+  /** The next best themes, best first, with their mean fit. */
+  runnersUp: { theme: string; fit: number }[];
+  note?: string;
 };
 
 // ---------- Tagger vectors ----------
@@ -134,9 +160,18 @@ function cardTags(store: Store, ids: number[]): ProfileTag[] {
 
 // ---------- resolving ----------
 
+// A theme's profile is a function of the store alone, so it is built once per store and theme.
+const THEME_PROFILES = new WeakMap<Store, Map<string, PlanProfile>>();
+
 function themeProfile(store: Store, graph: Graph, theme: string): PlanProfile {
+  const slug = resolveTheme(store.db, theme);
+  const per = THEME_PROFILES.get(store) ?? THEME_PROFILES.set(store, new Map()).get(store)!;
+  const hit = per.get(slug);
+  if (hit) return hit;
   const hooks = strategyProfile(store.db, graph, theme);
-  return { ...hooks, tags: themeTags(store, themeCommanders(store.db, theme).chosen) };
+  const out = { ...hooks, tags: themeTags(store, themeCommanders(store.db, theme).chosen) };
+  per.set(slug, out);
+  return out;
 }
 
 /** A priority card by exact or front-face name; a fuzzy guess would change what the plan means. */
@@ -173,12 +208,90 @@ export function resolvePlan(store: Store, input: ResolvePlanInput): ResolvedPlan
   const commander = { id: store.names.findIndex((n) => n.oracleId === card.id) + 1, name: card.name };
   const graph = graphOf(store.db);
   const priorities = names.map((n) => priorityCard(store, n));
-  return {
+  const out: ResolvedPlan = {
     commander: { ...commander, colorIdentity: card.ci.join("") },
     themes: themes.map((t) => themeProfile(store, graph, t)),
     priorities: priorities.map((p) => p.name),
     cards: priorities.length ? cardsProfile(store, graph, commander, priorities) : null,
     avoid: avoid.map((t) => themeProfile(store, graph, t)),
+    inference: null,
+  };
+  if (!themes.length) {
+    const { inference, profile } = inferTheme(store, { ...commander, ci: card.ci }, priorities, new Set(avoid.map((t) => resolveTheme(store.db, t))));
+    out.inference = inference;
+    if (profile) out.themes = [profile];
+  }
+  return out;
+}
+
+// ---------- the theme a plan of cards alone is read under (ISC-82) ----------
+// Candidates: the usable themes (graph/strategy.ts listThemes: the theme floor the plan itself enforces), minus themes the
+// plan avoids, that have data for the commander's colors: at least STRATEGY_DEFAULTS.minCommanders of the theme's
+// qualifying commanders share a color with the commander (the floor roleTargets applies in diagnose.ts, so a theme that
+// can set this deck's role targets is a theme it can be read under). A colorless commander is bounded by nothing: every
+// theme has colorless cards. Fit: each priority card is scored against the theme's profile by the plan fit the tools
+// read (hooks plus tags, planScorer); a theme's fit is the mean over the priority cards. The best fit wins; ties go to
+// the theme more of the priority cards fit, then to the earlier name in byte order. The commander is not scored: the
+// question is what the cards the player named say, and the commander's colors already bound the choice.
+// No constant here was tuned on a named commander. The two design choices (mean over cards, the 10-commander color
+// floor) were compared on three disjoint 40-commander draws of the store; the variants differed by a few commanders in
+// either direction (server/plan.test.ts, ISC-82, has the measured rate).
+
+/** A theme profile's card scorer, built once (reading a profile against the graph is the costly part). */
+const THEME_SCORERS = new WeakMap<PlanProfile, (cardId: number) => PlanFit>();
+function themeScorer(store: Store, graph: Graph, profile: PlanProfile): (cardId: number) => PlanFit {
+  return THEME_SCORERS.get(profile) ?? THEME_SCORERS.set(profile, profileScorer(store, graph, [profile])).get(profile)!;
+}
+
+const THEME_COLORS = new WeakMap<Store, Map<string, string[][]>>();
+
+/** The color identities of a theme's qualifying commanders, once per store and theme. */
+function themeCommanderColors(store: Store, slug: string): string[][] {
+  const per = THEME_COLORS.get(store) ?? THEME_COLORS.set(store, new Map()).get(store)!;
+  const hit = per.get(slug);
+  if (hit) return hit;
+  const out = qualifyingCommanders(store.db, slug).map(({ page }) => store.space.cards.get(store.names[page.cardId - 1].oracleId)!.ci);
+  per.set(slug, out);
+  return out;
+}
+
+/**
+ * Choose the usable theme whose profile the priority cards fit best. Deterministic: same store, commander colors and
+ * cards give the same answer, whatever order the cards come in. `avoid` holds theme slugs never to choose. Returns a
+ * null profile, with `theme: null` and a note, when no theme can be measured or no card fits any of them.
+ */
+export function inferTheme(
+  store: Store,
+  commander: { id: number; name: string; ci: readonly string[] },
+  priorities: { id: number; name: string }[],
+  avoid: ReadonlySet<string> = new Set(),
+): { inference: ThemeInference; profile: PlanProfile | null } {
+  const graph = graphOf(store.db);
+  const of = priorities.length;
+  const candidates = listThemes(store.db).filter((t) => t.usable && !avoid.has(t.slug)).filter((t) =>
+    !commander.ci.length || themeCommanderColors(store, t.slug).filter((ci) => ci.some((c) => commander.ci.includes(c))).length >= STRATEGY_DEFAULTS.minCommanders);
+  const measured: { theme: string; profile: PlanProfile; fit: number; fits: number }[] = [];
+  for (const t of candidates) {
+    let profile: PlanProfile;
+    try {
+      profile = themeProfile(store, graph, t.name);
+    } catch (e) {
+      if (e instanceof ThinThemeError) continue; // listed as usable, but no hook stands out: it has no profile to read under
+      throw e;
+    }
+    const score = themeScorer(store, graph, profile);
+    // summed smallest first, so the order the cards came in cannot move a float sum across a rounding boundary
+    const scores = priorities.map((p) => score(p.id).score).sort((a, b) => a - b);
+    measured.push({ theme: t.name, profile, fit: Math.round((scores.reduce((s, x) => s + x, 0) / of) * 1000) / 1000, fits: scores.filter((x) => x > 0).length });
+  }
+  measured.sort((a, b) => b.fit - a.fit || b.fits - a.fits || byteOrder(a.theme, b.theme));
+  const none = (note: string) => ({ inference: { theme: null, fit: 0, fits: 0, of, considered: measured.length, runnersUp: [], note }, profile: null });
+  if (!measured.length) return none("no usable theme with data for the commander's colors is left to read the cards under");
+  const best = measured[0];
+  if (!(best.fit > 0)) return none(`none of the ${measured.length} usable themes with data for the commander's colors has a hook or tag any priority card carries`);
+  return {
+    inference: { theme: best.theme, fit: best.fit, fits: best.fits, of, considered: measured.length, runnersUp: measured.slice(1, 4).map((m) => ({ theme: m.theme, fit: m.fit })) },
+    profile: best.profile,
   };
 }
 
@@ -198,21 +311,18 @@ export type PlanFit = { score: number; hooks: string[]; tags: string[] };
 const MAIN = 0.5;
 export type PlanScorer = (cardOracleId: string) => PlanFit;
 
-export function planScorer(store: Store, plan: ResolvedPlan): PlanScorer {
-  const graph = graphOf(store.db);
+/** The plan fit of cards (by store card id) against some profiles, taking the best profile; memoized per card. */
+function profileScorer(store: Store, graph: Graph, plan: PlanProfile[]): (cardId: number) => PlanFit {
   const { labels } = tagData(store);
-  const profiles = [...plan.themes, ...(plan.cards ? [plan.cards] : [])].map((p) => ({
+  const profiles = plan.map((p) => ({
     match: profileMatcher(graph.index, p),
     tags: new Map(p.tags.filter((t) => t.weight > MAIN).map((t) => [t.tag, t.weight])),
   }));
   const vector = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?");
-  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
-  const memo = new Map<string, PlanFit>();
-  return (oracleId) => {
-    const hit = memo.get(oracleId);
+  const memo = new Map<number, PlanFit>();
+  return (id) => {
+    const hit = memo.get(id);
     if (hit) return hit;
-    const id = idOf.get(oracleId);
-    if (id === undefined) throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
     const i = graph.positionOf.get(id);
     const row = vector.get(id) as { vector: Uint8Array } | null;
     const cardTagSet = new Set((row ? unpack(row.vector) : []).map(([t]) => labels.get(t)));
@@ -223,13 +333,31 @@ export function planScorer(store: Store, plan: ResolvedPlan): PlanScorer {
       const score = Math.round((fit.score + tags.reduce((s, [, w]) => s + w, 0)) * 1000) / 1000;
       if (score > best.score) best = { score, hooks: [...new Set(fit.counted.map((c) => `${c.side} ${hookWords(c.hook)}`))], tags: tags.map(([t]) => t) };
     }
-    memo.set(oracleId, best);
+    memo.set(id, best);
     return best;
   };
 }
 
+export function planScorer(store: Store, plan: ResolvedPlan): PlanScorer {
+  const graph = graphOf(store.db);
+  const score = profileScorer(store, graph, [...plan.themes, ...(plan.cards ? [plan.cards] : [])]);
+  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  return (oracleId) => {
+    const id = idOf.get(oracleId);
+    if (id === undefined) throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
+    return score(id);
+  };
+}
+
 /** The plan as the tools echo it back: theme names as the data spells them, priority cards by exact name. */
-export type PlanEcho = { themes: string[]; priorities: string[]; avoid: string[] };
+export type PlanEcho = {
+  /** The themes the player named. */
+  themes: string[];
+  priorities: string[];
+  avoid: string[];
+  /** Present when the plan named priority cards and no theme: the theme they were read under, and why (ISC-82). */
+  inferred?: ThemeInference;
+};
 /** What a tool needs to read plan fit: the confirmed plan as resolved, and its scorer. */
 export type PlanContext = { plan: PlanEcho; fit: PlanScorer };
 
@@ -237,7 +365,10 @@ const themeName = (p: PlanProfile) => (p.source.kind === "strategy" ? p.source.t
 
 /** A resolved plan as the tools echo it back. */
 export function planEcho(resolved: ResolvedPlan): PlanEcho {
-  return { themes: resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName) };
+  return {
+    themes: resolved.inference ? [] : resolved.themes.map(themeName), priorities: resolved.priorities, avoid: resolved.avoid.map(themeName),
+    ...(resolved.inference ? { inferred: resolved.inference } : {}),
+  };
 }
 
 /** A card's strongest Tagger tags (its Tagger Card vector, strongest first), at most n; none for a card with no kept tags. */

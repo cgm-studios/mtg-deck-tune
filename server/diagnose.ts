@@ -231,7 +231,8 @@ export function diagnose(store: Store, input: DiagnoseInput): DiagnoseResult {
 //                 share a color with it: the theme floor, applied to the decks that speak for these colors. A covered
 //                 theme sets every role, including to 0 (Aristocrats decks run no counterspells). Several covered
 //                 themes: the mean of their expected counts.
-//   default       a plan of priority cards alone, or no covered theme: server/role-targets.json.
+//   default       no covered theme: server/role-targets.json. A plan of priority cards alone is read under the theme they
+//                 fit best (plan.ts inferTheme, DT-6.12), which then sets the targets if it is covered; the basis says so.
 // This derivation is the builder's proposal for the open ISA question of how plan-shaped targets are derived (theme-deck
 // role shares, the commander's own page, or the owner's own numbers), to be checked against real lists.
 
@@ -286,7 +287,8 @@ function roleTargets(store: Store, plan: ResolvedPlan, deckCi: readonly string[]
   return store.roles.roleNames.map((role) => {
     if (covered.length) {
       const expected = Math.round((covered.reduce((s, c) => s + c.expected.get(role)!, 0) / covered.length) * 10) / 10;
-      const basis = covered.map((c) => `${c.name} decks (${c.sharing} of its ${c.of} commanders share a color with this deck)`).join("; ");
+      const inferred = plan.inference?.theme ? ", the theme inferred from the priority cards" : "";
+      const basis = covered.map((c) => `${c.name} decks${inferred} (${c.sharing} of its ${c.of} commanders share a color with this deck)`).join("; ");
       return { role, target: Math.round(expected), source: "plan" as const, basis, expected };
     }
     const why = thin.length ? thin.join("; ") : "the plan names no theme";
@@ -318,7 +320,8 @@ function offPlanCards(store: Store, plan: ResolvedPlan, cards: { id: number; ora
   const avoid = plan.avoid.map((p) => ({ name: p.source.kind === "strategy" ? p.source.theme : p.source.commander, fit: planScorer(store, { ...plan, themes: [p], cards: null }) }));
   const graph = graphOf(store.db);
   const name = planEcho(plan);
-  const planName = [...name.themes, ...(name.priorities.length ? [`${plan.commander.name} with ${name.priorities.join(", ")}`] : [])].join(" and ");
+  const planName = [...name.themes, ...(name.priorities.length ? [`${plan.commander.name} with ${name.priorities.join(", ")}`] : [])].join(" and ") +
+    (name.inferred?.theme ? ` read under ${name.inferred.theme}, the theme those cards fit best` : "");
   const leaning = [...leansOn.hooks, ...leansOn.tags].slice(0, 6).join(", ");
   return cards.filter((c) => fit(c.oracleId).score === 0).map((c) => {
     const does = strategyFacts(graph, c.id).map((k) => {

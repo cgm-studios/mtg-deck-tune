@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { openStore, ToolInputError, type Store } from "./deck-tools";
 import { DB_PATH } from "./paths";
-import { resolvePlan, ThinThemeError, UnknownThemeError, type PlanProfile } from "./plan";
+import { inferTheme, planEcho, resolvePlan, ThinThemeError, UnknownThemeError, type PlanProfile } from "./plan";
 
 type Recorded = {
   strategy: Record<string, PlanProfile>;
@@ -78,7 +78,8 @@ describe("card plans (ISC-44)", () => {
   for (const [key, rec] of Object.entries(REC.cards)) {
     test(`ISC-44: a priority-card plan (${key}) resolves to the graph's card profile for those cards`, () => {
       const plan = resolvePlan(store, { commander: rec.plan.commander, plan: { priorities: rec.plan.priorities } });
-      expect(plan.themes).toEqual([]);
+      expect(planEcho(plan).themes).toEqual([]); // no theme named; DT-6.12 reads the cards under an inferred one (plan.inference)
+      expect(plan.themes.length).toBe(plan.inference?.theme ? 1 : 0);
       expect(plan.priorities).toEqual(rec.plan.priorities);
       expect(hookSide(plan.cards!)).toEqual(hookSide(rec.profile));
     }, 60_000);
@@ -300,3 +301,130 @@ function hash(s: string): number {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
   return h >>> 0;
 }
+
+// DT-6.12: a plan of priority cards and no theme is read under the usable theme those cards fit best (ISA ISC-82).
+// The inference is general: no rule for a named commander or card (ISC-83). Namor and Teysa are probes here, never
+// the commanders the rate is measured on.
+describe("a plan of cards alone is read under the theme those cards fit best (ISC-82)", () => {
+  const NAMOR_KEYSTONES = ["Talrand, Sky Summoner", "Archmage of Runes", "Brineborn Cutthroat", "Hullbreaker Horror"];
+  const NAMOR_OFF_PLAN_BEFORE = 55; // of 63 nonland cards, measured by DT-6.4 on the keystone-only plan
+
+  test("ISC-82: the resolved plan names the theme it inferred, and reads under that theme's profile", () => {
+    const plan = resolvePlan(store, { commander: "Namor the Sub-Mariner", plan: { priorities: NAMOR_KEYSTONES } });
+    expect(plan.inference).not.toBeNull();
+    const inferred = plan.inference!.theme!;
+    expect(typeof inferred).toBe("string");
+    expect(plan.themes.map((t) => (t.source.kind === "strategy" ? t.source.theme : null))).toEqual([inferred]);
+    expect(plan.priorities).toEqual(NAMOR_KEYSTONES); // the priority cards still count as priorities
+    expect(plan.cards).not.toBeNull();
+    const echo = planEcho(plan);
+    expect(echo.themes).toEqual([]); // the player named no theme
+    expect(echo.priorities).toEqual(NAMOR_KEYSTONES);
+    expect(echo.inferred?.theme).toBe(inferred);
+    expect(echo.inferred!.runnersUp.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  test("ISC-82: a plan that names a theme is never inferred over, and an avoided theme is never inferred", () => {
+    const named = resolvePlan(store, { commander: "Namor the Sub-Mariner", plan: { themes: ["Tokens"], priorities: NAMOR_KEYSTONES } });
+    expect(named.inference).toBeNull();
+    expect(planEcho(named).themes).toEqual(["Tokens"]);
+    expect(planEcho(named).inferred).toBeUndefined();
+    const first = resolvePlan(store, { commander: "Namor the Sub-Mariner", plan: { priorities: NAMOR_KEYSTONES } }).inference!.theme!;
+    const avoided = resolvePlan(store, { commander: "Namor the Sub-Mariner", plan: { priorities: NAMOR_KEYSTONES, avoid: [first] } });
+    expect(avoided.inference!.theme).not.toBe(first);
+    expect(avoided.inference!.runnersUp.map((r) => r.theme)).not.toContain(first);
+  }, 60_000);
+
+  test("ISC-82: the same commander and cards infer the same theme, in any order of the priority cards", () => {
+    const a = resolvePlan(store, { commander: "Namor the Sub-Mariner", plan: { priorities: NAMOR_KEYSTONES } }).inference;
+    const b = resolvePlan(store, { commander: "Namor the Sub-Mariner", plan: { priorities: [...NAMOR_KEYSTONES].reverse() } }).inference;
+    expect(b).toEqual(a);
+  }, 60_000);
+
+  test("ISC-82: with no usable theme to read the cards under, the plan stays cards alone and the inference says why", async () => {
+    const { listThemes } = await import("./graph/strategy");
+    const everyUsable = new Set(listThemes(store.db).filter((t) => t.usable).map((t) => t.slug));
+    const { card } = (await import("./deck-tools")).resolveCommander(store, "Namor the Sub-Mariner");
+    const id = store.names.findIndex((n) => n.oracleId === card.id) + 1;
+    const cards = NAMOR_KEYSTONES.map((n) => { const i = store.names.findIndex((x) => x.name === n) + 1; return { id: i, name: n }; });
+    const none = inferTheme(store, { id, name: card.name, ci: card.ci }, cards, everyUsable);
+    expect(none.inference.theme).toBeNull();
+    expect(none.inference.considered).toBe(0);
+    expect(none.inference.note).toMatch(/usable/);
+    expect(none.profile).toBeNull();
+  }, 60_000);
+
+  // ----- the rate -----
+  // Commanders drawn from the store without choosing: every commander with at least 200 decks on its page (a page thin
+  // enough to have no stable top themes is not a test of anything) and four nonland, graph-readable keystones; in name
+  // order, every k-th, Namor and Teysa excluded. Keystones: the four highest-synergy cards of the commander's stored
+  // synergy list (positive synergy, at least minCardDecks decks, the pipeline's own floor). Hit: the inferred theme is
+  // one of the commander's three themes with the most decks.
+  const SAMPLE = 40;
+  function sample(): { id: number; name: string; keystones: string[] }[] {
+    const keys = store.db.query(`SELECT cc.card_id id, c.name FROM commander_cards cc JOIN cards c ON c.id = cc.card_id JOIN card_graph g ON g.card_id = c.id
+      WHERE cc.commander_id = ? AND cc.synergy > 0 AND cc.decks >= 3 AND c.is_land = 0 AND cc.card_id <> ? ORDER BY cc.synergy DESC, cc.card_id LIMIT 4`);
+    const cmds = (store.db.query("SELECT cm.card_id id, c.name FROM commanders cm JOIN cards c ON c.id = cm.card_id JOIN card_graph g ON g.card_id = cm.card_id WHERE cm.decks >= 200 ORDER BY cm.card_id").all() as { id: number; name: string }[])
+      .filter((c) => !/^(Namor|Teysa)\b/.test(c.name))
+      .map((c) => ({ ...c, keystones: (keys.all(c.id, c.id) as { name: string }[]).map((k) => k.name) }))
+      .filter((c) => c.keystones.length === 4);
+    const stride = Math.floor(cmds.length / SAMPLE);
+    return Array.from({ length: SAMPLE }, (_, i) => cmds[i * stride]);
+  }
+  const topThemes = (id: number, n: number) =>
+    (store.db.query("SELECT t.name FROM commander_themes ct JOIN themes t ON t.id = ct.theme_id WHERE ct.commander_id = ? ORDER BY ct.decks DESC, t.slug LIMIT ?").all(id, n) as { name: string }[]).map((t) => t.name);
+
+  test("ISC-82: over 40 commanders drawn from the store (Namor and Teysa excluded), the inferred theme is among the commander's top themes at the measured rate", () => {
+    const rows = sample();
+    expect(rows.length).toBe(SAMPLE);
+    expect(rows.some((r) => /^(Namor|Teysa)/.test(r.name))).toBe(false);
+    let hits3 = 0, hits5 = 0, inferred = 0;
+    const report: string[] = [];
+    for (const r of rows) {
+      const plan = resolvePlan(store, { commander: r.name, plan: { priorities: r.keystones } });
+      const theme = plan.inference?.theme ?? null;
+      if (theme !== null) inferred++;
+      const hit3 = theme !== null && topThemes(r.id, 3).includes(theme), hit5 = theme !== null && topThemes(r.id, 5).includes(theme);
+      if (hit3) hits3++;
+      if (hit5) hits5++;
+      report.push(`${r.name}: ${theme} (${hit3 ? "top 3" : hit5 ? "top 5" : "miss"})`);
+    }
+    console.log(`ISC-82 rate: ${hits3}/${SAMPLE} in the top 3, ${hits5}/${SAMPLE} in the top 5, ${inferred}/${SAMPLE} inferred\n${report.join("\n")}`);
+    // The floor is the rate measured on 2026-11-07 against this store (data release in server/store.json), on this
+    // draw: 24 of 40 in the top 3 (60%), 31 of 40 in the top 5, a theme chosen for all 40. For scale, on the same draw:
+    // picking at random among the usable themes plausible for the commander's colors (23 to 45 of the 50) would land
+    // in its top 3 for about 3 commanders, and always choosing the most-played theme (Tokens) for 11. Three disjoint
+    // 40-commander draws of the same store gave 24, 28 and 22 in the top 3, so the rate is about 55 to 70%, not a
+    // precise figure. A change that lowers the rate on this draw fails here; a new data release that moves it is a
+    // re-measurement, not a reason to lower the floor unexamined.
+    expect(inferred).toBe(SAMPLE);
+    expect(hits3).toBeGreaterThanOrEqual(24);
+    expect(hits5).toBeGreaterThanOrEqual(31);
+  }, 600_000);
+
+  test("ISC-82: Namor with four spellslinger keystones: off-plan cards fall from 55 of 63, and the counterspells read on plan", async () => {
+    const { diagnose } = await import("./diagnose");
+    const { rolesOf } = await import("./roles");
+    const decklist = readFileSync(new URL("../fixtures/namor.txt", import.meta.url), "utf8");
+    const d = diagnose(store, { commander: "Namor the Sub-Mariner", decklist, plan: { priorities: NAMOR_KEYSTONES } });
+    expect(d.plan.inferred?.theme).toBeTruthy();
+    expect(d.plan.themes).toEqual([]);
+    expect(d.plan.priorities).toEqual(NAMOR_KEYSTONES);
+    // before: 55 off plan; measured 2026-11-07 under the inferred theme: 37 (a regression floor, not a target)
+    console.log(`ISC-82 Namor: inferred ${d.plan.inferred?.theme}, ${d.offPlan.length} off plan (was ${NAMOR_OFF_PLAN_BEFORE})`);
+    expect(d.offPlan.length).toBeLessThan(NAMOR_OFF_PLAN_BEFORE);
+    expect(d.offPlan.length).toBeLessThanOrEqual(37);
+    const held = (name: string) => rolesOf(store.roles, store.names.find((n) => n.name === name)!.oracleId).roles.some((r) => r.role === "counterspell");
+    const counterspells = d.cards.map((c) => c.name).filter(held);
+    expect(counterspells.length).toBeGreaterThanOrEqual(10);
+    const off = d.offPlan.map((o) => o.name).filter((n) => counterspells.includes(n));
+    // every instant or sorcery with the counterspell role reads on plan; a creature with it can still be off plan
+    // (Vodalian Hexcatcher, a Merfolk lord that sacrifices to counter, was the one such card measured: 10 of 11 on plan)
+    const typeOf = (name: string) => store.space.cards.get(store.names.find((n) => n.name === name)!.oracleId)!.meta.type;
+    console.log(`ISC-82 Namor counterspells: ${counterspells.length - off.length} of ${counterspells.length} on plan; off plan: ${off.join(", ") || "none"}`);
+    expect(off.filter((n) => /Instant|Sorcery/.test(typeOf(n)))).toEqual([]);
+    expect(off.length).toBeLessThanOrEqual(1);
+    // the diagnosis under the inferred theme: roles read from that theme's decks, and the basis says it was inferred
+    expect(d.roles.some((r) => r.source === "plan" && r.basis.includes("the theme inferred from the priority cards"))).toBe(true);
+  }, 120_000);
+});
