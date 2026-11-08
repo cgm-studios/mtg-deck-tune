@@ -146,3 +146,90 @@ export function renderTranscript(t: Transcript): string {
     : `> A real player session. Assistant turns by ${h.playedBy}, following \`${h.skill}\`.`;
   return [`# ${h.title}`, banner, `${h.note}\n\nRecorded ${h.recordedAt}.`, ...t.events.map(renderEvent)].join("\n\n") + "\n";
 }
+
+// ---------- Claude Code session logs ----------
+
+const MTG_TOOL = /^mcp__[A-Za-z0-9_-]*?mtg-deck__(.+)$/;
+const tagText = (s: string, tag: string) => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(s)?.[1].trim();
+
+/**
+ * A Claude Code session log (the `~/.claude/projects/**.jsonl` file, one row per message) as a Transcript: the player's
+ * turns (a slash command becomes "/name args"), Claude's text turns, the deck-tool calls with their results, and the
+ * files Claude read. Everything else a session holds (other tools, hooks, bookkeeping rows, sub-agent rows, the skill
+ * text injected as a meta message) is dropped. A tool event sits where its result arrived, so every tool event carries
+ * its result. The log holds the player's own decklist: the Transcript this returns is private data, never a fixture.
+ */
+export function fromClaudeCodeLog(text: string, source = "claude-code log"): Transcript {
+  const rows: Record<string, unknown>[] = text.split("\n").filter((l) => l.trim() !== "").flatMap((l, i) => {
+    try {
+      const v = JSON.parse(l) as unknown;
+      return isRecord(v) ? [v] : [];
+    } catch (e) {
+      throw new TranscriptError(`${source}:${i + 1}: not JSON (${e instanceof Error ? e.message : String(e)})`);
+    }
+  });
+  const events: TranscriptEvent[] = [];
+  const calls = new Map<string, { name: string; input: Record<string, unknown> }>();
+  let recordedAt = "";
+  let pendingAssistant: string[] = [];
+  const flush = () => {
+    if (pendingAssistant.length) events.push({ kind: "assistant", text: pendingAssistant.join("\n\n").trim() });
+    pendingAssistant = [];
+  };
+  for (const row of rows) {
+    if (row.isSidechain === true) continue;
+    if (!recordedAt && isString(row.timestamp)) recordedAt = row.timestamp;
+    const message = isRecord(row.message) ? row.message : null;
+    if (!message) continue;
+    const content = message.content;
+    if (row.type === "assistant" && Array.isArray(content)) {
+      for (const b of content) {
+        if (!isRecord(b)) continue;
+        if (b.type === "text" && isString(b.text) && b.text.trim()) pendingAssistant.push(b.text);
+        else if (b.type === "tool_use" && isString(b.id) && isString(b.name)) {
+          flush();
+          calls.set(b.id, { name: b.name, input: isRecord(b.input) ? b.input : {} });
+        }
+      }
+    } else if (row.type === "user" && row.isMeta !== true) {
+      if (isString(content)) {
+        flush();
+        const cmd = tagText(content, "command-name");
+        const args = tagText(content, "command-args");
+        const body = cmd ? `${cmd}${args ? ` ${args}` : ""}` : content.trim();
+        if (body && !/^<(local-command|system-reminder)/.test(body)) events.push({ kind: "user", text: body });
+      } else if (Array.isArray(content)) {
+        for (const b of content) {
+          if (!isRecord(b)) continue;
+          if (b.type === "text" && isString(b.text) && b.text.trim() && !/^(Base directory for this skill|<system-reminder)/.test(b.text)) {
+            flush();
+            events.push({ kind: "user", text: b.text.trim() });
+          } else if (b.type === "tool_result" && isString(b.tool_use_id)) {
+            const call = calls.get(b.tool_use_id);
+            if (!call) continue;
+            const raw = isString(b.content) ? b.content : Array.isArray(b.content) ? b.content.map((x) => (isRecord(x) && isString(x.text) ? x.text : "")).join("\n") : "";
+            const mtg = MTG_TOOL.exec(call.name);
+            if (mtg) {
+              const isError = b.is_error === true;
+              let result: unknown = raw;
+              if (!isError) {
+                try { result = JSON.parse(raw); } catch { result = raw; }
+              }
+              events.push({ kind: "tool", server: "mtg-deck", name: mtg[1], input: call.input, result, isError });
+            } else if (call.name === "Read" && isString(call.input.file_path)) {
+              events.push({ kind: "read", path: call.input.file_path, content: raw.replace(/^\s*\d+\t/gm, "") });
+            }
+          }
+        }
+      }
+    }
+  }
+  flush();
+  return {
+    header: {
+      kind: "header", agentPlayed: false, playedBy: "a real player session", skill: "plugin/skills/deck-tune/SKILL.md",
+      title: source, note: `Converted from a Claude Code session log (${source}).`, recordedAt: recordedAt || new Date(0).toISOString(),
+    },
+    events,
+  };
+}

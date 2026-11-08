@@ -383,7 +383,9 @@ export function checkCurveChart(t: Transcript): CheckResult {
     if (barLines.length === 0) continue;
     const loose = barLines.filter(({ k }) => !fenced(k));
     if (loose.length) details.push(`event ${i}: a chart row sits outside a code block: ${loose[0].l.trim().slice(0, 60)}`);
-    const rows = barLines.filter(({ k }) => fenced(k)).map(({ l }) => ({ l, m: CHART_ROW.exec(l) }));
+    const columns = barLines.filter(({ k }) => fenced(k)).map(({ l }) => l.trim().split(/(?<=[█░]\s*\d+)\s{2,}/)); // a before and after can sit side by side
+    for (let col = 0; col < Math.max(0, ...columns.map((c) => c.length)); col++) {
+    const rows = columns.filter((c) => c[col] !== undefined).map((c) => ({ l: c[col], m: CHART_ROW.exec(c[col]) }));
     const parsed = rows.flatMap((r) => (r.m ? [{ bucket: r.m[1], filled: [...r.m[2]].filter((c) => c === "█").length, width: [...r.m[2]].length, count: r.m[3] === undefined ? null : Number(r.m[3]), line: r.l }] : []));
     for (const r of rows.filter((r) => !r.m)) details.push(`event ${i}: a chart row has no mana value, bars and count: ${r.l.trim().slice(0, 60)}`);
     if (parsed.length === 0) continue;
@@ -412,6 +414,7 @@ export function checkCurveChart(t: Transcript): CheckResult {
       const nearest = problems.reduce((a, b) => (b.out.length < a.out.length ? b : a));
       details.push(...nearest.out.map((m) => `event ${i}: ${m} (against deck_stats at event ${nearest.si})`));
     }
+    }
   }
   return details.length ? { pass: false, details } : { pass: true, details: [charts ? `${charts} chart(s), every row equal to a deck_stats curve bucket` : "no reply shows the whole curve as a chart"] };
 }
@@ -439,7 +442,7 @@ export function checkIncomingFromSearch(t: Transcript): CheckResult {
 
 // ---------- ISC-111: verdicts on the player's word ----------
 
-const ACCEPTS = /\b(?:yes|yep|yeah|accept\w*|take|keep|add|do it|go ahead|go for it|sounds good|swap (?:it|them|that)|make (?:it|that|those|them)|lock (?:it|them) in|approve\w*|ok|okay|sure)\b/i;
+const ACCEPTS = /\b(?:yes|yep|yeah|concur\w*|agree\w*|accept\w*|take|keep|add|do it|go ahead|go for it|sounds good|swap (?:it|them|that)|make (?:it|that|those|them)|lock (?:it|them) in|approve\w*|ok|okay|sure)\b/i;
 const REJECTS = /\b(?:no|nope|nah|reject\w*|skip|pass|don'?t|do not|drop|leave it|not that)\b/i;
 const EVERY = /\b(?:all|both|every|each|those|them|the rest|everything)\b/i;
 
@@ -467,7 +470,7 @@ export function checkVerdictsOnPlayersWord(t: Transcript): CheckResult {
     const label = `${e.name} ${[out, inn].filter(Boolean).join(" → ")}`;
     const u = [...users].reverse().find((x) => x.i < i);
     if (!u) { details.push(`event ${i}: ${label} ran with no player turn before it`); continue; }
-    const between = t.events.slice(u.i + 1, i).some((x) => x.kind === "assistant");
+    const between = blocks.some((b) => b.event > u.i && b.event < i); // a status line is not a new offer; swaps shown since are
     if (between) { details.push(`event ${i}: ${label} ran after a reply that came after the player's last word (event ${u.i})`); continue; }
     const word = accept ? ACCEPTS.test(u.text) : REJECTS.test(u.text);
     if (!word) { details.push(`event ${i}: ${label}, but the player's last turn (event ${u.i}) does not ${accept ? "accept" : "reject"} anything`); continue; }

@@ -52,7 +52,9 @@ describe("ISC-111: accept and reject run only on the player's own word for that 
     expect(red(user("looks interesting"), accept("Counterspell", "Cultivate")).details.join()).toContain("does not accept anything");
     expect(red(user("yes, take swap 2"), accept("Counterspell", "Cultivate")).details.join()).toContain("names no card of that swap");
     expect(red(user("yes, take swap 1"), reject("Counterspell", "Cultivate")).details.join()).toContain("does not reject anything");
-    expect(red(user("yes take 1"), say("Done."), accept("Counterspell", "Cultivate")).pass).toBe(false); // Claude spoke after the player's last word
+    expect(red(user("yes take 1"), say("Recording that now."), accept("Counterspell", "Cultivate")).pass).toBe(true); // a status line is not a new offer
+    expect(red(user("i concur with your swaps, those are better"), accept("Counterspell", "Cultivate")).pass).toBe(true);
+    expect(red(user("no thanks"), say(TWO), accept("Counterspell", "Cultivate")).pass).toBe(false); // swaps shown again after the player's last word
     expect(red(user("yes, take swap 1"), accept("Counterspell", "Cultivate"))).toEqual({ pass: true, details: ["1 verdict call(s), each on the player's word for that swap"] });
   });
 
@@ -139,6 +141,11 @@ describe("ISC-110: the mana curve chart matches deck_stats", () => {
     expect(bad(good.map((r) => (r.startsWith("7+") ? r.replace("░", "") : r))).details.join()).toContain("is padded to");
     expect(checkCurveChart(session(say(fence(good)))).details.join()).toContain("no deck_stats result");
     expect(bad(good)).toMatchObject({ pass: true });
+    const after = { ...CURVE, "1": 11, "2": 24 };
+    const stats2 = call("deck_stats", {}, { curve: after });
+    const beside = good.map((r, n) => `${r}      ${rows(after)[n]}`);
+    expect(checkCurveChart(session(STATS, stats2, say(fence(beside))))).toMatchObject({ pass: true });
+    expect(checkCurveChart(session(STATS, say(fence(beside)))).pass).toBe(false); // the right-hand chart matches no result
   });
 
   test("ISC-110 leaves out a zero bucket, reads labels such as MV 3, and matches a chart to the deck_stats it came from after the deck changed", () => {
