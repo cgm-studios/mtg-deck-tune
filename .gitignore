@@ -5,7 +5,4 @@ labels/
 *.db.gz
 *.download
 .mcpb-cache/
-# Local working material: kept out of the public repo until reviewed for publishing
-ISA.md
-backlog/
-docs/research
+.DS_Store

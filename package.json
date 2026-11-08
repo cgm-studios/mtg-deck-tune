@@ -3,9 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun scripts/build.ts",
-    "test": "bun test server",
-    "mcp": "bun server/mcp.ts"
+    "build": "bun scripts/build.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
