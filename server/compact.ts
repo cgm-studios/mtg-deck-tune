@@ -9,7 +9,7 @@
 
 import { basename } from "node:path";
 import { z } from "zod";
-import type { CardFact, CardResult, DeckStats, FindCardsResult, FoundCard } from "./deck-tools";
+import type { CardFact, CardResult, DeckStats, FindCardsResult, FoundCard, LookedUpCard } from "./deck-tools";
 import type { DiagnoseResult } from "./diagnose";
 import type { ShortlistCard, ShortlistLink, ShortlistResult } from "./shortlist";
 import type { AcceptSwapResult, Candidate, RejectSwapResult, StatsDelta, SwapCandidatesResult } from "./swap-tools";
@@ -48,8 +48,12 @@ export function compactCard(r: CardResult) {
   };
 }
 
-// ---------- card facts (ISC-92) ----------
-const FACT_COLUMNS = ["name", "manaValue", "typeLine", "oracleText"] as const;
+// ---------- several cards in one lookup (ISC-106) ----------
+const LOOKUP_COLUMNS = ["name", "manaCost", "manaValue", "typeLine", "power", "toughness", "keywords", "oracleText", "note"] as const;
+export const cardLookupTable = (cards: LookedUpCard[]) => ({ cards: table<LookedUpCard>(LOOKUP_COLUMNS, cards) });
+
+// ---------- card facts (ISC-92, ISC-105) ----------
+const FACT_COLUMNS = ["name", "manaValue", "typeLine", "power", "toughness", "oracleText"] as const;
 export const cardFactsTable = (facts: CardFact[]) => table<CardFact>(FACT_COLUMNS, facts);
 
 // ---------- deck_stats ----------

@@ -4,6 +4,7 @@
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import fc from "fast-check";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -91,12 +92,30 @@ test("ISC-92 over MCP: deck_stats and diagnose carry every deck card's facts whe
   const full = plain(deckStats(store, NAMOR).cardFacts);
   for (const [name, args] of [["deck_stats", NAMOR], ["diagnose", { ...NAMOR, plan: NAMOR_PLAN }]] as const) {
     const asked = (await call(name, { ...args, cardFacts: true })).structuredContent.cardFacts as Table;
-    expect([name, asked.columns]).toEqual([name, ["name", "manaValue", "typeLine", "oracleText"]]);
+    expect([name, asked.columns]).toEqual([name, ["name", "manaValue", "typeLine", "power", "toughness", "oracleText"]]);
     expect([name, records(asked)]).toEqual([name, full]);
   }
   // the rest of deck_stats is the function's result
   const { cardFacts: _, ...rest } = deckStats(store, NAMOR);
   expect(stats.structuredContent).toEqual(plain(rest));
+}, 60_000);
+
+test("ISC-105: for random decks, every cardFacts row has power and toughness columns equal to the store's, null on a card with none", async () => {
+  type Row = { name: string; typeLine: string; power: string | null; toughness: string | null };
+  const q = store.db.query("SELECT power, toughness FROM cards WHERE name = ?");
+  let creatures = 0, nulls = 0;
+  await fc.assert(fc.asyncProperty(fc.array(fc.nat(), { minLength: 8, maxLength: 12 }), async (seeds) => {
+    const pool = store.names.filter((n) => !n.name.includes(" // "));
+    const decklist = [...new Set(seeds.map((s) => pool[s % pool.length].name))].map((n) => `1 ${n}`).concat(["1 Sol Ring", "1 Grizzly Bears", "3 Island"]).join("\n");
+    const t = (await call("deck_stats", { commander: "Niv-Mizzet, Parun", decklist, cardFacts: true })).structuredContent.cardFacts as Table;
+    expect(t.columns).toEqual(expect.arrayContaining(["power", "toughness"]));
+    for (const r of records(t) as Row[]) {
+      expect([r.name, r.power, r.toughness]).toEqual([r.name, ...Object.values(q.get(r.name) as object)] as [string, string | null, string | null]);
+      if (/Creature/.test(r.typeLine)) { expect([r.name, r.power]).not.toEqual([r.name, null]); creatures++; }
+      if (!/Creature|Vehicle|Spacecraft/.test(r.typeLine)) { expect([r.name, r.power, r.toughness]).toEqual([r.name, null, null]); nulls++; }
+    }
+  }), { numRuns: 30, seed: 10501 });
+  expect([creatures > 0, nulls > 0]).toEqual([true, true]);
 }, 60_000);
 
 // ---------- what the compact results keep ----------

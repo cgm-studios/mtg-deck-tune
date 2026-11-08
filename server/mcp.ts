@@ -12,11 +12,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { commanderProfile, commanderProfileShape } from "./commander";
 import {
-  acceptReceipt, compactCard, compactDeckStats, compactDiagnosis, compactFindCards, compactShortlist, compactSwapCandidates, detailFlag, rejectReceipt,
+  acceptReceipt, cardLookupTable, compactCard, compactDeckStats, compactDiagnosis, compactFindCards, compactShortlist, compactSwapCandidates, detailFlag, rejectReceipt,
 } from "./compact";
 import { diagnose, diagnoseShape } from "./diagnose";
 import {
-  cardDetails, cardShape, deckStats, deckStatsShape, findCards, findCardsShape, findTags, neighbors, neighborsShape, openStore, tagsShape, type Store,
+  cardDetails, cardLookupNames, cardShape, deckStats, deckStatsShape, findCards, findCardsShape, findTags, neighbors, neighborsShape, LOOKUP_MAX, lookupCards, openStore, tagsShape, ToolInputError, type Store,
 } from "./deck-tools";
 import { shortlist, shortlistShape } from "./shortlist";
 import { ensureStore } from "./store";
@@ -47,10 +47,10 @@ async function withStore(store: Store | Promise<Store>, run: (s: Store) => objec
 const DETAIL = "Pass `detail: true` for the full result";
 // ISC-91, ISC-92: card facts quoted to the player come from the data. Every deck card's rules text is long, so it comes
 // once, when asked, instead of on every deck_stats and diagnose call.
-const CARD_FACTS = "Pass `cardFacts: true` for every deck card's mana value, type line and rules text too (`cardFacts`, a table: " +
+const CARD_FACTS = "Pass `cardFacts: true` for every deck card's mana value, type line, power and toughness (null when it has none) and rules text too (`cardFacts`, a table: " +
   "`columns` named once, one row per card, lands and the commander included) and quote card facts from there; ask once per " +
   "deck, on deck_stats or diagnose, whichever comes first.";
-const cardFactsFlag = z.boolean().optional().describe("true = also every deck card's mana value, type line and rules text (default false)");
+const cardFactsFlag = z.boolean().optional().describe("true = also every deck card's mana value, type line, power and toughness, and rules text (default false)");
 
 /** `verdicts` points the accept and reject labels elsewhere (tests); the server uses the defaults. */
 export function createDeckServer(store: Store | Promise<Store>, verdicts: VerdictOptions = {}): McpServer {
@@ -80,9 +80,21 @@ export function createDeckServer(store: Store | Promise<Store>, verdicts: Verdic
     title: "Card details",
     description: "Details for one card: cost, mana value, type line, rules text, power/toughness, keywords, color identity, price, " +
       "its Scryfall Tagger tag labels and its deck role names. The name resolves fuzzily; `matchedBy` and `alternatives` show how. " +
-      `${DETAIL}: the store ids, the type line in parts, each tag's weight and the tags that give each role.`,
-    inputSchema: { ...cardShape, detail: detailFlag },
-  }, async ({ detail, ...args }) => withStore(store, (s) => (detail ? cardDetails(s, args) : compactCard(cardDetails(s, args)))));
+      `${DETAIL}: the store ids, the type line in parts, each tag's weight and the tags that give each role. ` +
+      `To read several cards (a shortlist's candidates before judging them, say), pass \`names\`, up to ${LOOKUP_MAX}, instead of one lookup per card: ` +
+      "one table (`columns` named once) with a row per name in the order asked, holding name, cost, mana value, type line, power, toughness, keywords and rules text. " +
+      "A `names` row has no tags or roles and takes no `detail`. A name nothing matches, or one that fits several cards, gets no card and a `note` saying why, without failing the call; " +
+      "a partial or misspelled name read as one card says so in its `note`. Deck cards are already in `cardFacts` (deck_stats or diagnose): do not look them up again.",
+    inputSchema: { name: cardShape.name.optional(), names: cardLookupNames, detail: detailFlag },
+  }, async ({ name, names, detail }) => withStore(store, (s) => {
+    if ((name === undefined) === (names === undefined)) throw new ToolInputError("give exactly one of name or names");
+    if (names !== undefined) {
+      if (detail) throw new ToolInputError("detail is for one card: look it up by name");
+      return cardLookupTable(lookupCards(s, names));
+    }
+    const input = { name: name! };
+    return detail ? cardDetails(s, input) : compactCard(cardDetails(s, input));
+  }));
   server.registerTool("deck_stats", {
     title: "Deck stats",
     description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " +

@@ -284,6 +284,50 @@ export function cardDetails(store: Store, input: CardInput): CardResult {
   };
 }
 
+// ---------- card, several at once (ISC-106) ----------
+// One row per name, in the order asked (a repeated name keeps its rows). Names resolve as in resolveCard. A name read as
+// one card without being its exact or front-face name gets that card and a note; a name that fits several cards gets a
+// note naming them and no card (a misspelling fits several when they are equally close), because a wrong card's facts are worse than none; a name nothing resembles gets a note.
+// Neither fails the call.
+export const LOOKUP_MAX = 50;
+export const cardLookupNames = z.array(z.string()).min(1).max(LOOKUP_MAX).optional()
+  .describe(`Up to ${LOOKUP_MAX} card names, looked up together; give this or \`name\`. Each name resolves as \`name\` does`);
+
+export type LookedUpCard = {
+  name: string | null; manaCost: string | null; manaValue: number | null; typeLine: string | null; power: string | null; toughness: string | null;
+  keywords: string[] | null; oracleText: string | null;
+  /** Why the row has no card, or how a name that was not exact was read; null when the name was the card's. */
+  note: string | null;
+};
+
+const noCard = (note: string): LookedUpCard => ({ name: null, manaCost: null, manaValue: null, typeLine: null, power: null, toughness: null, keywords: null, oracleText: null, note });
+
+export function lookupCards(store: Store, names: string[]): LookedUpCard[] {
+  const q = store.db.query("SELECT * FROM cards WHERE id = ?");
+  return names.map((asked) => {
+    let hit: Resolved;
+    try {
+      hit = resolveCard(store, asked);
+    } catch (e) {
+      if (e instanceof ToolInputError) return noCard(e.message);
+      throw e;
+    }
+    // the other names a misspelling reached count only when they are as close as the first: "Lightnig Bolt" is Lightning
+    // Bolt, however near Lightning Wolf comes
+    const first = store.names[hit.id - 1];
+    const rivals = hit.matchedBy !== "fuzzy" ? hit.alternatives
+      : hit.alternatives.filter((a) => editDistance(normName(asked), normName(a)) === editDistance(normName(asked), first.norm));
+    if (rivals.length) return noCard(`"${asked}" fits several cards, so none was picked: ${[first.name, ...rivals].join("; ")}`);
+    const r = q.get(hit.id) as CardRow | null;
+    if (!r) throw new Error(`card store is inconsistent: id ${hit.id} resolved but has no row`);
+    return {
+      name: r.name, manaCost: r.mana_cost, manaValue: r.mana_value, typeLine: r.type_line, power: r.power, toughness: r.toughness,
+      keywords: JSON.parse(r.keywords), oracleText: r.oracle_text,
+      note: hit.matchedBy === "exact" || hit.matchedBy === "face" ? null : `"${asked}" is not an exact name; read as this card`,
+    };
+  });
+}
+
 // ---------- deck_stats ----------
 // A deck file (or pasted list) of `1 Card Name` lines, read with deck-pool's parseDecklist (headers, URLs, set
 // codes skipped). The numbers cover the cards in the list as written: the commander counts once if the list has
@@ -297,9 +341,10 @@ export function cardDetails(store: Store, input: CardInput): CardResult {
 //                     (plan.ts planScorer score > 0: a hook or tag of the plan's profiles), and which do not; null when
 //                     the call carries no plan. The plan always comes from the player, never from the commander's text.
 //   cardFacts         every card of the deck (each distinct resolved card of the list, lands included, and the commander
-//                     whether or not the list names it) with its mana value, full type line and rules text as the store
-//                     holds them, so a card fact quoted to the player comes from the data, never from memory (ISC-91,
-//                     ISC-92). Only these three facts and the name, in name order (byte order), to keep the result lean.
+//                     whether or not the list names it) with its mana value, full type line, power and toughness (null on
+//                     a card with none; the front face's on a two-faced card) and rules text as the store holds them, so a
+//                     card fact quoted to the player comes from the data, never from memory (ISC-91, ISC-92, ISC-105). Only
+//                     these facts and the name, in name order (byte order), to keep the result lean.
 const CURVE = ["0", "1", "2", "3", "4", "5", "6", "7+"] as const;
 const COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -331,8 +376,8 @@ export type DeckStats = DeckNumbers & {
   unresolved: { line: number; text: string; closeMatches: string[] }[];
 };
 
-/** One deck card's facts as the store holds them (cards.mana_value, type_line with every face, oracle_text). */
-export type CardFact = { name: string; manaValue: number; typeLine: string; oracleText: string };
+/** One deck card's facts as the store holds them (cards.mana_value, type_line with every face, power, toughness, oracle_text). */
+export type CardFact = { name: string; manaValue: number; typeLine: string; power: string | null; toughness: string | null; oracleText: string };
 
 const STORE_IDS = new WeakMap<Store, Map<string, number>>();
 /** The store id of a card by oracle id (resolveCard indexes names by id - 1, so the map is the inverse). */
@@ -347,11 +392,11 @@ function storeIdOf(store: Store, oracleId: string): number {
 /** The facts of every card of a deck: each distinct resolved card of the list and the commander, in name (byte) order. */
 export function cardFacts(store: Store, commander: SpaceCard, entries: DeckEntry[]): CardFact[] {
   const ids = new Set([commander.id, ...entries.flatMap((e) => (e.card ? [e.card.id] : []))]);
-  const q = store.db.query("SELECT name, mana_value, type_line, oracle_text FROM cards WHERE id = ?");
+  const q = store.db.query("SELECT name, mana_value, type_line, power, toughness, oracle_text FROM cards WHERE id = ?");
   return [...ids].map((oracleId) => {
-    const r = q.get(storeIdOf(store, oracleId)) as { name: string; mana_value: number; type_line: string; oracle_text: string } | null;
+    const r = q.get(storeIdOf(store, oracleId)) as { name: string; mana_value: number; type_line: string; power: string | null; toughness: string | null; oracle_text: string } | null;
     if (!r) throw new Error(`card store is inconsistent: oracle id ${oracleId} resolved but has no row`);
-    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, oracleText: r.oracle_text };
+    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, power: r.power, toughness: r.toughness, oracleText: r.oracle_text };
   }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 

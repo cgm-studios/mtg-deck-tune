@@ -16,7 +16,7 @@ import { acceptSwap, LABELS_PATH, rejectSwap, swapCandidates } from "./swap-tool
 import { diagnose } from "./diagnose";
 import { shortlist } from "./shortlist";
 import { createDeckServer } from "./mcp";
-import { acceptReceipt, rejectReceipt } from "./compact";
+import { acceptReceipt, compactCard, rejectReceipt } from "./compact";
 import { loadRoleIndex, roleSheet } from "./roles";
 import { readJSONL } from "./scryfall";
 
@@ -449,6 +449,7 @@ const DATA_STRINGS: Record<string, string> = {
   "find_cards.name": "part of a card name, matched with instr() on a bound parameter",
   "find_cards.rulesText[]": "words or a phrase from a card's rules text, matched with instr() on a bound parameter",
   "card.name": "a card name, resolved in TypeScript",
+  "card.names[]": "a card name, resolved in TypeScript; one that resolves to nothing is reported on its own row",
   "commander_profile.commander": "a card name, resolved in TypeScript (exact or front face only)",
   "commander_profile.deckFile": "a file path, read from disk",
   "commander_profile.decklist": "decklist text, parsed in TypeScript",
@@ -1163,6 +1164,101 @@ test("ISC-103: for random accepts and rejects on temp deck files, every receipt 
   }
 }, 120_000);
 
+// ---------- several cards in one lookup (DT-6.16, ISC-106) ----------
+// `card` with `names`: one row per name, in the order asked, with the store's facts, or a note saying why there are none.
+// A wrong card's facts are worse than no facts, so a name that fits several cards gets a note and no card.
+
+const LOOKUP_COLUMNS = ["name", "manaCost", "manaValue", "typeLine", "power", "toughness", "keywords", "oracleText", "note"];
+type LookupRow = { name: string | null; manaCost: string | null; manaValue: number | null; typeLine: string | null; power: string | null; toughness: string | null; keywords: string[] | null; oracleText: string | null; note: string | null };
+const lookupRows = (r: { structuredContent?: unknown }) => {
+  const t = (r.structuredContent as { cards: { columns: string[]; rows: unknown[][] } }).cards;
+  expect(t.columns).toEqual(LOOKUP_COLUMNS);
+  return t.rows.map((row) => Object.fromEntries(t.columns.map((c, i) => [c, row[i]]))) as LookupRow[];
+};
+/** The row a card's own store columns call for, read without the lookup's code. */
+const storeRow = (name: string): LookupRow => {
+  const r = store.db.query("SELECT name, mana_cost AS manaCost, mana_value AS manaValue, type_line AS typeLine, power, toughness, keywords, oracle_text AS oracleText FROM cards WHERE name = ?").get(name) as Omit<LookupRow, "keywords" | "note"> & { keywords: string };
+  return { ...r, keywords: JSON.parse(r.keywords), note: null };
+};
+const NO_CARD = { name: null, manaCost: null, manaValue: null, typeLine: null, power: null, toughness: null, keywords: null, oracleText: null };
+
+const lookupDraw = fc.array(fc.record({ kind: fc.constantFrom("exact", "front", "misspelled", "unknown"), seed: fc.nat() }), { minLength: 1, maxLength: 50 });
+
+test("ISC-106: for random name lists with misspelled and unknown names, one call gives one row per name in the order asked, with the store's facts, or a note and no failure", async () => {
+  let exact = 0, noted = 0, unknown = 0;
+  const twoFaced = cards.filter((c) => c.name.includes(" // "));
+  await fc.assert(fc.asyncProperty(lookupDraw, async (draws) => {
+    const asked = draws.map((d, i) => {
+      const c = cards[d.seed % cards.length];
+      if (d.kind === "exact") return c.name;
+      if (d.kind === "front") return twoFaced[d.seed % twoFaced.length].name.split(" // ")[0];
+      if (d.kind === "unknown") return `Qzxv Wkjh ${d.seed} Zzqp ${i}`;
+      const at = Math.floor(c.name.length / 2);
+      return c.name.slice(0, at) + c.name.slice(at + 1);
+    });
+    const res = await client.callTool({ name: "card", arguments: { names: asked } });
+    expect(res.isError).toBeFalsy();
+    const rows = lookupRows(res);
+    expect(rows.length).toBe(asked.length);
+    for (const [i, row] of rows.entries()) {
+      const kind = draws[i].kind;
+      if (kind === "exact") { expect(row).toEqual(storeRow(asked[i])); exact++; }
+      else if (kind === "front") { expect(row.name?.split(" // ")[0]).toBe(asked[i]); expect(row).toEqual(storeRow(row.name!)); }
+      else if (kind === "unknown") { expect(row).toEqual({ ...NO_CARD, note: `no card matches "${asked[i]}"` }); unknown++; }
+      else if (row.note !== null) {
+        // misspelled: read as one card (its facts, and a note saying so), or too close to several (no card, and a note naming them)
+        expect(row.note).toContain(asked[i]);
+        expect(row).toEqual(row.name === null ? { ...NO_CARD, note: row.note } : { ...storeRow(row.name), note: row.note });
+        noted++;
+      } else expect(row).toEqual(storeRow(row.name!)); // the misspelling is another card's exact name
+    }
+    // same list, same text
+    const again = await client.callTool({ name: "card", arguments: { names: asked } });
+    expect((again.content as { text: string }[])[0].text).toBe((res.content as { text: string }[])[0].text);
+  }), { numRuns: 40, seed: 10601 });
+  expect([exact > 0, noted > 0, unknown > 0]).toEqual([true, true, true]);
+}, 120_000);
+
+test("ISC-106: a name that fits several cards is reported with them and picks none; an unambiguous partial name is read as its card, and says so; repeats keep their rows", async () => {
+  const rows = lookupRows(await client.callTool({ name: "card", arguments: { names: ["Talrand", "Lightnig Bolt", "Opt", "Opt"] } }));
+  expect(rows[0]).toMatchObject(NO_CARD);
+  expect(rows[0].note).toMatch(/"Talrand" fits several cards/);
+  for (const n of ["Talrand, Sky Summoner", "Talrand's Invocation"]) expect(rows[0].note).toContain(n);
+  expect(rows[1]).toEqual({ ...storeRow("Lightning Bolt"), note: expect.stringContaining('"Lightnig Bolt"') });
+  expect(rows[2]).toEqual(storeRow("Opt"));
+  expect(rows[3]).toEqual(storeRow("Opt"));
+  // a misspelling equally close to two cards fits both
+  const [tie] = lookupRows(await client.callTool({ name: "card", arguments: { names: ["Crypteq"] } }));
+  expect(tie).toMatchObject(NO_CARD);
+  for (const n of ["Cryptek", "Cryptex"]) expect(tie.note).toContain(n);
+});
+
+test("ISC-106: the lookup holds at most 50 names and says so; it takes name or names, not both; SQL in a name is an unknown name; detail stays a single-card flag", async () => {
+  const opt = (n: number) => Array.from({ length: n }, () => "Opt");
+  expect((await client.callTool({ name: "card", arguments: { names: opt(50) } })).isError).toBeFalsy();
+  for (const args of [{ names: opt(51) }, { names: [] }, {}, { name: "Opt", names: ["Opt"] }, { names: ["Opt"], detail: true }]) {
+    expect([args, (await client.callTool({ name: "card", arguments: args })).isError]).toEqual([args, true]);
+  }
+  const evil = "x' OR '1'='1'; DROP TABLE cards; --";
+  const before = (store.db.query("SELECT COUNT(*) AS n FROM cards").get() as { n: number }).n;
+  const rows = lookupRows(await client.callTool({ name: "card", arguments: { names: [evil, "   "] } }));
+  expect(rows.map((r) => r.note)).toEqual([`no card matches "${evil}"`, 'no card matches "   "']);
+  expect((store.db.query("SELECT COUNT(*) AS n FROM cards").get() as { n: number }).n).toBe(before);
+  const tool = (await client.listTools()).tools.find((t) => t.name === "card")!;
+  expect(tool.description).toMatch(/`names`/);
+  expect(tool.description).toMatch(/up to 50/);
+  expect(tool.description).toMatch(/instead of one lookup per card/);
+});
+
+test("ISC-106: the single-card lookup answers as before, byte for byte", async () => {
+  for (const name of ["Talrand", "Lightnig Bolt", "Sol Ring", "Delver of Secrets"]) {
+    const compact = await client.callTool({ name: "card", arguments: { name } });
+    expect((compact.content as { text: string }[])[0].text).toBe(JSON.stringify(compactCard(cardDetails(store, { name }))));
+    const full = await client.callTool({ name: "card", arguments: { name, detail: true } });
+    expect((full.content as { text: string }[])[0].text).toBe(JSON.stringify(cardDetails(store, { name })));
+  }
+});
+
 // ---------- diagnose (DT-6.4) ----------
 
 test("ISC-41: the diagnose tool's input schema takes the plan (themes, priority cards, themes to avoid), and a call without it is refused", async () => {
@@ -1262,9 +1358,9 @@ test("ISC-67: a swap built from a Teysa shortlist carries the deck before and af
 // lands included, and the commander whether or not the list names it. The oracle is the store's plain columns.
 
 const BASIC_OF: Record<string, string> = { W: "Plains", U: "Island", B: "Swamp", R: "Mountain", G: "Forest" };
-type FactRow = { name: string; manaValue: number; typeLine: string; oracleText: string };
+type FactRow = { name: string; manaValue: number; typeLine: string; power: string | null; toughness: string | null; oracleText: string };
 const storeFacts = (name: string): FactRow =>
-  store.db.query("SELECT name, mana_value AS manaValue, type_line AS typeLine, oracle_text AS oracleText FROM cards WHERE name = ?").get(name) as FactRow;
+  store.db.query("SELECT name, mana_value AS manaValue, type_line AS typeLine, power, toughness, oracle_text AS oracleText FROM cards WHERE name = ?").get(name) as FactRow;
 const byFactName = (a: FactRow, b: FactRow) => byteCmp(a.name, b.name);
 /** Every card of a list as the store resolves it (distinct), plus the commander. */
 function expectedFacts(commander: string, decklist: string): FactRow[] {
@@ -1307,9 +1403,9 @@ test("ISC-92: over MCP, deck_stats and diagnose asked for cardFacts return the c
   const text = readFileSync(NAMOR_DECK, "utf8");
   for (const res of [stats, diag]) {
     expect(res.isError).toBeFalsy();
-    // DT-6.16: a table, the three facts and the name as its columns, nothing else per card
+    // DT-6.16: a table, the facts and the name as its columns, nothing else per card
     const t = (res.structuredContent as { cardFacts: { columns: string[]; rows: unknown[][] } }).cardFacts;
-    expect(t.columns).toEqual(["name", "manaValue", "typeLine", "oracleText"]);
+    expect(t.columns).toEqual(["name", "manaValue", "typeLine", "power", "toughness", "oracleText"]);
     const got = t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]]))) as FactRow[];
     expect([...got].sort(byFactName)).toEqual(expectedFacts(args.commander, text));
   }
