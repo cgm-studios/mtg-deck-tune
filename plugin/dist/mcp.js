@@ -34903,6 +34903,60 @@ var ciMask = (ci) => {
 };
 var fitsIdentity = (card, ci) => card.ci.every((x) => ci.includes(x));
 
+// server/deck-lines.ts
+var SECTION = /^(commander|commanders|companion|deck|main|mainboard|sideboard|maybeboard|maybe|considering)\b\s*(\(\d+\))?:?$/i;
+var NOT_DECK = /^(sideboard|maybe|considering)/i;
+function cleanName(raw) {
+  let name = raw.replace(/\s+#.*$/, "");
+  let tagNotDeck = false;
+  for (let before = "";before !== name; ) {
+    before = name;
+    name = name.replace(/\s+\*[A-Z]+\*$/i, "").replace(/\s+\^[^^]*\^$/, "").replace(/\s+\[([^\]]*)\]$/, (_, tag) => {
+      if (NOT_DECK.test(tag) || /\{noDeck\}/i.test(tag))
+        tagNotDeck = true;
+      return "";
+    });
+  }
+  name = name.replace(/\s+\([A-Za-z0-9]{2,6}\)(\s+\S+)?$/, "").trim();
+  if (/^[^/]+\/[^/]+$/.test(name))
+    name = name.replace("/", " // ");
+  return { name, tagNotDeck };
+}
+function deckLines(text) {
+  const out = [];
+  let section = "deck";
+  let first = true;
+  text.split(/\r?\n/).forEach((raw, k) => {
+    const line = raw.trim();
+    if (!line)
+      return;
+    const base = { line: k + 1, text: line };
+    const aside = () => {
+      out.push({ ...base, kind: "aside", section, inDeck: false });
+    };
+    if (/^https?:\/\//.test(line))
+      return aside();
+    const header = SECTION.exec(line.replace(/^(\/\/|#)\s*/, ""));
+    if (header) {
+      section = header[1].toLowerCase();
+      first = false;
+      return aside();
+    }
+    if (line.startsWith("//") || line.startsWith("#") || /^SB:\s*/i.test(line))
+      return aside();
+    const m = /^(\d+)\s*x?\s+(.+)$/i.exec(line);
+    if (!m && first && /^[^:]+:\s/.test(line) && !/\s\/\/\s/.test(line)) {
+      first = false;
+      return aside();
+    }
+    first = false;
+    const { name, tagNotDeck } = cleanName(m ? m[2] : line);
+    const inDeck = !NOT_DECK.test(section) && !tagNotDeck;
+    out.push(m ? { ...base, kind: "entry", section, inDeck, qty: Number(m[1]), name } : { ...base, kind: "bare", section, inDeck, name });
+  });
+  return out;
+}
+
 // server/deck-pool.ts
 var normName = (s) => s.normalize("NFKD").replace(/[\u0300-\u036F]/g, "").toLowerCase().replace(/[^a-z0-9/ ]+/g, " ").replace(/\s+/g, " ").trim();
 var rank = (c) => c.inSpace ? 0 : c.legal ? 1 : 2;
@@ -34937,19 +34991,18 @@ function resolveName(space, name) {
 var DATA = new URL("../data/", import.meta.url).pathname;
 function parseDecklist(space, text) {
   const entries = [], skipped = [];
-  text.split(/\r?\n/).forEach((raw, k) => {
-    const line = raw.trim();
-    if (!line)
-      return;
-    const m = line.match(/^(\d+)\s*x?\s+(.+)$/i);
-    if (!m) {
-      skipped.push({ line: k + 1, text: line });
-      return;
-    }
-    const name = m[2].replace(/\s+\*[A-Z]+\*$/, "").replace(/\s+\([A-Za-z0-9]{2,6}\)(\s+\S+)?$/, "").replace(/\s+#.*$/, "").trim();
-    entries.push({ line: k + 1, qty: +m[1], text: name, card: resolveName(space, name) });
-  });
+  for (const l of deckLines(text)) {
+    if (l.kind === "entry" && l.inDeck)
+      entries.push({ line: l.line, qty: l.qty, text: l.name, card: resolveName(space, l.name), section: l.section });
+    else
+      skipped.push({ line: l.line, text: l.text });
+  }
   return { entries, unresolved: entries.filter((e) => !e.card), skipped };
+}
+function readsAsDeck(space, text) {
+  const lines = deckLines(text).filter((l) => l.kind !== "aside");
+  const named = lines.filter((l) => l.kind === "entry" && resolveName(space, l.name)).length;
+  return named > 0 && named * 2 >= lines.length;
 }
 
 // server/deck-tools.ts
@@ -40366,15 +40419,26 @@ function acceptReceipt(r) {
     if (was !== is)
       changed.push([role, [was, is]]);
   }
-  const build = (file3, n) => ({ verdict: "accept", file: file3, changeLog: r.changeLog, changed: Object.fromEntries(changed.slice(0, n)) });
+  const off = r.offColor;
+  const build = (file3, n, names) => ({
+    verdict: "accept",
+    file: file3,
+    changeLog: r.changeLog,
+    changed: Object.fromEntries(changed.slice(0, n)),
+    ...off && { offColor: { count: off.length, names: off.slice(0, names) } }
+  });
   const size = (x) => JSON.stringify(x).length;
   const file2 = basename(r.deckFile);
+  const allNames = off?.length ?? 0;
   for (let n = changed.length;n >= 0; n--)
-    if (size(build(file2, n)) <= RECEIPT_MAX)
-      return build(file2, n);
+    if (size(build(file2, n, allNames)) <= RECEIPT_MAX)
+      return build(file2, n, allNames);
+  for (let names = allNames - 1;names >= 0; names--)
+    if (size(build(file2, 0, names)) <= RECEIPT_MAX)
+      return build(file2, 0, names);
   const chars = [...file2];
   for (let keep = chars.length - 1;keep >= 1; keep--) {
-    const short = build(`\u2026${chars.slice(-keep).join("")}`, 0);
+    const short = build(`\u2026${chars.slice(-keep).join("")}`, 0, 0);
     if (size(short) <= RECEIPT_MAX)
       return short;
   }
@@ -40690,7 +40754,7 @@ var hookPhrase = (hook) => {
 };
 
 // server/swap-tools.ts
-import { appendFileSync, mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync as readFileSync2, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { dirname } from "path";
 
 // server/deck-swaps.ts
@@ -41183,7 +41247,8 @@ var verdictFields = {
 };
 var acceptSwapShape = {
   ...verdictFields,
-  deckFile: exports_external.string().min(1).describe("Path to the `1 Card Name` deck file to rewrite, absolute or relative to the project directory")
+  deckFile: exports_external.string().min(1).describe("Path to the `1 Card Name` deck file to rewrite, absolute or relative to the project directory"),
+  changeCommander: exports_external.boolean().optional().describe("true = this swap replaces the commander: `out` is the current commander and `in` a card that can be a commander. Without it the commander cannot leave the deck")
 };
 var rejectSwapShape = {
   ...verdictFields,
@@ -41210,18 +41275,53 @@ function appendLabel(label, path) {
   appendFileSync(path, `${JSON.stringify(label)}
 `);
 }
+var canBeCommander = (c) => /\bLegendary\b.*\bCreature\b/.test(c.meta.type) || /can be your commander/i.test(c.meta.text);
+function checkCommanderChange(f, commander, out, inCard) {
+  const leaving = out?.id === commander.id;
+  if (!f.changeCommander) {
+    if (leaving)
+      throw new ToolInputError(`${commander.name} is the commander. It cannot be cut; to replace it, name a new commander as in and pass changeCommander: true`);
+    return;
+  }
+  if (!leaving)
+    throw new ToolInputError(`changeCommander: out must be the commander, ${commander.name}`);
+  if (!inCard)
+    throw new ToolInputError("changeCommander needs the new commander as in; a commander cannot be cut");
+  if (!canBeCommander(inCard))
+    throw new ToolInputError(`${inCard.name} cannot be a commander`);
+}
+function saveDeck(path, shownAs, next, record3) {
+  const target = realpathSync(path);
+  const mode = statSync(target).mode & 4095;
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, next, { mode });
+    chmodSync(tmp, mode);
+    try {
+      record3();
+    } catch (e) {
+      throw new Error(`the swap could not be recorded (${e instanceof Error ? e.message : String(e)}), so ${shownAs} was left as it was`);
+    }
+    renameSync(tmp, target);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
 function acceptSwap(store, input3, opts = {}) {
   const f = acceptSwapInput.parse(input3);
   const { card: commander } = resolveCommander(store, f.commander);
   const { out, inCard } = pairOf(store, f);
   const path = deckPath(f.deckFile);
   const text = readDeck({ deckFile: path });
+  if (!readsAsDeck(store.space, text))
+    throw new ToolInputError(`${f.deckFile} does not read as a deck list, so it was left as it was`);
   const deck = parseDecklist(store.space, text);
+  checkCommanderChange(f, commander, out, inCard);
   const outEntry = out ? deck.entries.find((e) => e.card?.id === out.id) : undefined;
   if (out && !outEntry)
     throw new ToolInputError(`${out.name} is not in the deck`);
   if (inCard) {
-    if (!fitsIdentity(inCard, commander.ci))
+    if (!f.changeCommander && !fitsIdentity(inCard, commander.ci))
       throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
     if (deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta.type))
       throw new ToolInputError(`${inCard.name} is already in the deck`);
@@ -41240,26 +41340,37 @@ function acceptSwap(store, input3, opts = {}) {
     const rest = outEntry.qty > 1 ? [lines[i].replace(/^(\s*)(\d+)/, (_, sp, q) => `${sp}${+q - 1}`)] : [];
     lines.splice(i, 1, ...rest, ...inLine ? [inLine] : []);
   } else {
-    const last = Math.max(0, ...deck.entries.map((e) => e.line));
+    const main = deck.entries.filter((e) => !/^(commander|companion)/.test(e.section ?? ""));
+    const last = Math.max(0, ...(main.length ? main : deck.entries).map((e) => e.line));
     lines.splice(last, 0, inLine);
   }
   const date6 = opts.today ?? localDate();
-  const changeLog = `# ${date6} accepted swap${f.lever ? ` (${f.lever})` : ""}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
+  const what = f.changeCommander ? "changed commander" : `accepted swap${f.lever ? ` (${f.lever})` : ""}`;
+  const changeLog = `# ${date6} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
   lines.push(`${changeLog}${cr}`);
   const next = lines.join(`
 `) + (hadFinalNewline ? `
 ` : "");
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, next);
-  renameSync(tmp, path);
-  const label = { date: date6, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null };
-  appendLabel(label, opts.labelsPath ?? LABELS_PATH);
+  const label = {
+    date: date6,
+    verdict: "accept",
+    commander: commander.name,
+    out: out?.name ?? null,
+    in: inCard?.name ?? null,
+    lever: f.lever ?? null,
+    deckFile: f.deckFile,
+    note: f.note ?? null,
+    ...f.changeCommander && { changedCommander: true }
+  };
+  saveDeck(path, f.deckFile, next, () => appendLabel(label, opts.labelsPath ?? LABELS_PATH));
+  const nextEntries = parseDecklist(store.space, next).entries;
   return {
     deckFile: path,
     changeLog,
     label,
     before: swapStats(deckNumbers(store, commander, deck.entries)),
-    after: swapStats(deckNumbers(store, commander, parseDecklist(store.space, next).entries))
+    after: swapStats(deckNumbers(store, commander, nextEntries)),
+    ...f.changeCommander && { offColor: deckNumbers(store, inCard, nextEntries).offIdentity }
   };
 }
 function rejectSwap(store, input3, opts = {}) {
@@ -41865,7 +41976,7 @@ function outCard(store, name, entries) {
 // server/store.ts
 import { Database as Database2 } from "bun:sqlite";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
 import { dirname as dirname2 } from "path";
 var STORE_SCHEMA = 2;
 var MANIFEST_PATH = process.env.MTG_DECK_STORE_MANIFEST ?? new URL("./store.json", import.meta.url).pathname;
@@ -41911,7 +42022,7 @@ async function installStore(manifest, dbPath = DB_PATH, fetchImpl = fetch) {
   try {
     checkStoreSchema(tmp);
   } catch (e) {
-    rmSync(tmp, { force: true });
+    rmSync2(tmp, { force: true });
     throw e;
   }
   renameSync2(tmp, dbPath);
@@ -41928,7 +42039,7 @@ async function ensureStore(dbPath = DB_PATH) {
   const manifest = readManifest();
   if (storeIsCurrent(manifest, dbPath))
     return checkStoreSchema(dbPath);
-  rmSync(stampPath(dbPath), { force: true });
+  rmSync2(stampPath(dbPath), { force: true });
   await installStore(manifest, dbPath);
 }
 if (false) {}
@@ -42024,7 +42135,7 @@ function createDeckServer(store, verdicts = {}) {
   }, async ({ detail, ...args }) => withStore(store, (s) => detail ? swapCandidates(s, args) : compactSwapCandidates(swapCandidates(s, args))));
   server.registerTool("accept_swap", {
     title: "Accept a swap",
-    description: "Record that the player accepted a swap: rewrites the deck file (the outgoing card's line becomes the incoming " + "card's line), appends a dated change-log line, and logs the card pair as a quality label. Exact card names only. " + "Give out alone for a cut, in alone for an add. Returns a short receipt: the change-log line written, the file's name, and " + "the deck numbers that moved (average mana value and role counts, each [before, after]); run deck_stats for the full numbers.",
+    description: "Record that the player accepted a swap: rewrites the deck file (the outgoing card's line becomes the incoming " + "card's line), appends a dated change-log line, and logs the card pair as a quality label. Exact card names only. " + "Give out alone for a cut, in alone for an add. Returns a short receipt: the change-log line written, the file's name, and " + "the deck numbers that moved (average mana value and role counts, each [before, after]); run deck_stats for the full numbers. " + "The commander cannot leave the deck unless the player asks to change it: then `out` is the commander, `in` the new one (a card that can be a commander), " + "and `changeCommander: true`. The new commander's colors then judge the deck; no card is removed, and the receipt's `offColor` gives how many cards fall outside " + "those colors and the first of their names (deck_stats with the new commander lists them all as `offIdentity`). " + "A file that does not read as a deck list is refused and left as it was.",
     inputSchema: acceptSwapShape
   }, async (args) => withStore(store, (s) => acceptReceipt(acceptSwap(s, args, verdicts))));
   server.registerTool("reject_swap", {
