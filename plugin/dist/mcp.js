@@ -39867,6 +39867,40 @@ function cardDetails(store, input2) {
     }
   };
 }
+var LOOKUP_MAX = 50;
+var cardLookupNames = exports_external.array(exports_external.string()).min(1).max(LOOKUP_MAX).optional().describe(`Up to ${LOOKUP_MAX} card names, looked up together; give this or \`name\`. Each name resolves as \`name\` does`);
+var noCard = (note) => ({ name: null, manaCost: null, manaValue: null, typeLine: null, power: null, toughness: null, keywords: null, oracleText: null, note });
+function lookupCards(store, names) {
+  const q = store.db.query("SELECT * FROM cards WHERE id = ?");
+  return names.map((asked) => {
+    let hit;
+    try {
+      hit = resolveCard(store, asked);
+    } catch (e) {
+      if (e instanceof ToolInputError)
+        return noCard(e.message);
+      throw e;
+    }
+    const first = store.names[hit.id - 1];
+    const rivals = hit.matchedBy !== "fuzzy" ? hit.alternatives : hit.alternatives.filter((a) => editDistance(normName(asked), normName(a)) === editDistance(normName(asked), first.norm));
+    if (rivals.length)
+      return noCard(`"${asked}" fits several cards, so none was picked: ${[first.name, ...rivals].join("; ")}`);
+    const r = q.get(hit.id);
+    if (!r)
+      throw new Error(`card store is inconsistent: id ${hit.id} resolved but has no row`);
+    return {
+      name: r.name,
+      manaCost: r.mana_cost,
+      manaValue: r.mana_value,
+      typeLine: r.type_line,
+      power: r.power,
+      toughness: r.toughness,
+      keywords: JSON.parse(r.keywords),
+      oracleText: r.oracle_text,
+      note: hit.matchedBy === "exact" || hit.matchedBy === "face" ? null : `"${asked}" is not an exact name; read as this card`
+    };
+  });
+}
 var CURVE = ["0", "1", "2", "3", "4", "5", "6", "7+"];
 var COLORS = ["W", "U", "B", "R", "G"];
 var deckStatsShape = {
@@ -39888,12 +39922,12 @@ function storeIdOf(store, oracleId) {
 }
 function cardFacts2(store, commander, entries) {
   const ids = new Set([commander.id, ...entries.flatMap((e) => e.card ? [e.card.id] : [])]);
-  const q = store.db.query("SELECT name, mana_value, type_line, oracle_text FROM cards WHERE id = ?");
+  const q = store.db.query("SELECT name, mana_value, type_line, power, toughness, oracle_text FROM cards WHERE id = ?");
   return [...ids].map((oracleId) => {
     const r = q.get(storeIdOf(store, oracleId));
     if (!r)
       throw new Error(`card store is inconsistent: oracle id ${oracleId} resolved but has no row`);
-    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, oracleText: r.oracle_text };
+    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, power: r.power, toughness: r.toughness, oracleText: r.oracle_text };
   }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 }
 var deckPath = (deckFile) => isAbsolute(deckFile) ? deckFile : join2(DECK_ROOT, deckFile);
@@ -40220,7 +40254,9 @@ function compactCard(r) {
     }
   };
 }
-var FACT_COLUMNS = ["name", "manaValue", "typeLine", "oracleText"];
+var LOOKUP_COLUMNS = ["name", "manaCost", "manaValue", "typeLine", "power", "toughness", "keywords", "oracleText", "note"];
+var cardLookupTable = (cards) => ({ cards: table(LOOKUP_COLUMNS, cards) });
+var FACT_COLUMNS = ["name", "manaValue", "typeLine", "power", "toughness", "oracleText"];
 var cardFactsTable = (facts) => table(FACT_COLUMNS, facts);
 function compactDeckStats(r, opts) {
   const { cardFacts: cardFacts3, ...rest } = r;
@@ -41916,8 +41952,8 @@ async function withStore(store, run) {
   return toolResult(() => run(s));
 }
 var DETAIL = "Pass `detail: true` for the full result";
-var CARD_FACTS = "Pass `cardFacts: true` for every deck card's mana value, type line and rules text too (`cardFacts`, a table: " + "`columns` named once, one row per card, lands and the commander included) and quote card facts from there; ask once per " + "deck, on deck_stats or diagnose, whichever comes first.";
-var cardFactsFlag = exports_external.boolean().optional().describe("true = also every deck card's mana value, type line and rules text (default false)");
+var CARD_FACTS = "Pass `cardFacts: true` for every deck card's mana value, type line, power and toughness (null when it has none) and rules text too (`cardFacts`, a table: " + "`columns` named once, one row per card, lands and the commander included) and quote card facts from there; ask once per " + "deck, on deck_stats or diagnose, whichever comes first.";
+var cardFactsFlag = exports_external.boolean().optional().describe("true = also every deck card's mana value, type line, power and toughness, and rules text (default false)");
 function createDeckServer(store, verdicts = {}) {
   const server = new McpServer({ name: "mtg-deck", version: "0.1.0" });
   server.registerTool("find_cards", {
@@ -41932,9 +41968,19 @@ function createDeckServer(store, verdicts = {}) {
   }, async (args) => withStore(store, (s) => findTags(s, args)));
   server.registerTool("card", {
     title: "Card details",
-    description: "Details for one card: cost, mana value, type line, rules text, power/toughness, keywords, color identity, price, " + "its Scryfall Tagger tag labels and its deck role names. The name resolves fuzzily; `matchedBy` and `alternatives` show how. " + `${DETAIL}: the store ids, the type line in parts, each tag's weight and the tags that give each role.`,
-    inputSchema: { ...cardShape, detail: detailFlag }
-  }, async ({ detail, ...args }) => withStore(store, (s) => detail ? cardDetails(s, args) : compactCard(cardDetails(s, args))));
+    description: "Details for one card: cost, mana value, type line, rules text, power/toughness, keywords, color identity, price, " + "its Scryfall Tagger tag labels and its deck role names. The name resolves fuzzily; `matchedBy` and `alternatives` show how. " + `${DETAIL}: the store ids, the type line in parts, each tag's weight and the tags that give each role. ` + `To read several cards (a shortlist's candidates before judging them, say), pass \`names\`, up to ${LOOKUP_MAX}, instead of one lookup per card: ` + "one table (`columns` named once) with a row per name in the order asked, holding name, cost, mana value, type line, power, toughness, keywords and rules text. " + "A `names` row has no tags or roles and takes no `detail`. A name nothing matches, or one that fits several cards, gets no card and a `note` saying why, without failing the call; " + "a partial or misspelled name read as one card says so in its `note`. Deck cards are already in `cardFacts` (deck_stats or diagnose): do not look them up again.",
+    inputSchema: { name: cardShape.name.optional(), names: cardLookupNames, detail: detailFlag }
+  }, async ({ name, names, detail }) => withStore(store, (s) => {
+    if (name === undefined === (names === undefined))
+      throw new ToolInputError("give exactly one of name or names");
+    if (names !== undefined) {
+      if (detail)
+        throw new ToolInputError("detail is for one card: look it up by name");
+      return cardLookupTable(lookupCards(s, names));
+    }
+    const input3 = { name };
+    return detail ? cardDetails(s, input3) : compactCard(cardDetails(s, input3));
+  }));
   server.registerTool("deck_stats", {
     title: "Deck stats",
     description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load, plus unresolved lines and off-identity cards; with the player's confirmed plan (`plan`: themes, " + "priority cards, themes to avoid), plan fit: which cards fit it and which do not. " + CARD_FACTS + " `detail: true` returns them as one object per card. " + "Give the commander and either a decklist file path or the pasted list.",
