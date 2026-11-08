@@ -105,11 +105,16 @@ function renderSwapResult(result: Record<string, unknown>): string {
     if (!isRecord(c)) return;
     const name = (side: unknown) => (isRecord(side) && isString(side.name) ? `${side.name} (MV ${side.manaValue})` : "none");
     // under target is the alarm; a drop that stays at target is shown plainly. Sessions recorded before belowTarget
-    // existed have no such field and keep their old "DROPS ROLE" mark.
-    const flag = c.belowTarget === true ? " | UNDER TARGET"
-      : !c.dropsRole ? ""
-      : c.belowTarget === false ? " | drops a role, still at or above target" : " | DROPS ROLE";
-    lines.push(`${i + 1}. out ${name(c.out)} | in ${name(c.in)} | ${String(c.reason)} | delta ${JSON.stringify(c.delta)}${flag}`);
+    // existed have no such field and keep their old "DROPS ROLE" mark. The compact shape (DT-6.16) has no flags, only
+    // the role drops and below-target roles, present when there are some, and no delta when no role count moves.
+    const compact = !("dropsRole" in c);
+    const dropsRole = compact ? Array.isArray(c.roleDrops) && c.roleDrops.length > 0 : !!c.dropsRole;
+    const belowTarget = compact ? Array.isArray(c.rolesBelowTarget) && c.rolesBelowTarget.length > 0 : c.belowTarget;
+    const flag = belowTarget === true ? " | UNDER TARGET"
+      : !dropsRole ? ""
+      : belowTarget === false ? " | drops a role, still at or above target" : " | DROPS ROLE";
+    const after = isRecord(c.after) && typeof c.after.averageManaValue === "number" ? ` | after avg MV ${c.after.averageManaValue}` : "";
+    lines.push(`${i + 1}. out ${name(c.out)} | in ${name(c.in)} | ${String(c.reason)}${after} | delta ${JSON.stringify(c.delta ?? {})}${flag}`);
   });
   if (Array.isArray(result.notes) && result.notes.length) lines.push(`notes: ${JSON.stringify(result.notes)}`);
   return lines.join("\n");

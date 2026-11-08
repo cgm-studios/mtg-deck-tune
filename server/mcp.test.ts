@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import fc from "fast-check";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSpace, normName as normNameOf, parseDecklist, resolveName } from "./deck-pool";
@@ -16,6 +16,7 @@ import { acceptSwap, LABELS_PATH, rejectSwap, swapCandidates } from "./swap-tool
 import { diagnose } from "./diagnose";
 import { shortlist } from "./shortlist";
 import { createDeckServer } from "./mcp";
+import { acceptReceipt, rejectReceipt } from "./compact";
 import { loadRoleIndex, roleSheet } from "./roles";
 import { readJSONL } from "./scryfall";
 
@@ -554,8 +555,10 @@ test("stdio smoke: .mcp.json registers mtg-deck, and the registered command answ
     expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "shortlist", "swap_candidates", "tags"]);
     const res = await stdio.callTool({ name: "find_cards", arguments: { colorIdentity: "U", types: ["Legendary", "Creature"], subtypes: ["Merfolk"], keywords: ["Flying"], manaValue: { max: 3 } } });
     expect(res.isError).toBeFalsy();
-    const out = res.structuredContent as { cards: { name: string }[] };
-    expect(out.cards.map((c) => c.name)).toContain("Namor the Sub-Mariner");
+    // DT-6.16: the cards come as a table, the name in the first column
+    const out = res.structuredContent as { cards: { columns: string[]; rows: unknown[][] } };
+    expect(out.cards.columns[0]).toBe("name");
+    expect(out.cards.rows.map((r) => r[0])).toContain("Namor the Sub-Mariner");
     expect(JSON.parse((res.content as { text: string }[])[0].text)).toEqual(out);
   } finally {
     await stdio.close();
@@ -1006,9 +1009,9 @@ test("neighbors tool: a card outside the commander's identity, a land, and an in
   expect(bad.isError).toBe(true);
 });
 
-test("swap tools over MCP: swap_candidates answers through the client with the same result as the function; mistakes and SQL come back as tool errors", async () => {
+test("swap tools over MCP: swap_candidates answers through the client with the same result as the function (detail: true; compact.test.ts checks the default); mistakes and SQL come back as tool errors", async () => {
   const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever: "plan", card: "Remand", limit: 3, plan: NAMOR_PLAN };
-  const res = await client.callTool({ name: "swap_candidates", arguments: args });
+  const res = await client.callTool({ name: "swap_candidates", arguments: { ...args, detail: true } });
   expect(res.isError).toBeFalsy();
   expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(swapCandidates(store, args as Parameters<typeof swapCandidates>[1]))));
   const evil = "x' OR '1'='1'; DROP TABLE cards; --";
@@ -1100,6 +1103,66 @@ test("verdict labels: every accept and every reject appends one label row with i
   }
 });
 
+// ---------- receipts (DT-6.16, ISC-103) ----------
+// accept_swap and reject_swap answer with a receipt of at most 300 characters that still says what changed: the accept
+// receipt carries the change-log line written to the file (the swap itself), the file's name and the deck numbers that
+// moved; the reject receipt carries the verdict and the pair logged. Random swaps on temp deck files with names of any length.
+
+const receiptDraw = fc.record({
+  commander: fc.constantFrom(...SWAP_COMMANDERS), seeds: fc.array(fc.nat(), { minLength: 10, maxLength: 10 }),
+  outAt: fc.option(fc.nat(), { nil: undefined }), inAt: fc.nat(), withIn: fc.boolean(),
+  lever: fc.option(fc.constantFrom("plan", "cheaper", "budget", "roles", "redundancy" as const), { nil: undefined }),
+  file: fc.stringMatching(/^[a-z0-9 _-]{1,150}$/), note: fc.option(fc.string({ minLength: 1, maxLength: 500 }), { nil: undefined }),
+});
+
+test("ISC-103: for random accepts and rejects on temp deck files, every receipt is 300 characters or fewer and still says what changed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "isc103-"));
+  const labelsPath = join(dir, "labels.jsonl");
+  let accepts = 0, numbersShown = 0;
+  try {
+    fc.assert(fc.property(receiptDraw, (r) => {
+      const cmd = ciOf(r.commander);
+      const inside = cards.filter((c) => c.name !== r.commander && fitsIn(c.ci, cmd));
+      const deckNames = [...new Set(r.seeds.map((s) => inside[s % inside.length].name))];
+      const pool = inside.filter((c) => !c.land && !deckNames.includes(c.name));
+      const out = r.outAt === undefined ? undefined : deckNames[r.outAt % deckNames.length];
+      const inn = r.withIn || out === undefined ? pool[r.inAt % pool.length].name : undefined;
+      const name = `${r.file}.txt`;
+      const deckFile = join(dir, name);
+      writeFileSync(deckFile, `${deckNames.map((n) => `1 ${n}`).join("\n")}\n`);
+      const base = { commander: r.commander, out, in: inn, lever: r.lever, note: r.note };
+
+      const res = acceptSwap(store, { ...base, deckFile }, { labelsPath });
+      const receipt = acceptReceipt(res);
+      expect(JSON.stringify(receipt).length).toBeLessThanOrEqual(300);
+      // the swap: the change-log line the file now ends with, naming both cards, in the file the receipt names
+      expect(receipt.verdict).toBe("accept");
+      expect(readFileSync(deckFile, "utf8").trimEnd().split("\n").at(-1)).toBe(receipt.changeLog);
+      if (out) expect(receipt.changeLog).toContain(`-1 ${out}`);
+      if (inn) expect(receipt.changeLog).toContain(`+1 ${inn}`);
+      expect(receipt.file === name || (receipt.file.startsWith("…") && name.endsWith(receipt.file.slice(1)))).toBe(true);
+      // the numbers that moved, each [before, after] as deck_stats reads the two lists; all of them when they fit
+      const moved: Record<string, [number, number]> = {};
+      if (res.before.averageManaValue !== res.after.averageManaValue) moved.averageManaValue = [res.before.averageManaValue, res.after.averageManaValue];
+      for (const role of Object.keys(res.after.roleCounts)) {
+        if (res.before.roleCounts[role] !== res.after.roleCounts[role]) moved[role] = [res.before.roleCounts[role], res.after.roleCounts[role]];
+      }
+      for (const [k, v] of Object.entries(receipt.changed)) expect([k, v]).toEqual([k, moved[k]]);
+      if (JSON.stringify({ ...receipt, file: name, changed: moved }).length <= 300) expect(receipt.changed).toEqual(moved);
+      accepts++;
+      numbersShown += Object.keys(receipt.changed).length;
+
+      const rej = rejectReceipt(rejectSwap(store, { ...base, deckFile }, { labelsPath }));
+      expect(JSON.stringify(rej).length).toBeLessThanOrEqual(300);
+      expect(rej).toEqual({ verdict: "reject", ...(out && { out }), ...(inn && { in: inn }), ...(r.lever && { lever: r.lever }) });
+    }), { numRuns: 120, seed: 10301 });
+    expect(accepts).toBe(120);
+    expect(numbersShown).toBeGreaterThan(120); // most receipts show the numbers that moved
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+}, 120_000);
+
 // ---------- diagnose (DT-6.4) ----------
 
 test("ISC-41: the diagnose tool's input schema takes the plan (themes, priority cards, themes to avoid), and a call without it is refused", async () => {
@@ -1115,9 +1178,9 @@ test("ISC-41: the diagnose tool's input schema takes the plan (themes, priority 
   expect((emptyPlan.content as { text: string }[])[0].text).toMatch(/at least one theme or one priority card/);
 });
 
-test("diagnose over MCP: the tool answers with the same result as the function; an unknown theme comes back as a tool error naming close themes", async () => {
+test("diagnose over MCP: the tool answers with the same result as the function (detail: true; compact.test.ts checks the default); an unknown theme comes back as a tool error naming close themes", async () => {
   const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: NAMOR_PLAN };
-  const res = await client.callTool({ name: "diagnose", arguments: args });
+  const res = await client.callTool({ name: "diagnose", arguments: { ...args, detail: true } });
   expect(res.isError).toBeFalsy();
   expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(diagnose(store, args))));
   const bad = await client.callTool({ name: "diagnose", arguments: { ...args, plan: { themes: ["Spellslingr"] } } });
@@ -1144,9 +1207,9 @@ test("ISC-41: the shortlist tool's input schema takes the plan (themes, priority
   expect((emptyPlan.content as { text: string }[])[0].text).toMatch(/at least one theme or one priority card/);
 });
 
-test("shortlist over MCP: the tool answers with the function's result; an unknown role or engine event is a tool error listing what is known", async () => {
+test("shortlist over MCP: the tool answers with the function's result (detail: true; compact.test.ts checks the default); an unknown role or engine event is a tool error listing what is known", async () => {
   const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: NAMOR_PLAN, problem: { role: "removal" } };
-  const res = await client.callTool({ name: "shortlist", arguments: args });
+  const res = await client.callTool({ name: "shortlist", arguments: { ...args, detail: true } });
   expect(res.isError).toBeFalsy();
   expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(shortlist(store, args))));
   const role = await client.callTool({ name: "shortlist", arguments: { ...args, problem: { role: "removals" } } });
@@ -1165,7 +1228,8 @@ test("ISC-67: a swap built from a Teysa shortlist carries the deck before and af
   const plan = { themes: ["Aristocrats"] };
   // the card to swap out: the first off-plan card the diagnosis names
   const off = diagnose(store, { ...TEYSA, plan }).offPlan[0].name;
-  const res = await client.callTool({ name: "shortlist", arguments: { ...TEYSA, plan, problem: { engineGap: "a creature dying" }, out: off } });
+  // the full result (detail: true); the compact default keeps `before`, `after` and `planGain` with `out` (compact.test.ts)
+  const res = await client.callTool({ name: "shortlist", arguments: { ...TEYSA, plan, problem: { engineGap: "a creature dying" }, out: off, detail: true } });
   expect(res.isError).toBeFalsy();
   const r = res.structuredContent as { before: { onPlan: number; planOf: number; cards: number }; out: { name: string; planFit: number }; cards: { name: string; after: { onPlan: number; planOf: number; cards: number; averageManaValue: number; roleCounts: Record<string, number> }; delta: { onPlan: number; cards: number }; planGain: number; evidence: { planFit: { score: number } } }[] };
   expect(r.out).toMatchObject({ name: off, planFit: 0 });
@@ -1236,16 +1300,17 @@ test("ISC-92: for random decks across commanders, diagnose carries every deck ca
   expect(checked).toBeGreaterThan(15 * 10);
 }, 240_000);
 
-test("ISC-92: over MCP, deck_stats and diagnose return the card facts for every card of Namor's list, each with the store's text and nothing more", async () => {
-  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt" };
+test("ISC-92: over MCP, deck_stats and diagnose asked for cardFacts return the card facts for every card of Namor's list, each with the store's text and nothing more", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", cardFacts: true };
   const stats = await client.callTool({ name: "deck_stats", arguments: args });
   const diag = await client.callTool({ name: "diagnose", arguments: { ...args, plan: NAMOR_PLAN } });
   const text = readFileSync(NAMOR_DECK, "utf8");
   for (const res of [stats, diag]) {
     expect(res.isError).toBeFalsy();
-    const got = (res.structuredContent as { cardFacts: FactRow[] }).cardFacts;
+    // DT-6.16: a table, the three facts and the name as its columns, nothing else per card
+    const t = (res.structuredContent as { cardFacts: { columns: string[]; rows: unknown[][] } }).cardFacts;
+    expect(t.columns).toEqual(["name", "manaValue", "typeLine", "oracleText"]);
+    const got = t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]]))) as FactRow[];
     expect([...got].sort(byFactName)).toEqual(expectedFacts(args.commander, text));
-    // lean: the three facts and the name, nothing else per card
-    for (const c of got) expect(Object.keys(c).sort()).toEqual(["manaValue", "name", "oracleText", "typeLine"]);
   }
 }, 60_000);
