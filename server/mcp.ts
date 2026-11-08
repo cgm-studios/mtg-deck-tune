@@ -54,7 +54,7 @@ const cardFactsFlag = z.boolean().optional().describe("true = also every deck ca
 
 /** `verdicts` points the accept and reject labels elsewhere (tests); the server uses the defaults. */
 export function createDeckServer(store: Store | Promise<Store>, verdicts: VerdictOptions = {}): McpServer {
-  const server = new McpServer({ name: "mtg-deck", version: "0.1.0" });
+  const server = new McpServer({ name: "mtg-deck", version: "0.2.0" });
   server.registerTool("find_cards", {
     title: "Find cards",
     description: "Find commander-legal cards in the card store (Scryfall, Tagger tags). Every filter given must hold. " +

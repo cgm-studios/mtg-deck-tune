@@ -1,7 +1,7 @@
 {
   "name": "mtg-deck-tune",
   "displayName": "MTG Deck Tune",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tune a Magic: The Gathering Commander deck toward a goal with card data instead of memory: deck numbers, ranked levers, swap candidates with their effect on the deck, and an honest read on each card.",
   "author": { "name": "cgm-studios", "url": "https://github.com/cgm-studios" },
   "homepage": "https://github.com/cgm-studios/mtg-deck-tune",
