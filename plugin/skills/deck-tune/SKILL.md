@@ -17,6 +17,14 @@ The player wants to talk Magic and deck building, not tools and code. Everything
 
 The first thing the player sees is their deck in numbers, from `deck_stats` (`deckFile` for a file, `decklist` for a paste): average mana value, the curve, role counts, pip load and plan fit. When they give a file, read it as well, so the cards behind the numbers are known. Unresolved lines and off-identity cards come before anything else: show them with the tool's close matches and settle them with the player, because every later number depends on the list being right.
 
+Whenever a reply shows the whole mana curve, it is a bar chart in a code block: one row per mana value in the tool's curve, one `█` per card, `░` filling each row to the length of the longest, and the count at the end.
+
+```
+1   ████████░░░░  8
+2   ████████████ 12
+3   ██████░░░░░░  6
+```
+
 ## Diagnose, then levers
 
 A goal names a feeling, not a fix. "More mana efficient" can mean a heavy top end, too little ramp, too many colored pips, or a curve that is already fine. The diagnosis says which, in this deck's own numbers (how many cards at 5+, what share of the deck's mana they hold, ramp against the suggested target, pips per color), and says plainly when a part of the goal is already met. Where it goes past the numbers (that a heavy card is the deck's finisher and earns its slot, that a low count is fine for this commander), that part is Claude's read and is labeled as one (see below).
