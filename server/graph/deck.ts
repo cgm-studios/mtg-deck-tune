@@ -4,6 +4,7 @@
 // cheaper; roles come from this repo's role index (roles.ts, compiled from the store's Tagger tree); names sort by byte
 // order, not localeCompare (the tools answer the same on every machine); the fields only the graph's CLI printed
 // (zero-link flags, hook tallies, incidental roles, card types) are left out.
+import { deckLines } from "../deck-lines";
 import { rolesOf, type RoleHit, type RoleIndex } from "../roles";
 import type { InteractionIndex, Link } from "./interact";
 import { byteOrder } from "./profile";
@@ -39,41 +40,18 @@ export interface DeckGraph {
   roles?: DeckRoles;
 }
 
-/** Section headers that start a part of the list. Sideboard and maybeboard parts are not the deck. */
-const SECTION = /^(commander|commanders|companion|deck|main|mainboard|sideboard|maybeboard|considering)\b\s*(\(\d+\))?:?$/i;
-const NOT_DECK = /^(sideboard|maybeboard|considering)/i;
-
 /**
- * Parses a decklist as exported by Moxfield, Archidekt, Arena, MTGO or TopDecked: "1 Card", "1x Card", "Card" (one copy),
- * set code and collector number suffixes ("(C21) 263", "[c21]", "*F*"), section headers, "SB:" lines, "Fire/Ice".
- * URLs and a leading "name: name" title line are skipped. Sideboard and maybeboard cards are left out.
+ * A decklist as exported by Moxfield, Archidekt, Arena, MTGO or TopDecked, read by deck-lines.ts (the one reading of a
+ * list). A name with no count is one copy. Sideboard, maybeboard and considering cards are left out.
  */
 export function parseDeckList(text: string): DeckEntry[] {
   const out = new Map<string, DeckEntry>();
-  let section = "deck";
-  let first = true;
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || /^https?:\/\//.test(line) || line.startsWith("//") || line.startsWith("#")) continue;
-    const h = SECTION.exec(line);
-    if (h) { section = h[1].toLowerCase(); first = false; continue; }
-    if (/^SB:\s*/i.test(line)) continue;
-    const m = /^(\d+)\s*x?\s+(.+)$/i.exec(line);
-    // A first uncounted "title: title" line (TopDecked) is the deck's name, not a card.
-    if (!m && first && /^[^:]+:\s/.test(line) && !/\s\/\/\s/.test(line)) { first = false; continue; }
-    first = false;
-    if (NOT_DECK.test(section)) continue;
-    let name = (m ? m[2] : line)
-      .replace(/\s+\*[A-Z]+\*$/i, "")          // *F*, *E* foil and etched markers
-      .replace(/\s+[([][A-Za-z0-9]{2,6}[)\]](\s+\S+)?$/, "") // (C21) 263, [c21], (PLST) KTK-34
-      .replace(/\s+\^[^^]*\^$/, "")           // Archidekt ^tag^ markers
-      .trim();
-    if (/^[^/]+\/[^/]+$/.test(name)) name = name.replace("/", " // "); // Fire/Ice
-    const count = m ? Number(m[1]) : 1;
-    const e = out.get(name) ?? { name, count: 0 };
-    e.count += count;
-    if (section.startsWith("commander")) e.commander = true;
-    out.set(name, e);
+  for (const l of deckLines(text)) {
+    if (l.kind === "aside" || !l.inDeck) continue;
+    const e = out.get(l.name!) ?? { name: l.name!, count: 0 };
+    e.count += l.qty ?? 1;
+    if (l.section.startsWith("commander")) e.commander = true;
+    out.set(l.name!, e);
   }
   return [...out.values()];
 }

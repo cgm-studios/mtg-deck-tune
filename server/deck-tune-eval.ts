@@ -14,7 +14,6 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { readTranscript, renderTranscript } from "./deck-tune-transcript";
@@ -22,7 +21,7 @@ import { readTranscript, renderTranscript } from "./deck-tune-transcript";
 const ROOT = new URL("../", import.meta.url).pathname;
 const SUITE_FILE = join(ROOT, "evals", "deck-tune.yaml");
 const SKILL_FILE = join(ROOT, "plugin", "skills", "deck-tune", "SKILL.md");
-const ASSAY_AGENTIC = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "skills", "Assay", "Tools", "Agentic.ts");
+const ASSAY_AGENTIC = process.env.ASSAY_AGENTIC; // the judge stage's runner: the path to Assay's Agentic.ts
 const REQUIRED_CONTEXT = ["skill", "transcript"];
 const CODE_STAGE_TIMEOUT_MS = 600_000;
 
@@ -93,7 +92,7 @@ async function judgeStage(pattern: string, session: string | undefined, trials: 
   const cases = suite.cases.filter((c) => caseMatches(c.id, pattern));
   if (cases.length === 0) return console.log(`\nNo judge case for ${pattern}: the code stage is all there is for it.`);
   if (!session) return console.log(`\nJudge stage not run: ${cases.map((c) => c.id).join(", ")} judge a real session; give one with --session <session.jsonl>.`);
-  if (!existsSync(ASSAY_AGENTIC)) return console.log(`\nJudge stage unavailable: Assay not found at ${ASSAY_AGENTIC}.`);
+  if (!ASSAY_AGENTIC || !existsSync(ASSAY_AGENTIC)) return console.log(`\nJudge stage unavailable: set ASSAY_AGENTIC to the path of Assay's Agentic.ts${ASSAY_AGENTIC ? ` (not found: ${ASSAY_AGENTIC})` : ""}.`);
   suite.cases = cases.map((c) => ({ ...c, prompt: resolve(session) }));
   if (trials !== undefined) {
     const n = Number(trials);

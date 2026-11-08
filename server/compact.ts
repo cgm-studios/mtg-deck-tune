@@ -154,14 +154,19 @@ export const compactSwapCandidates = (r: SwapCandidatesResult) => ({ ...r, candi
 // ---------- receipts (ISC-103) ----------
 export const RECEIPT_MAX = 300;
 
-export type AcceptReceipt = { verdict: "accept"; file: string; changeLog: string; changed: Record<string, [number, number]> };
+export type AcceptReceipt = {
+  verdict: "accept"; file: string; changeLog: string; changed: Record<string, [number, number]>;
+  /** A commander change only: how many deck cards are now outside its colors, and the first of them that fit. */
+  offColor?: { count: number; names: string[] };
+};
 export type RejectReceipt = { verdict: "reject"; out?: string; in?: string; lever?: string };
 
 /**
  * What an accept changed, in at most 300 characters: the change-log line written to the deck file (the date, the lever
  * and the swap itself), the file's name, and the deck numbers that moved (average mana value, then each role count, as
- * [before, after]). Over the limit, the numbers go first (last role first), then the file name keeps its end; the
- * change-log line always stays (two of the longest card names leave room for it).
+ * [before, after]); after a commander change, also how many cards are now off-color and their names. Over the limit, the
+ * numbers go first (last role first), then the off-color names (last first; the count stays and deck_stats lists them all),
+ * then the file name keeps its end; the change-log line always stays (two of the longest card names leave room for it).
  */
 export function acceptReceipt(r: AcceptSwapResult): AcceptReceipt {
   const changed: [string, [number, number]][] = [];
@@ -170,13 +175,19 @@ export function acceptReceipt(r: AcceptSwapResult): AcceptReceipt {
     const was = r.before.roleCounts[role] ?? 0, is = r.after.roleCounts[role];
     if (was !== is) changed.push([role, [was, is]]);
   }
-  const build = (file: string, n: number): AcceptReceipt => ({ verdict: "accept", file, changeLog: r.changeLog, changed: Object.fromEntries(changed.slice(0, n)) });
+  const off = r.offColor;
+  const build = (file: string, n: number, names: number): AcceptReceipt => ({
+    verdict: "accept", file, changeLog: r.changeLog, changed: Object.fromEntries(changed.slice(0, n)),
+    ...(off && { offColor: { count: off.length, names: off.slice(0, names) } }),
+  });
   const size = (x: AcceptReceipt) => JSON.stringify(x).length;
   const file = basename(r.deckFile);
-  for (let n = changed.length; n >= 0; n--) if (size(build(file, n)) <= RECEIPT_MAX) return build(file, n);
+  const allNames = off?.length ?? 0;
+  for (let n = changed.length; n >= 0; n--) if (size(build(file, n, allNames)) <= RECEIPT_MAX) return build(file, n, allNames);
+  for (let names = allNames - 1; names >= 0; names--) if (size(build(file, 0, names)) <= RECEIPT_MAX) return build(file, 0, names);
   const chars = [...file];
   for (let keep = chars.length - 1; keep >= 1; keep--) {
-    const short = build(`…${chars.slice(-keep).join("")}`, 0);
+    const short = build(`…${chars.slice(-keep).join("")}`, 0, 0);
     if (size(short) <= RECEIPT_MAX) return short;
   }
   throw new Error(`accept receipt: the change-log line alone is over ${RECEIPT_MAX} characters: ${r.changeLog}`);

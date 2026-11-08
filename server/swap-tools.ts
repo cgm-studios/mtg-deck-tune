@@ -3,11 +3,11 @@
 // the store inside the commander's color identity, comes with its reason, and shows the deck numbers before and after
 // (ISA ISC-7 to 11, ISC-21). Same inputs, same answer, card for card. SQL is fixed fragments with bound values.
 
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ciMask, fitsIdentity } from "./color-identity";
-import { parseDecklist, withGraph, type DeckEntry, type Space, type SpaceCard } from "./deck-pool";
+import { parseDecklist, readsAsDeck, withGraph, type DeckEntry, type Space, type SpaceCard } from "./deck-pool";
 import { swapsFor } from "./deck-swaps";
 import {
   deckNumbers, deckPath, readDeck, resolveCard, resolveCommander, ToolInputError, unresolvedLines,
@@ -562,6 +562,7 @@ export type VerdictOptions = { labelsPath?: string; today?: string }; // tests p
 export type Label = {
   date: string; verdict: "accept" | "reject"; commander: string; out: string | null; in: string | null;
   lever: Lever | null; deckFile: string | null; note: string | null;
+  changedCommander?: true; // the swap replaced the commander (ISC-115)
 };
 
 const verdictFields = {
@@ -574,6 +575,7 @@ const verdictFields = {
 export const acceptSwapShape = {
   ...verdictFields,
   deckFile: z.string().min(1).describe("Path to the `1 Card Name` deck file to rewrite, absolute or relative to the project directory"),
+  changeCommander: z.boolean().optional().describe("true = this swap replaces the commander: `out` is the current commander and `in` a card that can be a commander. Without it the commander cannot leave the deck"),
 };
 export const rejectSwapShape = {
   ...verdictFields,
@@ -583,7 +585,11 @@ const acceptSwapInput = z.object(acceptSwapShape).strict();
 const rejectSwapInput = z.object(rejectSwapShape).strict();
 export type AcceptSwapInput = z.input<typeof acceptSwapInput>;
 export type RejectSwapInput = z.input<typeof rejectSwapInput>;
-export type AcceptSwapResult = { deckFile: string; changeLog: string; label: Label; before: SwapStats; after: SwapStats };
+export type AcceptSwapResult = {
+  deckFile: string; changeLog: string; label: Label; before: SwapStats; after: SwapStats;
+  /** Only when the commander changed: the deck's cards outside the new commander's colors, in list order. They stay in the deck. */
+  offColor?: string[];
+};
 export type RejectSwapResult = { label: Label };
 
 const localDate = () => new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD in the machine's time zone
@@ -607,17 +613,56 @@ function appendLabel(label: Label, path: string) {
   appendFileSync(path, `${JSON.stringify(label)}\n`);
 }
 
+// A legendary creature on the front face, or a card that says so.
+const canBeCommander = (c: SpaceCard) => /\bLegendary\b.*\bCreature\b/.test(c.meta!.type) || /can be your commander/i.test(c.meta!.text);
+
+// ISC-115: the commander leaves only when the call says it is changing, and only for a card that can lead the deck.
+function checkCommanderChange(f: { changeCommander?: boolean }, commander: SpaceCard, out: SpaceCard | null, inCard: SpaceCard | null) {
+  const leaving = out?.id === commander.id;
+  if (!f.changeCommander) {
+    if (leaving) throw new ToolInputError(`${commander.name} is the commander. It cannot be cut; to replace it, name a new commander as in and pass changeCommander: true`);
+    return;
+  }
+  if (!leaving) throw new ToolInputError(`changeCommander: out must be the commander, ${commander.name}`);
+  if (!inCard) throw new ToolInputError("changeCommander needs the new commander as in; a commander cannot be cut");
+  if (!canBeCommander(inCard)) throw new ToolInputError(`${inCard.name} cannot be a commander`);
+}
+
+// ISC-116, ISC-117: the new text goes to a temp file beside the real file (through a symlink, so the link stays), with the
+// file's own mode. The label is written next and the file replaced last, so a label that cannot be written leaves the
+// deck as it was. A replace that fails after that leaves a label for a swap that did not happen, which is the rarer and
+// lesser fault; the call still fails.
+function saveDeck(path: string, shownAs: string, next: string, record: () => void) {
+  const target = realpathSync(path);
+  const mode = statSync(target).mode & 0o7777;
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, next, { mode });
+    chmodSync(tmp, mode); // the umask may have narrowed it
+    try {
+      record();
+    } catch (e) {
+      throw new Error(`the swap could not be recorded (${e instanceof Error ? e.message : String(e)}), so ${shownAs} was left as it was`);
+    }
+    renameSync(tmp, target);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
 export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOptions = {}): AcceptSwapResult {
   const f = acceptSwapInput.parse(input);
   const { card: commander } = resolveCommander(store, f.commander);
   const { out, inCard } = pairOf(store, f);
   const path = deckPath(f.deckFile);
   const text = readDeck({ deckFile: path });
+  if (!readsAsDeck(store.space, text)) throw new ToolInputError(`${f.deckFile} does not read as a deck list, so it was left as it was`);
   const deck = parseDecklist(store.space, text);
+  checkCommanderChange(f, commander, out, inCard);
   const outEntry = out ? deck.entries.find((e) => e.card?.id === out.id) : undefined;
   if (out && !outEntry) throw new ToolInputError(`${out.name} is not in the deck`);
   if (inCard) {
-    if (!fitsIdentity(inCard, commander.ci)) throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
+    if (!f.changeCommander && !fitsIdentity(inCard, commander.ci)) throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
     if (deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta!.type)) throw new ToolInputError(`${inCard.name} is already in the deck`);
   }
 
@@ -632,23 +677,28 @@ export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOp
     const rest = outEntry.qty > 1 ? [lines[i].replace(/^(\s*)(\d+)/, (_, sp: string, q: string) => `${sp}${+q - 1}`)] : [];
     lines.splice(i, 1, ...rest, ...(inLine ? [inLine] : []));
   } else {
-    const last = Math.max(0, ...deck.entries.map((e) => e.line));
+    // after the last card of the main deck; a Commander section can come last in an export
+    const main = deck.entries.filter((e) => !/^(commander|companion)/.test(e.section ?? ""));
+    const last = Math.max(0, ...(main.length ? main : deck.entries).map((e) => e.line));
     lines.splice(last, 0, inLine!);
   }
   const date = opts.today ?? localDate();
-  const changeLog = `# ${date} accepted swap${f.lever ? ` (${f.lever})` : ""}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
+  const what = f.changeCommander ? "changed commander" : `accepted swap${f.lever ? ` (${f.lever})` : ""}`;
+  const changeLog = `# ${date} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
   lines.push(`${changeLog}${cr}`);
   const next = lines.join("\n") + (hadFinalNewline ? "\n" : "");
 
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, next);
-  renameSync(tmp, path);
-  const label: Label = { date, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null };
-  appendLabel(label, opts.labelsPath ?? LABELS_PATH);
+  const label: Label = {
+    date, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null,
+    ...(f.changeCommander && { changedCommander: true as const }),
+  };
+  saveDeck(path, f.deckFile, next, () => appendLabel(label, opts.labelsPath ?? LABELS_PATH));
+  const nextEntries = parseDecklist(store.space, next).entries;
   return {
     deckFile: path, changeLog, label,
     before: swapStats(deckNumbers(store, commander, deck.entries)),
-    after: swapStats(deckNumbers(store, commander, parseDecklist(store.space, next).entries)),
+    after: swapStats(deckNumbers(store, commander, nextEntries)),
+    ...(f.changeCommander && { offColor: deckNumbers(store, inCard!, nextEntries).offIdentity }),
   };
 }
 

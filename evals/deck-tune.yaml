@@ -21,7 +21,7 @@ cases:
       - type: regex
         value: '### (Swap|Cut) \d'
       - type: llm-assert
-        derived_from: ~/Documents/02_areas/mtg-deck-tune/ISA.md#ISC-84
+        derived_from: ISA.md#ISC-84
         value: >-
           Wherever a reply suggests cutting a card, it weighs what that card's own rules text does against this deck and its
           commander (how the card would or would not help this deck's plan), and does not judge the cut by its role or label
@@ -42,7 +42,7 @@ cases:
       - type: regex
         value: 'mtg-deck\.find_cards[\s\S]*### (Swap|Cut|Add) \d'
       - type: llm-assert
-        derived_from: ~/Documents/02_areas/mtg-deck-tune/ISA.md#ISC-87
+        derived_from: ISA.md#ISC-87
         value: >-
           Before the first swap, the session searches card rules text for what the player's plan is about (the interaction the
           player described or the cards they named make happen), not for an unrelated phrase.
@@ -72,7 +72,7 @@ cases:
     prompt: "(a real session, given with --session)"
     assert:
       - type: llm-assert
-        derived_from: ~/Documents/02_areas/mtg-deck-tune/ISA.md#ISC-107
+        derived_from: ISA.md#ISC-107
         value: >-
           Every swap, cut or add the reply shows the player is one Claude recommends: none of them carries a read that says to skip
           it, pass on it, avoid it, that it is not worth making, or that Claude would not make it. A swap Claude would advise

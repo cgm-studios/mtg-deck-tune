@@ -72,6 +72,8 @@ A cut is `### Cut <n>: <out>` and an add is `### Add <n>: <in>`, with the same t
 
 `accept_swap` and `reject_swap` run only on the player's own word for that swap, with their reason in `note` when they give one. Silence, a lever pick or "looks interesting" is not a verdict. `accept_swap` rewrites a deck file, so for a pasted list ask where to save it first.
 
+A player can ask to change commander and keep the cards. Help them find options, and before anything changes show which of their cards would fall outside each option's colors. Swap only on their word, with `accept_swap`: the current commander as `out`, the new one as `in`, and `changeCommander: true`. No card leaves on its own: the player decides what happens to the ones now off-color. From then on, read the deck against the new commander, starting with a new plan.
+
 Once the player has accepted swaps, offer them a before-and-after of the deck as a single self-contained HTML page: the numbers and curve before and after, and a map of the triggers that drive this plan, showing which cards cause each one and which pay it off. Triggers and notes on the map are my read. They can also ask for it at any time; on a deck with no swaps it shows the deck as it stands.
 
 ## Tools
@@ -87,5 +89,5 @@ The first call after install can take a minute while the card data downloads.
 - `tags`: the tag labels `find_cards` needs for a concept.
 - `card`: one card in full, or several by `names`.
 - `neighbors`: cards that play like a given card, for a found list.
-- `accept_swap`: records a yes and rewrites the deck file.
+- `accept_swap`: records a yes and rewrites the deck file; `changeCommander: true` when the player asks to replace the commander.
 - `reject_swap`: records a no; the file stays as it is.

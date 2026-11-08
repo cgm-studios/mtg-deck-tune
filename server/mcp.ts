@@ -186,7 +186,11 @@ export function createDeckServer(store: Store | Promise<Store>, verdicts: Verdic
     description: "Record that the player accepted a swap: rewrites the deck file (the outgoing card's line becomes the incoming " +
       "card's line), appends a dated change-log line, and logs the card pair as a quality label. Exact card names only. " +
       "Give out alone for a cut, in alone for an add. Returns a short receipt: the change-log line written, the file's name, and " +
-      "the deck numbers that moved (average mana value and role counts, each [before, after]); run deck_stats for the full numbers.",
+      "the deck numbers that moved (average mana value and role counts, each [before, after]); run deck_stats for the full numbers. " +
+      "The commander cannot leave the deck unless the player asks to change it: then `out` is the commander, `in` the new one (a card that can be a commander), " +
+      "and `changeCommander: true`. The new commander's colors then judge the deck; no card is removed, and the receipt's `offColor` gives how many cards fall outside " +
+      "those colors and the first of their names (deck_stats with the new commander lists them all as `offIdentity`). " +
+      "A file that does not read as a deck list is refused and left as it was.",
     inputSchema: acceptSwapShape,
   }, async (args) => withStore(store, (s) => acceptReceipt(acceptSwap(s, args, verdicts))));
   server.registerTool("reject_swap", {
