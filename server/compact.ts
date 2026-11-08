@@ -158,6 +158,9 @@ export type AcceptReceipt = {
   verdict: "accept"; file: string; changeLog: string; changed: Record<string, [number, number]>;
   /** A commander change only: how many deck cards are now outside its colors, and the first of them that fit. */
   offColor?: { count: number; names: string[] };
+  /** The new commander came from the deck: whether the old one stayed in it, and the deck's size [before, after] when that changed. */
+  oldCommander?: "stays" | "left";
+  cards?: [number, number];
 };
 export type RejectReceipt = { verdict: "reject"; out?: string; in?: string; lever?: string };
 
@@ -179,6 +182,8 @@ export function acceptReceipt(r: AcceptSwapResult): AcceptReceipt {
   const build = (file: string, n: number, names: number): AcceptReceipt => ({
     verdict: "accept", file, changeLog: r.changeLog, changed: Object.fromEntries(changed.slice(0, n)),
     ...(off && { offColor: { count: off.length, names: off.slice(0, names) } }),
+    ...(r.oldCommander && { oldCommander: r.oldCommander }),
+    ...(r.before.cards !== r.after.cards && r.oldCommander && { cards: [r.before.cards, r.after.cards] as [number, number] }),
   });
   const size = (x: AcceptReceipt) => JSON.stringify(x).length;
   const file = basename(r.deckFile);

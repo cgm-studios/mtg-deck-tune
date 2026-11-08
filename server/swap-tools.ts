@@ -563,6 +563,7 @@ export type Label = {
   date: string; verdict: "accept" | "reject"; commander: string; out: string | null; in: string | null;
   lever: Lever | null; deckFile: string | null; note: string | null;
   changedCommander?: true; // the swap replaced the commander (ISC-115)
+  promoted?: true; // the new commander was already in the deck (ISC-119)
 };
 
 const verdictFields = {
@@ -589,6 +590,8 @@ export type AcceptSwapResult = {
   deckFile: string; changeLog: string; label: Label; before: SwapStats; after: SwapStats;
   /** Only when the commander changed: the deck's cards outside the new commander's colors, in list order. They stay in the deck. */
   offColor?: string[];
+  /** Only when the new commander came from the deck (ISC-119): whether the old commander kept a place in it. */
+  oldCommander?: "stays" | "left";
 };
 export type RejectSwapResult = { label: Label };
 
@@ -625,6 +628,7 @@ function checkCommanderChange(f: { changeCommander?: boolean }, commander: Space
   }
   if (!leaving) throw new ToolInputError(`changeCommander: out must be the commander, ${commander.name}`);
   if (!inCard) throw new ToolInputError("changeCommander needs the new commander as in; a commander cannot be cut");
+  if (inCard.id === commander.id) throw new ToolInputError(`${inCard.name} is already the commander`);
   if (!canBeCommander(inCard)) throw new ToolInputError(`${inCard.name} cannot be a commander`);
 }
 
@@ -661,9 +665,13 @@ export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOp
   checkCommanderChange(f, commander, out, inCard);
   const outEntry = out ? deck.entries.find((e) => e.card?.id === out.id) : undefined;
   if (out && !outEntry) throw new ToolInputError(`${out.name} is not in the deck`);
+  // ISC-119: a new commander already in the deck is promoted, not added: every line of it goes, and it takes the old
+  // commander's line. The old commander takes its place when its colors fit the new commander, and leaves when they do not.
+  const promoted = f.changeCommander ? deck.entries.filter((e) => e.card?.id === inCard!.id) : [];
+  const oldStays = promoted.length > 0 && fitsIdentity(commander, inCard!.ci);
   if (inCard) {
     if (!f.changeCommander && !fitsIdentity(inCard, commander.ci)) throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
-    if (deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta!.type)) throw new ToolInputError(`${inCard.name} is already in the deck`);
+    if (!promoted.length && deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta!.type)) throw new ToolInputError(`${inCard.name} is already in the deck`);
   }
 
   // edit by line: entries carry their 1-based line number in the text split on \n (a \r stays on its line)
@@ -672,7 +680,11 @@ export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOp
   if (hadFinalNewline) lines.pop();
   const cr = text.includes("\r\n") ? "\r" : "";
   const inLine = inCard ? `1 ${inCard.name}${cr}` : null;
-  if (outEntry) {
+  if (promoted.length) {
+    lines[outEntry!.line - 1] = inLine!;
+    if (oldStays) lines[promoted[0].line - 1] = `${outEntry!.qty} ${commander.name}${cr}`;
+    for (const e of (oldStays ? promoted.slice(1) : promoted).reverse()) lines.splice(e.line - 1, 1);
+  } else if (outEntry) {
     const i = outEntry.line - 1;
     const rest = outEntry.qty > 1 ? [lines[i].replace(/^(\s*)(\d+)/, (_, sp: string, q: string) => `${sp}${+q - 1}`)] : [];
     lines.splice(i, 1, ...rest, ...(inLine ? [inLine] : []));
@@ -684,13 +696,16 @@ export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOp
   }
   const date = opts.today ?? localDate();
   const what = f.changeCommander ? "changed commander" : `accepted swap${f.lever ? ` (${f.lever})` : ""}`;
-  const changeLog = `# ${date} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
+  // the short form keeps the longest pair of commander names inside the 300-character receipt
+  const changeLog = promoted.length
+    ? `# ${date} commander promoted: ${inCard!.name}; ${commander.name} ${oldStays ? "stays" : "left"}`
+    : `# ${date} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
   lines.push(`${changeLog}${cr}`);
   const next = lines.join("\n") + (hadFinalNewline ? "\n" : "");
 
   const label: Label = {
     date, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null,
-    ...(f.changeCommander && { changedCommander: true as const }),
+    ...(f.changeCommander && { changedCommander: true as const }), ...(promoted.length > 0 && { promoted: true as const }),
   };
   saveDeck(path, f.deckFile, next, () => appendLabel(label, opts.labelsPath ?? LABELS_PATH));
   const nextEntries = parseDecklist(store.space, next).entries;
@@ -699,6 +714,7 @@ export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOp
     before: swapStats(deckNumbers(store, commander, deck.entries)),
     after: swapStats(deckNumbers(store, commander, nextEntries)),
     ...(f.changeCommander && { offColor: deckNumbers(store, inCard!, nextEntries).offIdentity }),
+    ...(promoted.length > 0 && { oldCommander: oldStays ? "stays" as const : "left" as const }),
   };
 }
 

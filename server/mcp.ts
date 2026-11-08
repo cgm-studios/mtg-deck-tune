@@ -190,6 +190,7 @@ export function createDeckServer(store: Store | Promise<Store>, verdicts: Verdic
       "The commander cannot leave the deck unless the player asks to change it: then `out` is the commander, `in` the new one (a card that can be a commander), " +
       "and `changeCommander: true`. The new commander's colors then judge the deck; no card is removed, and the receipt's `offColor` gives how many cards fall outside " +
       "those colors and the first of their names (deck_stats with the new commander lists them all as `offIdentity`). " +
+      "A new commander already in the deck is promoted: one copy of it remains, the old commander takes its place when its colors fit (`oldCommander: \"stays\"`), and otherwise leaves (`\"left\"`, with `cards` giving the deck's size [before, after]). " +
       "A file that does not read as a deck list is refused and left as it was.",
     inputSchema: acceptSwapShape,
   }, async (args) => withStore(store, (s) => acceptReceipt(acceptSwap(s, args, verdicts))));

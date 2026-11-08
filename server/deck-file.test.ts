@@ -122,9 +122,6 @@ test("ISC-115: the flag is only for the commander's own line, and the incoming c
   for (const notOne of ["Grizzly Bears", "Sol Ring", "Consider", "Karn Liberated"]) {
     expect(() => acceptSwap(store, { commander: NAMOR, deckFile, out: NAMOR, in: notOne, changeCommander: true }, { labelsPath })).toThrow(/cannot be a commander/);
   }
-  // a new commander already in the list would be a second copy: it has to leave the list first
-  const holds = deckFileWith(`${SMALL}1 Talrand, Sky Summoner\n`);
-  expect(() => acceptSwap(store, { commander: NAMOR, deckFile: holds, out: NAMOR, in: "Talrand, Sky Summoner", changeCommander: true }, { labelsPath })).toThrow(/already in the deck/);
   expect(readFileSync(deckFile, "utf8")).toBe(SMALL);
 });
 
@@ -177,6 +174,57 @@ test("ISC-115 over MCP: the tool takes the flag, says what it does, and returns 
   } finally {
     await client.close();
   }
+});
+
+// ---------- ISC-119 ----------
+
+test("ISC-119: a card already in the deck is promoted: one copy of it, the old commander takes its slot when its colors fit, and the deck keeps its size", () => {
+  const deckFile = deckFileWith(`1 ${NAMOR}\n1 Sol Ring\n1 Talrand, Sky Summoner\n1 Opt\n`);
+  const before = deckStats(store, { commander: NAMOR, deckFile }).cards;
+  const res = acceptSwap(store, { commander: NAMOR, deckFile, out: NAMOR, in: "Talrand, Sky Summoner", changeCommander: true }, { labelsPath, today: "2026-11-08" });
+  const lines = readFileSync(deckFile, "utf8").trimEnd().split("\n");
+  expect(lines).toEqual(["1 Talrand, Sky Summoner", "1 Sol Ring", `1 ${NAMOR}`, "1 Opt", `# 2026-11-08 commander promoted: Talrand, Sky Summoner; ${NAMOR} stays`]);
+  const after = deckStats(store, { commander: "Talrand, Sky Summoner", deckFile });
+  expect([after.cards, after.offIdentity, after.commanderInDeck]).toEqual([before, [], true]);
+  const receipt = acceptReceipt(res);
+  expect(receipt).toMatchObject({ oldCommander: "stays", offColor: { count: 0, names: [] } });
+  expect(receipt.cards).toBeUndefined();
+  expect(res.label).toMatchObject({ changedCommander: true, promoted: true, out: NAMOR, in: "Talrand, Sky Summoner" });
+});
+
+test("ISC-119: an old commander outside the new colors leaves, and the receipt says so and that the deck is a card short; the rest is reported off-color and stays", () => {
+  const deckFile = deckFileWith(`1 ${NAMOR}\n1 Krenko, Mob Boss\n1 Counterspell\n1 Opt\n`);
+  const receipt = acceptReceipt(acceptSwap(store, { commander: NAMOR, deckFile, out: NAMOR, in: "Krenko, Mob Boss", changeCommander: true }, { labelsPath, today: "2026-11-08" }));
+  expect(readFileSync(deckFile, "utf8").trimEnd().split("\n")).toEqual(["1 Krenko, Mob Boss", "1 Counterspell", "1 Opt", `# 2026-11-08 commander promoted: Krenko, Mob Boss; ${NAMOR} left`]);
+  expect(receipt).toMatchObject({ oldCommander: "left", cards: [4, 3], offColor: { count: 2, names: ["Counterspell", "Opt"] } });
+});
+
+test("ISC-119: the new commander takes the Commander section, every extra copy goes, and it cannot replace itself", () => {
+  const sectioned = deckFileWith(`Commander (1)\n1 ${NAMOR}\nMain (2)\n1 Talrand, Sky Summoner\n1 Opt\n`);
+  acceptSwap(store, { commander: NAMOR, deckFile: sectioned, out: NAMOR, in: "Talrand, Sky Summoner", changeCommander: true }, { labelsPath });
+  expect(readFileSync(sectioned, "utf8").split("\n").slice(0, 5)).toEqual(["Commander (1)", "1 Talrand, Sky Summoner", "Main (2)", `1 ${NAMOR}`, "1 Opt"]);
+  const doubled = deckFileWith(`1 ${NAMOR}\n2 Talrand, Sky Summoner\n1 Opt\n1 Talrand, Sky Summoner\n`);
+  const receipt = acceptReceipt(acceptSwap(store, { commander: NAMOR, deckFile: doubled, out: NAMOR, in: "Talrand, Sky Summoner", changeCommander: true }, { labelsPath }));
+  const named = parseDecklist(store.space, readFileSync(doubled, "utf8")).entries.filter((e) => e.text === "Talrand, Sky Summoner");
+  expect(named.map((e) => e.qty)).toEqual([1]);
+  expect(receipt.cards).toEqual([5, 3]);
+  const self = deckFileWith(SMALL);
+  expect(() => acceptSwap(store, { commander: NAMOR, deckFile: self, out: NAMOR, in: NAMOR, changeCommander: true }, { labelsPath })).toThrow(/already the commander/);
+  expect(readFileSync(self, "utf8")).toBe(SMALL);
+});
+
+test("ISC-119: the receipt holds its 300 characters with the longest commander names, a long file name and a long off-color list; an incoming card from outside the deck has no promotion fields", () => {
+  const longOld = "Reidane, God of the Worthy // Valkmira, Protector's Shield", longNew = "Blitzwing, Cruel Tormentor // Blitzwing, Adaptive Assailant";
+  const deckFile = deckFileWith(`1 ${longOld}\n1 ${longNew}\n${namorList.split("\n").filter((l) => !l.includes(NAMOR)).join("\n")}\n`, `${"long-name-".repeat(14)}.txt`);
+  const receipt = acceptReceipt(acceptSwap(store, { commander: longOld, deckFile, out: longOld, in: longNew, changeCommander: true }, { labelsPath }));
+  expect(JSON.stringify(receipt).length).toBeLessThanOrEqual(300);
+  expect(receipt.oldCommander).toBe("left");
+  expect(receipt.cards![1]).toBe(receipt.cards![0] - 1);
+  expect(receipt.offColor!.count).toBeGreaterThan(0);
+  const outside = deckFileWith(SMALL);
+  const plain = acceptReceipt(acceptSwap(store, { commander: NAMOR, deckFile: outside, out: NAMOR, in: "Talrand, Sky Summoner", changeCommander: true }, { labelsPath }));
+  expect(Object.keys(plain)).not.toContain("oldCommander");
+  expect(Object.keys(plain)).not.toContain("cards");
 });
 
 // ---------- ISC-116 ----------
