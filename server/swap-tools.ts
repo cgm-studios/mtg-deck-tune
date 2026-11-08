@@ -3,16 +3,18 @@
 // the store inside the commander's color identity, comes with its reason, and shows the deck numbers before and after
 // (ISA ISC-7 to 11, ISC-21). Same inputs, same answer, card for card. SQL is fixed fragments with bound values.
 
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ciMask, fitsIdentity } from "./color-identity";
-import { parseDecklist, withGraph, type DeckEntry, type Space, type SpaceCard } from "./deck-pool";
-import { planScore, readPlan, swapsFor, type Plan } from "./deck-swaps";
+import { parseDecklist, readsAsDeck, withGraph, type DeckEntry, type Space, type SpaceCard } from "./deck-pool";
+import { swapsFor } from "./deck-swaps";
 import {
   deckNumbers, deckPath, readDeck, resolveCard, resolveCommander, ToolInputError, unresolvedLines,
   type DeckNumbers, type DeckStats, type Store,
 } from "./deck-tools";
+import { planContext, type PlanContext, type PlanEcho } from "./plan";
+import { planShape } from "./plan-input";
 import { rolesOf } from "./roles";
 
 // ---------- the commander's in-color Card Space ----------
@@ -108,15 +110,15 @@ const roleStatus = (store: Store, counts: Record<string, number>, targets: Recor
 // ---------- numbers before and after ----------
 // The deck_stats numbers that move when one card changes, for the before side (once per answer) and each candidate's
 // after side; `delta` is after minus before, listing only what changed.
-export type SwapStats = Pick<DeckNumbers, "cards" | "nonland" | "averageManaValue" | "curve" | "roleCounts" | "pipLoad"> & { onPlan: number; planOf: number };
+export type SwapStats = Pick<DeckNumbers, "cards" | "nonland" | "averageManaValue" | "curve" | "roleCounts" | "pipLoad"> & { onPlan: number | null; planOf: number | null }; // null without a plan
 export type StatsDelta = {
-  cards: number; averageManaValue: number; onPlan: number;
+  cards: number; averageManaValue: number; onPlan: number | null;
   curve: Record<string, number>; roleCounts: Record<string, number>; pipLoad: Record<string, number>;
 };
 
-const swapStats = (n: DeckNumbers): SwapStats => ({
+export const swapStats = (n: DeckNumbers): SwapStats => ({
   cards: n.cards, nonland: n.nonland, averageManaValue: n.averageManaValue, curve: n.curve, roleCounts: n.roleCounts, pipLoad: n.pipLoad,
-  onPlan: n.planFit.onPlan, planOf: n.planFit.of,
+  onPlan: n.planFit?.onPlan ?? null, planOf: n.planFit?.of ?? null,
 });
 
 function changed(a: Record<string, number>, b: Record<string, number>): Record<string, number> {
@@ -125,13 +127,13 @@ function changed(a: Record<string, number>, b: Record<string, number>): Record<s
   return out;
 }
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
-const statsDelta = (a: SwapStats, b: SwapStats): StatsDelta => ({
-  cards: b.cards - a.cards, averageManaValue: round3(b.averageManaValue - a.averageManaValue), onPlan: b.onPlan - a.onPlan,
+export const statsDelta = (a: SwapStats, b: SwapStats): StatsDelta => ({
+  cards: b.cards - a.cards, averageManaValue: round3(b.averageManaValue - a.averageManaValue), onPlan: a.onPlan === null || b.onPlan === null ? null : b.onPlan - a.onPlan,
   curve: changed(a.curve, b.curve), roleCounts: changed(a.roleCounts, b.roleCounts), pipLoad: changed(a.pipLoad, b.pipLoad),
 });
 
 // The list with one copy of `out` taken away and one `in` added (either may be absent: a cut or an add).
-function applySwap(entries: DeckEntry[], out: SpaceCard | null, inCard: SpaceCard | null): DeckEntry[] {
+export function applySwap(entries: DeckEntry[], out: SpaceCard | null, inCard: SpaceCard | null): DeckEntry[] {
   const next: DeckEntry[] = [];
   let taken = !out;
   for (const e of entries) {
@@ -156,7 +158,7 @@ export const swapCandidatesShape = {
   deckFile: z.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory"),
   decklist: z.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
   lever: z.enum(LEVERS).describe(
-    "plan: in-color Card Space neighbors in the same Region that score higher on the commander's plan, at most 1 mana value more; " +
+    "plan: in-color Card Space neighbors in the same Region that fit the player's plan better (needs `plan`), at most 1 mana value more; " +
     "cheaper: lower mana value; budget: lower Scryfall USD price; " +
     "roles: per-role counts against targets, and cards that fill roles under target; " +
     "redundancy: roles over target, and deck cards that could be cut"),
@@ -165,6 +167,9 @@ export const swapCandidatesShape = {
   targets: z.record(z.string(), z.number().int().min(0)).optional().describe(
     "Role target counts, replacing the defaults for the roles named (e.g. {\"ramp\": 9}): the roles and redundancy levers " +
     "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid). The plan lever needs it; with it, " +
+    "every lever reports plan fit before and after, ties among cuts and fills go to the card that fits the plan, and its priority cards " +
+    "are never offered as the card to cut"),
 };
 const swapCandidatesInput = z.object(swapCandidatesShape).strict();
 export type SwapCandidatesInput = z.input<typeof swapCandidatesInput>;
@@ -176,7 +181,7 @@ export type Evidence = {
   similarity: number | null; // Card Space similarity, when they are neighbors either way
   sharedTags: string[]; // Tagger tags both cards carry directly
   roleTags: string[]; // roles and redundancy levers: the card's own Tagger tags that give the role it fills or relieves
-  planGain: number; // plan score in minus out (deck-swaps planScore); an absent side scores 0
+  planGain: number | null; // plan fit in minus out (plan.ts planScorer); an absent side scores 0; null without a plan
   manaValueDelta: number; // in minus out; an absent side counts 0
   priceDelta: number | null; // in minus out, USD; an absent side costs $0; null when a present card is unpriced
 };
@@ -195,7 +200,7 @@ export type Candidate = {
 export type SwapCandidatesResult = {
   commander: { name: string; colorIdentity: string };
   lever: Lever; card: string | null;
-  plan: Plan;
+  plan: PlanEcho | null;
   before: SwapStats;
   roles: RoleStatus[] | null; // the roles and redundancy levers: every role's count against its target
   candidates: Candidate[];
@@ -204,10 +209,17 @@ export type SwapCandidatesResult = {
 };
 
 type Ctx = {
-  store: Store; commander: SpaceCard; mask: number; plan: Plan; graph: InColor;
+  store: Store; commander: SpaceCard; mask: number; plan: PlanContext | null; graph: InColor;
   entries: DeckEntry[]; inDeck: Set<string>; before: SwapStats;
   targets: Record<string, number>; // every role's target, for the below-target flag under every lever
 };
+
+// A card's fit to the player's plan; 0 when the call carries no plan, so plan-fit tie-breaks fall through.
+const fitOf = (ctx: Ctx, c: SpaceCard) => ctx.plan?.fit(c.id).score ?? 0;
+
+// A priority card of the player's plan is never offered as the card to cut, on any lever (ISC-93): the player named it as
+// what the deck is about, as it is never off the plan (ISC-85). Asked to replace one by name, the per-card levers refuse.
+const isPriority = (ctx: Ctx, c: SpaceCard) => ctx.plan?.fit(c.id).priority === true;
 
 const swapCard = (store: Store, c: SpaceCard): SwapCard =>
   ({ name: c.name, manaValue: c.meta!.cmc, usd: c.meta!.usd, roles: countedRoles(store, c).map((r) => r.role) });
@@ -231,7 +243,7 @@ const tagList = (tags: string[]) => `${tags.slice(0, 6).join(", ")}${tags.length
 // `out` alone is a cut (the redundancy lever), `in` alone an add (a role fill with nothing left to cut).
 function candidate(ctx: Ctx, out: SpaceCard | null, inCard: SpaceCard | null, why: string[], roleTags: string[] = []): Candidate {
   if (!out && !inCard) throw new Error("candidate: needs an outgoing card, an incoming card, or both");
-  const { store, plan } = ctx;
+  const { store } = ctx;
   const l = out && inCard ? links(ctx, out, inCard) : { neighborRank: null, reverseRank: null, similarity: null };
   const outTags = new Set(out ? directTags(store, out.id) : []);
   const sharedTags = inCard ? directTags(store, inCard.id).filter((t) => outTags.has(t)) : [];
@@ -240,9 +252,10 @@ function candidate(ctx: Ctx, out: SpaceCard | null, inCard: SpaceCard | null, wh
   const mvDelta = mv(inCard) - mv(out);
   const inUsd = usd(inCard), outUsd = usd(out);
   const priceDelta = inUsd !== null && outUsd !== null ? round3(inUsd - outUsd) : null;
-  const score = (c: SpaceCard | null) => (c ? planScore(c, plan).score : 0);
-  const evidence: Evidence = { ...l, sharedTags, roleTags, planGain: score(inCard) - score(out), manaValueDelta: mvDelta, priceDelta };
-  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard)));
+  const score = (c: SpaceCard | null) => (c ? fitOf(ctx, c) : 0);
+  const planGain = ctx.plan ? Math.round((score(inCard) - score(out)) * 1000) / 1000 : null;
+  const evidence: Evidence = { ...l, sharedTags, roleTags, planGain, manaValueDelta: mvDelta, priceDelta };
+  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard), ctx.plan));
   const roleDrops = ctx.store.roles.roleNames
     .filter((r) => after.roleCounts[r] < ctx.before.roleCounts[r])
     .map((r) => ({ role: r, before: ctx.before.roleCounts[r], after: after.roleCounts[r] }));
@@ -323,12 +336,21 @@ function leverPicks(ctx: Ctx, out: SpaceCard, lever: "cheaper" | "budget"): Pick
 }
 
 // plan for one card: the MV-10 swap lever (deck-swaps.ts swapsFor, its defaults: same leidenHi Region, a strict plan
-// gain, at most 1 mana value more, reverse neighbors on) run on the commander's in-color Space built from the store.
-// Its order is kept: plan gain × similarity.
+// gain, at most 1 mana value more, reverse neighbors on) run on the commander's in-color Space built from the store,
+// with the player's plan as the fit (plan.ts planScorer). Its order is kept: plan gain × similarity.
 function planPicks(ctx: Ctx, out: SpaceCard, limit: number): Pick[] {
+  const plan = ctx.plan;
+  if (!plan) throw new Error("planPicks: the plan lever runs only with a plan (swapCandidates checks)");
   const deck = new Set([...ctx.inDeck, ctx.commander.id]);
-  return swapsFor(ctx.graph.space, out, deck, ctx.plan, { colorIdentity: ctx.commander.ci, perCard: limit })
-    .map((s) => pick(ctx, out, ctx.store.space.cards.get(s.in.id)!, [`plan: ${s.why.join(", ")} (plan score ${signed(s.gain)})`], 0, s.rank));
+  return swapsFor(ctx.graph.space, out, deck, (c) => plan.fit(c.id).score, { colorIdentity: ctx.commander.ci, perCard: limit })
+    .map((s) => pick(ctx, out, ctx.store.space.cards.get(s.in.id)!, [planWhy(plan, s.in, out, s.gain)], 0, s.rank));
+}
+
+// What the incoming card fits in the plan, and its fit against the outgoing card's.
+function planWhy(plan: PlanContext, inCard: SpaceCard, out: SpaceCard, gain: number): string {
+  const f = plan.fit(inCard.id);
+  const parts = [f.hooks.length > 0 && `works on ${f.hooks.slice(0, 4).join(", ")}`, f.tags.length > 0 && `plan tags: ${tagList(f.tags)}`].filter(Boolean);
+  return `plan: ${parts.join("; ")} (plan fit ${f.score} vs ${plan.fit(out.id).score}, ${signed(Math.round(gain * 1000) / 1000)})`;
 }
 
 const picksFor = (ctx: Ctx, out: SpaceCard, lever: "plan" | "cheaper" | "budget", limit: number) =>
@@ -338,7 +360,7 @@ const picksFor = (ctx: Ctx, out: SpaceCard, lever: "plan" | "cheaper" | "budget"
 // incoming card used once (deck-swaps deckSwaps' rule), in the lever's order.
 const PER_CARD_IN_DECK = 3;
 function deckPicks(ctx: Ctx, lever: "plan" | "cheaper" | "budget", limit: number): Pick[] {
-  const outs = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id ? [[e.card.id, e.card] as const] : []))).values()]
+  const outs = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card] as const] : []))).values()]
     .sort((a, b) => byName(a.name, b.name));
   const all = outs.flatMap((c) => picksFor(ctx, c, lever, PER_CARD_IN_DECK)).sort(lever === "plan" ? PLAN_ORDER : LEVER_ORDER);
   const usedOut = new Set<string>(), usedIn = new Set<string>(), top: Pick[] = [];
@@ -351,31 +373,31 @@ function deckPicks(ctx: Ctx, lever: "plan" | "cheaper" | "budget", limit: number
 }
 
 // redundancy: deck cards that count toward a role over its target and whose removal leaves every role it counts toward
-// at or above its target (so a cut never opens a new gap). Order: relieves the most over-target roles, then lowest
-// plan score (off plan first), then highest mana value, then name.
+// at or above its target (so a cut never opens a new gap), never a priority card of the plan. Order: relieves the most
+// over-target roles, then lowest plan score (off plan first), then highest mana value, then name.
 type Cut = { card: SpaceCard; relieves: RoleStatus[]; tags: string[]; planScore: number };
 function cuts(ctx: Ctx, status: RoleStatus[]): Cut[] {
   const by = new Map(status.map((s) => [s.role, s]));
   const seen = new Set<string>(), out: Cut[] = [];
   for (const e of ctx.entries) {
     const c = e.card;
-    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id)) continue;
+    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id) || isPriority(ctx, c)) continue;
     seen.add(c.id);
     const roles = countedRoles(ctx.store, c);
     const relieves = roles.map((r) => by.get(r.role)!).filter((s) => s.status === "over");
     if (!relieves.length || roles.some((r) => by.get(r.role)!.count - 1 < by.get(r.role)!.target)) continue;
     const tags = [...new Set(roles.filter((r) => relieves.some((s) => s.role === r.role)).flatMap((r) => r.tags))].sort();
-    out.push({ card: c, relieves, tags, planScore: planScore(c, ctx.plan).score });
+    out.push({ card: c, relieves, tags, planScore: fitOf(ctx, c) });
   }
   return out.sort((a, b) => b.relieves.length - a.relieves.length || a.planScore - b.planScore ||
     b.card.meta!.cmc - a.card.meta!.cmc || byName(a.card.name, b.card.name));
 }
 
-const cutWhy = (cut: Cut) => [
+const cutWhy = (ctx: Ctx, cut: Cut) => [
   ...cut.relieves.map((s) => `${s.role} ${s.count} over target ${s.target}`),
   `gives it through Tagger tags: ${tagList(cut.tags)}`,
   "removing it keeps every role at or above target",
-  cut.planScore === 0 ? "off the commander's plan" : `plan score ${cut.planScore}`,
+  ...(ctx.plan ? [cut.planScore === 0 ? "off the player's plan" : `plan fit ${cut.planScore}`] : []),
 ];
 
 // roles: cards that fill a role under its target, from every nonland store card inside the identity that counts toward
@@ -404,7 +426,7 @@ function fills(ctx: Ctx, status: RoleStatus[]): Fill[] {
   const perRole = gaps.map((s) => pool
     .flatMap(({ c, roles }) => {
       const hit = roles.find((r) => r.role === s.role);
-      return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: planScore(c, ctx.plan).score }] : [];
+      return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: fitOf(ctx, c) }] : [];
     })
     .sort((a, b) => b.affinity - a.affinity || (b.nearest?.sim ?? -1) - (a.nearest?.sim ?? -1) || b.planScore - a.planScore ||
       a.card.meta!.cmc - b.card.meta!.cmc || byName(a.card.name, b.card.name))
@@ -426,13 +448,14 @@ function fills(ctx: Ctx, status: RoleStatus[]): Fill[] {
 //      then the most over-target roles relieved.
 //   4. Second choice, a card that costs no role: it counts toward none, or only toward roles the fill also gives.
 //   5. Ties: lowest plan score (off plan first), then highest mana value, then name. Each deck card is cut at most once.
+//   6. A priority card of the plan is never a cut.
 // No card passes 1 and 2: the fill stands as an add.
 type Pairing = { card: SpaceCard; lowered: RoleStatus[]; roles: string[] };
 function pairCuts(ctx: Ctx, list: Fill[], status: RoleStatus[]): (Pairing | null)[] {
   const by = new Map(status.map((s) => [s.role, s]));
   const left = new Map(status.map((s) => [s.role, s.count]));
-  const deck = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.id !== ctx.commander.id ? [[e.card.id, e.card] as const] : []))).values()]
-    .map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: planScore(card, ctx.plan).score }));
+  const deck = [...new Map(ctx.entries.flatMap((e) => (e.card && !e.card.land && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card] as const] : []))).values()]
+    .map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: fitOf(ctx, card) }));
   const used = new Set<string>();
   return list.map((f) => {
     const fillRoles = new Set(countedRoles(ctx.store, f.card).map((r) => r.role));
@@ -472,10 +495,14 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
   const { card: commander } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
   const mask = ciMask(commander.ci);
-  const before = swapStats(deckNumbers(store, commander, deck.entries));
+  if (f.lever === "plan" && f.plan === undefined) {
+    throw new ToolInputError("the plan lever scores cards against the player's plan; pass plan (the confirmed themes or priority cards)");
+  }
+  const plan = planContext(store, commander.name, f.plan);
+  const before = swapStats(deckNumbers(store, commander, deck.entries, plan));
   const targets = targetsFor(store, f.targets);
   const ctx: Ctx = {
-    store, commander, mask, plan: readPlan(commander), graph: inColor(store, mask), entries: deck.entries,
+    store, commander, mask, plan, graph: inColor(store, mask), entries: deck.entries,
     inDeck: new Set(deck.entries.flatMap((e) => (e.card ? [e.card.id] : []))), before, targets,
   };
   const notes: string[] = [];
@@ -488,6 +515,9 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
     if (!ctx.inDeck.has(card.id)) throw new ToolInputError(`${card.name} is not in the deck`);
     if (card.land) throw new ToolInputError(`${card.name} is a land; swap candidates cover nonland cards`);
     if (card.id === commander.id) throw new ToolInputError(`${card.name} is the commander`);
+    if (isPriority(ctx, card)) {
+      throw new ToolInputError(`${card.name} is one of the plan's priority cards, so it is never offered as a cut; if the player wants it replaced, take it out of the plan's priorities first`);
+    }
     if (f.lever === "budget" && card.meta!.usd === null) notes.push(`${card.name} has no Scryfall price, so no card is cheaper in dollars`);
     picks = picksFor(ctx, card, f.lever, f.limit ?? 5);
   } else if (f.lever === "plan" || f.lever === "cheaper" || f.lever === "budget") {
@@ -498,9 +528,12 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
   if (f.lever === "redundancy") {
     const list = cuts(ctx, roles!);
     for (const s of roles!) if (s.status === "over" && !list.some((c) => c.relieves.includes(s))) {
-      notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it also gives a role that would fall below target`);
+      const kept = [...new Map(deck.entries.flatMap((e) => (e.card && !e.card.land && e.card.id !== commander.id && isPriority(ctx, e.card) &&
+        countedRoles(store, e.card).some((r) => r.role === s.role) ? [[e.card.id, e.card.name] as const] : []))).values()].sort(byName);
+      notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it ${kept.length
+        ? `is a priority card of the plan (${kept.join(", ")}) or ` : ""}also gives a role that would fall below target`);
     }
-    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(c), c.tags));
+    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(ctx, c), c.tags));
   }
   if (f.lever === "roles") {
     const list = fills(ctx, roles!).slice(0, f.limit ?? 15);
@@ -512,7 +545,7 @@ export function swapCandidates(store: Store, input: SwapCandidatesInput): SwapCa
   }
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join("") },
-    lever: f.lever, card: card?.name ?? null, plan: ctx.plan, before, roles,
+    lever: f.lever, card: card?.name ?? null, plan: plan?.plan ?? null, before, roles,
     candidates, notes,
     unresolved: unresolvedLines(store, deck.unresolved),
   };
@@ -529,6 +562,8 @@ export type VerdictOptions = { labelsPath?: string; today?: string }; // tests p
 export type Label = {
   date: string; verdict: "accept" | "reject"; commander: string; out: string | null; in: string | null;
   lever: Lever | null; deckFile: string | null; note: string | null;
+  changedCommander?: true; // the swap replaced the commander (ISC-115)
+  promoted?: true; // the new commander was already in the deck (ISC-119)
 };
 
 const verdictFields = {
@@ -541,6 +576,7 @@ const verdictFields = {
 export const acceptSwapShape = {
   ...verdictFields,
   deckFile: z.string().min(1).describe("Path to the `1 Card Name` deck file to rewrite, absolute or relative to the project directory"),
+  changeCommander: z.boolean().optional().describe("true = this swap replaces the commander: `out` is the current commander and `in` a card that can be a commander. Without it the commander cannot leave the deck"),
 };
 export const rejectSwapShape = {
   ...verdictFields,
@@ -550,7 +586,13 @@ const acceptSwapInput = z.object(acceptSwapShape).strict();
 const rejectSwapInput = z.object(rejectSwapShape).strict();
 export type AcceptSwapInput = z.input<typeof acceptSwapInput>;
 export type RejectSwapInput = z.input<typeof rejectSwapInput>;
-export type AcceptSwapResult = { deckFile: string; changeLog: string; label: Label; before: SwapStats; after: SwapStats };
+export type AcceptSwapResult = {
+  deckFile: string; changeLog: string; label: Label; before: SwapStats; after: SwapStats;
+  /** Only when the commander changed: the deck's cards outside the new commander's colors, in list order. They stay in the deck. */
+  offColor?: string[];
+  /** Only when the new commander came from the deck (ISC-119): whether the old commander kept a place in it. */
+  oldCommander?: "stays" | "left";
+};
 export type RejectSwapResult = { label: Label };
 
 const localDate = () => new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD in the machine's time zone
@@ -574,18 +616,62 @@ function appendLabel(label: Label, path: string) {
   appendFileSync(path, `${JSON.stringify(label)}\n`);
 }
 
+// A legendary creature on the front face, or a card that says so.
+const canBeCommander = (c: SpaceCard) => /\bLegendary\b.*\bCreature\b/.test(c.meta!.type) || /can be your commander/i.test(c.meta!.text);
+
+// ISC-115: the commander leaves only when the call says it is changing, and only for a card that can lead the deck.
+function checkCommanderChange(f: { changeCommander?: boolean }, commander: SpaceCard, out: SpaceCard | null, inCard: SpaceCard | null) {
+  const leaving = out?.id === commander.id;
+  if (!f.changeCommander) {
+    if (leaving) throw new ToolInputError(`${commander.name} is the commander. It cannot be cut; to replace it, name a new commander as in and pass changeCommander: true`);
+    return;
+  }
+  if (!leaving) throw new ToolInputError(`changeCommander: out must be the commander, ${commander.name}`);
+  if (!inCard) throw new ToolInputError("changeCommander needs the new commander as in; a commander cannot be cut");
+  if (inCard.id === commander.id) throw new ToolInputError(`${inCard.name} is already the commander`);
+  if (!canBeCommander(inCard)) throw new ToolInputError(`${inCard.name} cannot be a commander`);
+}
+
+// ISC-116, ISC-117: the new text goes to a temp file beside the real file (through a symlink, so the link stays), with the
+// file's own mode. The label is written next and the file replaced last, so a label that cannot be written leaves the
+// deck as it was. A replace that fails after that leaves a label for a swap that did not happen, which is the rarer and
+// lesser fault; the call still fails.
+function saveDeck(path: string, shownAs: string, next: string, record: () => void) {
+  const target = realpathSync(path);
+  const mode = statSync(target).mode & 0o7777;
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, next, { mode });
+    chmodSync(tmp, mode); // the umask may have narrowed it
+    try {
+      record();
+    } catch (e) {
+      throw new Error(`the swap could not be recorded (${e instanceof Error ? e.message : String(e)}), so ${shownAs} was left as it was`);
+    }
+    renameSync(tmp, target);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
 export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOptions = {}): AcceptSwapResult {
   const f = acceptSwapInput.parse(input);
   const { card: commander } = resolveCommander(store, f.commander);
   const { out, inCard } = pairOf(store, f);
   const path = deckPath(f.deckFile);
   const text = readDeck({ deckFile: path });
+  if (!readsAsDeck(store.space, text)) throw new ToolInputError(`${f.deckFile} does not read as a deck list, so it was left as it was`);
   const deck = parseDecklist(store.space, text);
+  checkCommanderChange(f, commander, out, inCard);
   const outEntry = out ? deck.entries.find((e) => e.card?.id === out.id) : undefined;
   if (out && !outEntry) throw new ToolInputError(`${out.name} is not in the deck`);
+  // ISC-119: a new commander already in the deck is promoted, not added: every line of it goes, and it takes the old
+  // commander's line. The old commander takes its place when its colors fit the new commander, and leaves when they do not.
+  const promoted = f.changeCommander ? deck.entries.filter((e) => e.card?.id === inCard!.id) : [];
+  const oldStays = promoted.length > 0 && fitsIdentity(commander, inCard!.ci);
   if (inCard) {
-    if (!fitsIdentity(inCard, commander.ci)) throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
-    if (deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta!.type)) throw new ToolInputError(`${inCard.name} is already in the deck`);
+    if (!f.changeCommander && !fitsIdentity(inCard, commander.ci)) throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
+    if (!promoted.length && deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta!.type)) throw new ToolInputError(`${inCard.name} is already in the deck`);
   }
 
   // edit by line: entries carry their 1-based line number in the text split on \n (a \r stays on its line)
@@ -594,28 +680,41 @@ export function acceptSwap(store: Store, input: AcceptSwapInput, opts: VerdictOp
   if (hadFinalNewline) lines.pop();
   const cr = text.includes("\r\n") ? "\r" : "";
   const inLine = inCard ? `1 ${inCard.name}${cr}` : null;
-  if (outEntry) {
+  if (promoted.length) {
+    lines[outEntry!.line - 1] = inLine!;
+    if (oldStays) lines[promoted[0].line - 1] = `${outEntry!.qty} ${commander.name}${cr}`;
+    for (const e of (oldStays ? promoted.slice(1) : promoted).reverse()) lines.splice(e.line - 1, 1);
+  } else if (outEntry) {
     const i = outEntry.line - 1;
     const rest = outEntry.qty > 1 ? [lines[i].replace(/^(\s*)(\d+)/, (_, sp: string, q: string) => `${sp}${+q - 1}`)] : [];
     lines.splice(i, 1, ...rest, ...(inLine ? [inLine] : []));
   } else {
-    const last = Math.max(0, ...deck.entries.map((e) => e.line));
+    // after the last card of the main deck; a Commander section can come last in an export
+    const main = deck.entries.filter((e) => !/^(commander|companion)/.test(e.section ?? ""));
+    const last = Math.max(0, ...(main.length ? main : deck.entries).map((e) => e.line));
     lines.splice(last, 0, inLine!);
   }
   const date = opts.today ?? localDate();
-  const changeLog = `# ${date} accepted swap${f.lever ? ` (${f.lever})` : ""}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
+  const what = f.changeCommander ? "changed commander" : `accepted swap${f.lever ? ` (${f.lever})` : ""}`;
+  // the short form keeps the longest pair of commander names inside the 300-character receipt
+  const changeLog = promoted.length
+    ? `# ${date} commander promoted: ${inCard!.name}; ${commander.name} ${oldStays ? "stays" : "left"}`
+    : `# ${date} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
   lines.push(`${changeLog}${cr}`);
   const next = lines.join("\n") + (hadFinalNewline ? "\n" : "");
 
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, next);
-  renameSync(tmp, path);
-  const label: Label = { date, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null };
-  appendLabel(label, opts.labelsPath ?? LABELS_PATH);
+  const label: Label = {
+    date, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null,
+    ...(f.changeCommander && { changedCommander: true as const }), ...(promoted.length > 0 && { promoted: true as const }),
+  };
+  saveDeck(path, f.deckFile, next, () => appendLabel(label, opts.labelsPath ?? LABELS_PATH));
+  const nextEntries = parseDecklist(store.space, next).entries;
   return {
     deckFile: path, changeLog, label,
     before: swapStats(deckNumbers(store, commander, deck.entries)),
-    after: swapStats(deckNumbers(store, commander, parseDecklist(store.space, next).entries)),
+    after: swapStats(deckNumbers(store, commander, nextEntries)),
+    ...(f.changeCommander && { offColor: deckNumbers(store, inCard!, nextEntries).offIdentity }),
+    ...(promoted.length > 0 && { oldCommander: oldStays ? "stays" as const : "left" as const }),
   };
 }
 

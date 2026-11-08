@@ -8,7 +8,8 @@ import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { ciMask, fitsIdentity } from "./color-identity";
 import { buildSpace, normName, parseDecklist, type DeckEntry, type Space, type SpaceCard } from "./deck-pool";
-import { planScore, readPlan, type Plan } from "./deck-swaps";
+import { planContext, type PlanContext, type PlanEcho } from "./plan";
+import { planShape } from "./plan-input";
 import { DB_PATH, DECK_ROOT } from "./paths";
 import { compileRoleMap, roleSheet, rolesOf, type RoleHit, type RoleIndex, type RoleMap, type TagRecord } from "./roles";
 
@@ -20,7 +21,7 @@ export type Store = {
   db: Database;
   vocab: { types: Vocab; subtypes: Vocab; keywords: Vocab; tags: Map<string, { id: number; label: string }> };
   // every card as deck-pool's SpaceCard (rules data in `meta`, Regions in `r`, no neighbor lists), so decklists resolve
-  // exactly as `bun app/deck.ts` resolves them and readPlan / planScore / swapsFor read the same fields
+  // exactly as `bun app/deck.ts` resolves them and swapsFor reads the same fields
   space: Space;
   names: { id: number; oracleId: string; name: string; norm: string }[]; // every card, in store id (name) order, for fuzzy lookup
   roles: RoleIndex; // the MV-14 role map compiled against the store's own Tagger tree
@@ -79,8 +80,9 @@ export function openStore(path = DB_PATH, roleMapPath = ROLE_MAP_PATH): Store {
   };
 }
 
-// A caller's mistake (unknown name, bad value): the server returns it as a tool error the model can act on.
-export class ToolInputError extends Error {}
+// A caller's mistake (unknown name, bad value): the server returns it as a tool error the model can act on (errors.ts).
+export { ToolInputError } from "./errors";
+import { ToolInputError } from "./errors";
 
 // Edit distance, for "close matches" lists and fuzzy card names.
 export function editDistance(a: string, b: string): number {
@@ -112,6 +114,7 @@ function known<T>(what: string, value: string, map: Map<string, T>, spell: (t: T
 }
 
 // ---------- find_cards ----------
+const COLOR_LETTERS = ["W", "U", "B", "R", "G"] as const;
 const range = (what: string) =>
   z.object({ min: z.number().optional(), max: z.number().optional() }).strict().describe(`${what} range, both ends inclusive`);
 
@@ -126,6 +129,20 @@ export const findCardsShape = {
   keywords: z.array(z.string().min(1)).optional().describe('Keywords the card must all have (e.g. ["Flying"])'),
   power: range("Power (cards with * in their power never match)").optional(),
   toughness: range("Toughness (cards with * in their toughness never match)").optional(),
+  manaSymbols: z.array(z.object({
+    color: z.enum(COLOR_LETTERS).describe("W, U, B, R or G"),
+    min: z.number().int().min(1).max(20).describe("At least this many symbols of that color"),
+  }).strict()).optional().describe(
+    "Minimum count of one color's mana symbols in the card's mana cost, one entry per color, all must hold " +
+    '(e.g. [{"color": "U", "min": 2}] = two or more blue symbols). A hybrid or Phyrexian symbol counts once toward each color it ' +
+    "can be paid with ({U}, {U/R}, {2/U}, {U/P} and {G/U/P} all count 1 toward blue), generic and colorless symbols count toward none. " +
+    "Reads the front face's cost, so Fire // Ice is {1}{R}; lands have no cost and never match."),
+  rulesText: z.array(z.string().min(1)).optional().describe(
+    "Words or phrases the card's rules text must all contain, typed as they would print " +
+    '(e.g. ["noncreature spell"], or ["whenever you cast", "draw a card"] for both). Capitals are ignored. A part of a word matches too ' +
+    '("draw" also finds "draws" and "drawn"), so write the longer phrase when you want fewer cards. Mana and counter symbols are ' +
+    'written as printed ("{U}", "+1/+1 counter"). The text of every face of a two-faced card counts. Each entry is matched as one ' +
+    "piece of text, so an entry never spans two abilities (abilities sit on separate lines); put separate ideas in separate entries."),
   maxPrice: z.number().nonnegative().optional().describe("Scryfall USD price ceiling; unpriced cards never match"),
   land: z.boolean().optional().describe("true = lands only, false = nonland only; omit for both"),
   name: z.string().min(1).optional().describe("Part of the card name (case, accents and punctuation ignored)"),
@@ -178,6 +195,12 @@ export function findCards(store: Store, input: FindCardsInput): FindCardsResult 
   between("c.mana_value", f.manaValue);
   if (f.power) { add(numeric("power")); between("CAST(c.power AS INTEGER)", f.power); }
   if (f.toughness) { add(numeric("toughness")); between("CAST(c.toughness AS INTEGER)", f.toughness); }
+  // A symbol that counts toward a color carries that color's letter exactly once ({U}, {U/R}, {2/U}, {U/P}, {G/U/P}), and no
+  // other symbol in a cost carries a color letter, so the letters in the cost are the symbols (the ISC-79 test checks
+  // this against the raw Scryfall costs by parsing the symbols).
+  for (const s of f.manaSymbols ?? []) add("(length(c.mana_cost) - length(replace(c.mana_cost, ?, ''))) >= ?", s.color, s.min);
+  // lower() folds A to Z only, so the bound phrase is folded the same way (not with toLowerCase, which folds more)
+  for (const w of f.rulesText ?? []) add("instr(lower(c.oracle_text), ?) > 0", w.replace(/[A-Z]/g, (ch) => ch.toLowerCase()));
   if (f.maxPrice !== undefined) add("c.usd_price IS NOT NULL AND c.usd_price <= ?", f.maxPrice);
   if (f.land !== undefined) add("c.is_land = ?", f.land ? 1 : 0);
   if (f.name !== undefined) add("instr(c.norm_name, ?) > 0", normName(f.name));
@@ -261,6 +284,50 @@ export function cardDetails(store: Store, input: CardInput): CardResult {
   };
 }
 
+// ---------- card, several at once (ISC-106) ----------
+// One row per name, in the order asked (a repeated name keeps its rows). Names resolve as in resolveCard. A name read as
+// one card without being its exact or front-face name gets that card and a note; a name that fits several cards gets a
+// note naming them and no card (a misspelling fits several when they are equally close), because a wrong card's facts are worse than none; a name nothing resembles gets a note.
+// Neither fails the call.
+export const LOOKUP_MAX = 50;
+export const cardLookupNames = z.array(z.string()).min(1).max(LOOKUP_MAX).optional()
+  .describe(`Up to ${LOOKUP_MAX} card names, looked up together; give this or \`name\`. Each name resolves as \`name\` does`);
+
+export type LookedUpCard = {
+  name: string | null; manaCost: string | null; manaValue: number | null; typeLine: string | null; power: string | null; toughness: string | null;
+  keywords: string[] | null; oracleText: string | null;
+  /** Why the row has no card, or how a name that was not exact was read; null when the name was the card's. */
+  note: string | null;
+};
+
+const noCard = (note: string): LookedUpCard => ({ name: null, manaCost: null, manaValue: null, typeLine: null, power: null, toughness: null, keywords: null, oracleText: null, note });
+
+export function lookupCards(store: Store, names: string[]): LookedUpCard[] {
+  const q = store.db.query("SELECT * FROM cards WHERE id = ?");
+  return names.map((asked) => {
+    let hit: Resolved;
+    try {
+      hit = resolveCard(store, asked);
+    } catch (e) {
+      if (e instanceof ToolInputError) return noCard(e.message);
+      throw e;
+    }
+    // the other names a misspelling reached count only when they are as close as the first: "Lightnig Bolt" is Lightning
+    // Bolt, however near Lightning Wolf comes
+    const first = store.names[hit.id - 1];
+    const rivals = hit.matchedBy !== "fuzzy" ? hit.alternatives
+      : hit.alternatives.filter((a) => editDistance(normName(asked), normName(a)) === editDistance(normName(asked), first.norm));
+    if (rivals.length) return noCard(`"${asked}" fits several cards, so none was picked: ${[first.name, ...rivals].join("; ")}`);
+    const r = q.get(hit.id) as CardRow | null;
+    if (!r) throw new Error(`card store is inconsistent: id ${hit.id} resolved but has no row`);
+    return {
+      name: r.name, manaCost: r.mana_cost, manaValue: r.mana_value, typeLine: r.type_line, power: r.power, toughness: r.toughness,
+      keywords: JSON.parse(r.keywords), oracleText: r.oracle_text,
+      note: hit.matchedBy === "exact" || hit.matchedBy === "face" ? null : `"${asked}" is not an exact name; read as this card`,
+    };
+  });
+}
+
 // ---------- deck_stats ----------
 // A deck file (or pasted list) of `1 Card Name` lines, read with deck-pool's parseDecklist (headers, URLs, set
 // codes skipped). The numbers cover the cards in the list as written: the commander counts once if the list has
@@ -270,9 +337,14 @@ export function cardDetails(store: Store, input: CardInput): CardResult {
 //   roleCounts        MV-14 role map: copies per role, every role listed; `unroled` names nonland cards with none
 //   pipLoad           colored mana symbols in nonland mana costs (front face), per color; a hybrid or Phyrexian
 //                     symbol counts once for each color in it
-//   planFit           the commander's plan read from its text (deck-swaps readPlan), and which nonland cards other
-//                     than the commander score on it (planScore > 0). readPlan parses pip payoffs and tribes only
-//                     (ISA fog: other commanders).
+//   planFit           with the player's confirmed plan (`plan`): which nonland cards other than the commander fit it
+//                     (plan.ts planScorer score > 0: a hook or tag of the plan's profiles), and which do not; null when
+//                     the call carries no plan. The plan always comes from the player, never from the commander's text.
+//   cardFacts         every card of the deck (each distinct resolved card of the list, lands included, and the commander
+//                     whether or not the list names it) with its mana value, full type line, power and toughness (null on
+//                     a card with none; the front face's on a two-faced card) and rules text as the store holds them, so a
+//                     card fact quoted to the player comes from the data, never from memory (ISC-91, ISC-92, ISC-105). Only
+//                     these facts and the name, in name order (byte order), to keep the result lean.
 const CURVE = ["0", "1", "2", "3", "4", "5", "6", "7+"] as const;
 const COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -280,6 +352,7 @@ export const deckStatsShape = {
   commander: z.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored); use the card tool to look a partial name up"),
   deckFile: z.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
   decklist: z.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid); with it, planFit says which cards fit it"),
 };
 const deckStatsInput = z.object(deckStatsShape).strict();
 export type DeckStatsInput = z.input<typeof deckStatsInput>;
@@ -294,13 +367,38 @@ export type DeckNumbers = {
   roleCounts: Record<string, number>;
   unroled: string[];
   pipLoad: Record<(typeof COLORS)[number], number>;
-  planFit: { plan: Plan; onPlan: number; of: number; offPlan: string[] };
+  planFit: { plan: PlanEcho; onPlan: number; of: number; offPlan: string[] } | null; // null without a plan
   offIdentity: string[]; // cards outside the commander's color identity
 };
 export type DeckStats = DeckNumbers & {
   commander: { name: string; colorIdentity: string; matchedBy: MatchKind };
+  cardFacts: CardFact[];
   unresolved: { line: number; text: string; closeMatches: string[] }[];
 };
+
+/** One deck card's facts as the store holds them (cards.mana_value, type_line with every face, power, toughness, oracle_text). */
+export type CardFact = { name: string; manaValue: number; typeLine: string; power: string | null; toughness: string | null; oracleText: string };
+
+const STORE_IDS = new WeakMap<Store, Map<string, number>>();
+/** The store id of a card by oracle id (resolveCard indexes names by id - 1, so the map is the inverse). */
+function storeIdOf(store: Store, oracleId: string): number {
+  let m = STORE_IDS.get(store);
+  if (!m) STORE_IDS.set(store, (m = new Map(store.names.map((n) => [n.oracleId, n.id]))));
+  const id = m.get(oracleId);
+  if (id === undefined) throw new Error(`card store is inconsistent: oracle id ${oracleId} has no store id`);
+  return id;
+}
+
+/** The facts of every card of a deck: each distinct resolved card of the list and the commander, in name (byte) order. */
+export function cardFacts(store: Store, commander: SpaceCard, entries: DeckEntry[]): CardFact[] {
+  const ids = new Set([commander.id, ...entries.flatMap((e) => (e.card ? [e.card.id] : []))]);
+  const q = store.db.query("SELECT name, mana_value, type_line, power, toughness, oracle_text FROM cards WHERE id = ?");
+  return [...ids].map((oracleId) => {
+    const r = q.get(storeIdOf(store, oracleId)) as { name: string; mana_value: number; type_line: string; power: string | null; toughness: string | null; oracle_text: string } | null;
+    if (!r) throw new Error(`card store is inconsistent: oracle id ${oracleId} resolved but has no row`);
+    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, power: r.power, toughness: r.toughness, oracleText: r.oracle_text };
+  }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
 
 // A deckFile path as the tools read it: absolute, or relative to the repo root.
 export const deckPath = (deckFile: string) => (isAbsolute(deckFile) ? deckFile : join(DECK_ROOT, deckFile));
@@ -336,7 +434,7 @@ export function unresolvedLines(store: Store, misses: DeckEntry[]): DeckStats["u
   });
 }
 
-export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: DeckEntry[]): DeckNumbers {
+export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: DeckEntry[], plan: PlanContext | null = null): DeckNumbers {
   const entries = deckEntries.filter((e): e is DeckEntry & { card: SpaceCard } => !!e.card);
   const nonland = entries.filter((e) => !e.card.land);
   const copies = (es: typeof entries) => es.reduce((n, e) => n + e.qty, 0);
@@ -353,9 +451,8 @@ export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: Dec
   const n = copies(nonland);
 
   const sheet = roleSheet(store.roles, deckEntries);
-  const plan = readPlan(commander);
   const scored = [...new Map(nonland.filter((e) => e.card.id !== commander.id).map((e) => [e.card.id, e.card])).values()];
-  const offPlan = scored.filter((c) => planScore(c, plan).score === 0).map((c) => c.name);
+  const offPlan = plan ? scored.filter((c) => plan.fit(c.id).score === 0).map((c) => c.name) : [];
   const distinct = [...new Map(entries.map((e) => [e.card.id, e.card])).values()];
   const offIdentity = distinct.filter((c) => !fitsIdentity(c, commander.ci)).map((c) => c.name);
 
@@ -364,7 +461,7 @@ export function deckNumbers(store: Store, commander: SpaceCard, deckEntries: Dec
     cards: copies(entries), lands: copies(entries) - n, nonland: n,
     averageManaValue: n ? Math.round((mvSum / n) * 1000) / 1000 : 0,
     curve, roleCounts: sheet.counts, unroled: sheet.unroled, pipLoad,
-    planFit: { plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan },
+    planFit: plan ? { plan: plan.plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan } : null,
     offIdentity,
   };
 }
@@ -374,9 +471,11 @@ export function deckStats(store: Store, input: DeckStatsInput): DeckStats {
   const text = readDeck(f);
   const { card: commander, matchedBy } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
+  const plan = planContext(store, commander.name, f.plan);
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join(""), matchedBy },
-    ...deckNumbers(store, commander, deck.entries),
+    ...deckNumbers(store, commander, deck.entries, plan),
+    cardFacts: cardFacts(store, commander, deck.entries),
     unresolved: unresolvedLines(store, deck.unresolved),
   };
 }

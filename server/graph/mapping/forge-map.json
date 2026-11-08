@@ -1,0 +1,2907 @@
+{
+  "version": "0.4.0",
+  "forgeCommit": "c3d29388be82a37e7f648e3254ef04f4cd986d6e",
+  "note": "Forge script vocabulary -> card graph hooks. Anything not listed here is reported as unmapped, never dropped. Hook names are open; renaming one is a version bump.",
+  "zones": [
+    {
+      "origin": "Graveyard",
+      "destination": "Battlefield",
+      "hooks": [
+        "Reanimate",
+        "ETB"
+      ]
+    },
+    {
+      "origin": "Exile",
+      "destination": "Battlefield",
+      "hooks": [
+        "ReturnFromExile",
+        "ETB"
+      ]
+    },
+    {
+      "origin": "Library",
+      "destination": "Battlefield",
+      "hooks": [
+        "PutOntoBattlefield",
+        "ETB"
+      ]
+    },
+    {
+      "origin": "Hand",
+      "destination": "Battlefield",
+      "hooks": [
+        "PutOntoBattlefield",
+        "ETB"
+      ]
+    },
+    {
+      "origin": "*",
+      "destination": "Battlefield",
+      "hooks": [
+        "ETB"
+      ]
+    },
+    {
+      "origin": "Battlefield",
+      "destination": "Graveyard",
+      "hooks": [
+        "PutIntoGraveyard",
+        "LTB"
+      ],
+      "creatureHooks": [
+        "Dies"
+      ]
+    },
+    {
+      "origin": "Battlefield",
+      "destination": "Exile",
+      "hooks": [
+        "Exile",
+        "LTB"
+      ]
+    },
+    {
+      "origin": "Battlefield",
+      "destination": "Hand",
+      "hooks": [
+        "Bounce",
+        "LTB"
+      ]
+    },
+    {
+      "origin": "Battlefield",
+      "destination": "Library",
+      "hooks": [
+        "Tuck",
+        "LTB"
+      ]
+    },
+    {
+      "origin": "Battlefield",
+      "destination": "*",
+      "hooks": [
+        "LTB"
+      ]
+    },
+    {
+      "origin": "Library",
+      "destination": "Hand",
+      "hooks": [
+        "Tutor"
+      ]
+    },
+    {
+      "origin": "Library",
+      "destination": "Graveyard",
+      "hooks": [
+        "Mill"
+      ]
+    },
+    {
+      "origin": "Library",
+      "destination": "Exile",
+      "hooks": [
+        "ExileFromLibrary"
+      ]
+    },
+    {
+      "origin": "Graveyard",
+      "destination": "Hand",
+      "hooks": [
+        "Regrowth"
+      ]
+    },
+    {
+      "origin": "Graveyard",
+      "destination": "Exile",
+      "hooks": [
+        "ExileFromGraveyard"
+      ]
+    },
+    {
+      "origin": "Graveyard",
+      "destination": "Library",
+      "hooks": [
+        "GraveyardToLibrary"
+      ]
+    },
+    {
+      "origin": "Hand",
+      "destination": "Graveyard",
+      "hooks": [
+        "Discard"
+      ]
+    },
+    {
+      "origin": "Hand",
+      "destination": "Exile",
+      "hooks": [
+        "ExileFromHand"
+      ]
+    },
+    {
+      "origin": "Hand",
+      "destination": "Library",
+      "hooks": [
+        "HandToLibrary"
+      ]
+    },
+    {
+      "origin": "Stack",
+      "destination": "*",
+      "hooks": [
+        "SpellMoved"
+      ]
+    },
+    {
+      "origin": "Exile",
+      "destination": "Hand",
+      "hooks": [
+        "ExileToHand"
+      ]
+    },
+    {
+      "origin": "Exile",
+      "destination": "Graveyard",
+      "hooks": [
+        "ExileToGraveyard"
+      ]
+    },
+    {
+      "origin": "*",
+      "destination": "Graveyard",
+      "hooks": [
+        "PutIntoGraveyard"
+      ]
+    },
+    {
+      "origin": "*",
+      "destination": "Exile",
+      "hooks": [
+        "Exile"
+      ]
+    },
+    {
+      "origin": "*",
+      "destination": "Hand",
+      "hooks": [
+        "ToHand"
+      ]
+    },
+    {
+      "origin": "*",
+      "destination": "Library",
+      "hooks": [
+        "ToLibrary"
+      ]
+    },
+    {
+      "origin": "*",
+      "destination": "*",
+      "hooks": [
+        "ZoneChange"
+      ]
+    }
+  ],
+  "phases": {
+    "Upkeep": "Upkeep",
+    "Draw": "DrawStep",
+    "Main1": "PrecombatMain",
+    "Main2": "PostcombatMain",
+    "BeginCombat": "BeginningOfCombat",
+    "Declare Attackers": "AttackersDeclared",
+    "End Combat": "EndOfCombat",
+    "End of Turn": "EndStep",
+    "Cleanup": "Cleanup",
+    "EndCombat": "EndOfCombat",
+    "End Of Turn": "EndStep",
+    "Main": "Main",
+    "Untap": "UntapStep"
+  },
+  "triggers": {
+    "Attacks": "Attacks",
+    "AttackersDeclared": "AttackersDeclared",
+    "AttackersDeclaredOneTarget": "AttackersDeclared",
+    "Blocks": "Blocks",
+    "AttackerBlocked": "BecomesBlocked",
+    "AttackerBlockedOnce": "BecomesBlocked",
+    "AttackerUnblocked": "Unblocked",
+    "AttackerUnblockedOnce": "Unblocked",
+    "BlockersDeclared": "BlockersDeclared",
+    "SpellCast": "SpellCast",
+    "SpellCopy": "SpellCopied",
+    "SpellAbilityCast": "SpellCast",
+    "AbilityCast": "AbilityActivated",
+    "AbilityActivated": "AbilityActivated",
+    "Drawn": "CardDrawn",
+    "Discarded": "Discard",
+    "DiscardedAll": "Discard",
+    "Milled": "Mill",
+    "MilledAll": "Mill",
+    "Sacrificed": "Sacrifice",
+    "SacrificedOnce": "Sacrifice",
+    "Destroyed": "Destroy",
+    "Exiled": "Exile",
+    "TokenCreated": "TokenCreated",
+    "TokenCreatedOnce": "TokenCreated",
+    "CounterAdded": "CounterPlaced",
+    "CounterAddedOnce": "CounterPlaced",
+    "CounterAddedAll": "CounterPlaced",
+    "CounterRemoved": "CounterRemoved",
+    "CounterRemovedOnce": "CounterRemoved",
+    "LifeGained": "LifeGain",
+    "LifeLost": "LifeLoss",
+    "LifeLostAll": "LifeLoss",
+    "Taps": "Tap",
+    "TapAll": "Tap",
+    "Untaps": "Untap",
+    "UntapAll": "Untap",
+    "Scry": "Scry",
+    "Surveil": "Surveil",
+    "Shuffled": "Shuffle",
+    "BecomesTarget": "BecomesTarget",
+    "BecomesTargetOnce": "BecomesTarget",
+    "Attached": "Attach",
+    "Unattach": "Unattach",
+    "TurnFaceUp": "TurnFaceUp",
+    "Transformed": "Transform",
+    "Countered": "SpellCountered",
+    "Fight": "Fight",
+    "FightOnce": "Fight",
+    "Explored": "Explore",
+    "Investigated": "Investigate",
+    "LandPlayed": "LandPlayed",
+    "ManaAdded": "ManaAdded",
+    "TapsForMana": "TapForMana",
+    "Cycled": "Cycle",
+    "Crewed": "Crew",
+    "Exploited": "Exploit",
+    "ChaosEnsues": "ChaosEnsues",
+    "BecomeMonarch": "BecomeMonarch",
+    "Proliferate": "Proliferate",
+    "RolledDie": "DieRolled",
+    "RolledDieOnce": "DieRolled",
+    "FlippedCoin": "CoinFlipped",
+    "Championed": "Champion",
+    "Evolved": "Evolve",
+    "Mutates": "Mutate",
+    "Foretell": "Foretell",
+    "ClassLevelGained": "ClassLevelGained",
+    "NewGame": "GameStart",
+    "Always": "StateCheck",
+    "Immediate": "Immediate",
+    "Phase": "@phase",
+    "ChangesZone": "@zone",
+    "ChangesZoneAll": "@zone",
+    "DamageDone": "@damage",
+    "DamageDoneOnce": "@damage",
+    "DamageAll": "@damage",
+    "DamageDealtOnce": "@damage",
+    "DamagePreventedOnce": "DamagePrevented",
+    "Devoured": "Devour",
+    "Enlisted": "Enlist",
+    "Abandoned": "Abandon",
+    "BecomesCrewed": "Crew",
+    "Clashed": "Clash",
+    "Adapt": "Adapt",
+    "Exerted": "Exert",
+    "PayLife": "LifeLoss",
+    "PayCumulativeUpkeep": "CumulativeUpkeep",
+    "RingTemptsYou": "RingTemptsYou",
+    "VisitAttraction": "VisitAttraction",
+    "Specializes": "Specialize",
+    "TakesInitiative": "TakeInitiative",
+    "DayTimeChanges": "DayNight",
+    "Stationed": "Station",
+    "Forage": "Forage",
+    "CommitCrime": "CommitCrime",
+    "Collected": "CollectEvidence",
+    "Expend": "Expend",
+    "ManifestDread": "ManifestDread",
+    "BecomesSaddled": "Saddle",
+    "Saddled": "Saddle",
+    "RoomEntered": "RoomUnlocked",
+    "UnlockDoor": "RoomUnlocked",
+    "FullyUnlock": "RoomUnlocked",
+    "Discover": "Discover",
+    "Airbend": "Airbend",
+    "Earthbend": "Earthbend",
+    "Firebend": "Firebend",
+    "Waterbend": "Waterbend",
+    "Trains": "Train",
+    "Plotted": "Plot",
+    "BecomeRenowned": "Renown",
+    "BecomesPlotted": "Plot",
+    "SetInMotion": "SchemeSetInMotion",
+    "PlanarDice": "PlanarDice",
+    "PlaneswalkedTo": "Planeswalk",
+    "PlaneswalkedFrom": "Planeswalk",
+    "LosesGame": "PlayerLoses",
+    "Vote": "Vote",
+    "Revealed": "Reveal",
+    "SearchedLibrary": "SearchLibrary",
+    "Attains": "Attain",
+    "ConniveCompleted": "Connive",
+    "CaseSolved": "CaseSolved",
+    "BecomesTargetedOnce": "BecomesTarget",
+    "Blight": "Blight",
+    "Sneak": "Sneak",
+    "Endure": "Endure",
+    "ExcessDamage": "ExcessDamage",
+    "ExcessDamageAll": "ExcessDamage",
+    "MutatesOnto": "Mutate",
+    "SpellCastOrCopy": "SpellCast",
+    "LifeGainedOnce": "LifeGain",
+    "AttackerBlockedByCreature": "Blocks",
+    "BecomeMonstrous": "Monstrous",
+    "ManaExpend": "Expend",
+    "ChangesController": "GainControl",
+    "StickerPlaced": "Sticker",
+    "CounterPlayerAddedAll": "CounterPlaced",
+    "Explores": "Explore",
+    "Unattached": "Unattach",
+    "DungeonCompleted": "DungeonCompleted",
+    "PhaseIn": "PhaseIn",
+    "AbilityTriggered": "AbilityTriggered",
+    "Connives": "Connive",
+    "AbilityResolves": "AbilityResolves",
+    "CounterTypeAddedAll": "CounterPlaced",
+    "MilledOnce": "Mill",
+    "PhaseOut": "PhaseOut",
+    "PhaseOutAll": "PhaseOut",
+    "CollectEvidence": "CollectEvidence",
+    "PayEcho": "Echo",
+    "GiveGift": "Gift",
+    "Mentored": "Mentor",
+    "ElementalBend": "Bend",
+    "SpellAbilityCopy": "SpellCopied",
+    "ClaimPrize": "ClaimPrize",
+    "TurnBegin": "TurnBegins"
+  },
+  "effects": {
+    "ChangeZone": "@zone",
+    "ChangeZoneAll": "@zone",
+    "Pump": [
+      "Pump"
+    ],
+    "PumpAll": [
+      "Pump"
+    ],
+    "Draw": [
+      "CardDrawn"
+    ],
+    "Token": [
+      "TokenCreated"
+    ],
+    "PutCounter": [
+      "CounterPlaced"
+    ],
+    "PutCounterAll": [
+      "CounterPlaced"
+    ],
+    "DealDamage": [
+      "Damage"
+    ],
+    "DamageAll": [
+      "Damage"
+    ],
+    "EachDamage": [
+      "Damage"
+    ],
+    "DamageResolve": [],
+    "Mana": [
+      "ManaAdded"
+    ],
+    "ManaReflected": [
+      "ManaAdded"
+    ],
+    "GainLife": [
+      "LifeGain"
+    ],
+    "LoseLife": [
+      "LifeLoss"
+    ],
+    "SetLife": [
+      "LifeTotalSet"
+    ],
+    "Destroy": [
+      "Destroy"
+    ],
+    "DestroyAll": [
+      "Destroy"
+    ],
+    "Tap": [
+      "Tap"
+    ],
+    "TapAll": [
+      "Tap"
+    ],
+    "Untap": [
+      "Untap"
+    ],
+    "UntapAll": [
+      "Untap"
+    ],
+    "TapOrUntap": [
+      "Tap",
+      "Untap"
+    ],
+    "Discard": [
+      "Discard"
+    ],
+    "Animate": [
+      "Animate"
+    ],
+    "AnimateAll": [
+      "Animate"
+    ],
+    "Dig": [
+      "LookAtTop"
+    ],
+    "DigUntil": [
+      "RevealUntil"
+    ],
+    "DigMultiple": [
+      "LookAtTop"
+    ],
+    "PeekAndReveal": [
+      "LookAtTop"
+    ],
+    "RearrangeTopOfLibrary": [
+      "LookAtTop"
+    ],
+    "Sacrifice": [
+      "Sacrifice"
+    ],
+    "SacrificeAll": [
+      "Sacrifice"
+    ],
+    "Mill": [
+      "Mill"
+    ],
+    "Counter": [
+      "SpellCountered"
+    ],
+    "Scry": [
+      "Scry"
+    ],
+    "Surveil": [
+      "Surveil"
+    ],
+    "CopyPermanent": [
+      "TokenCreated",
+      "Copy"
+    ],
+    "Clone": [
+      "Copy"
+    ],
+    "Play": [
+      "CastWithoutPaying"
+    ],
+    "GainControl": [
+      "GainControl"
+    ],
+    "ExchangeControl": [
+      "GainControl"
+    ],
+    "Regenerate": [
+      "Regenerate"
+    ],
+    "CopySpellAbility": [
+      "SpellCopied"
+    ],
+    "Attach": [
+      "Attach"
+    ],
+    "Unattach": [
+      "Unattach"
+    ],
+    "RemoveCounter": [
+      "CounterRemoved"
+    ],
+    "RemoveCounterAll": [
+      "CounterRemoved"
+    ],
+    "MoveCounter": [
+      "CounterRemoved",
+      "CounterPlaced"
+    ],
+    "MultiplyCounter": [
+      "CounterPlaced"
+    ],
+    "Proliferate": [
+      "Proliferate",
+      "CounterPlaced"
+    ],
+    "Fight": [
+      "Fight",
+      "Damage"
+    ],
+    "Investigate": [
+      "Investigate",
+      "TokenCreated"
+    ],
+    "Amass": [
+      "Amass",
+      "CounterPlaced"
+    ],
+    "Incubate": [
+      "Incubate",
+      "TokenCreated"
+    ],
+    "Explore": [
+      "Explore"
+    ],
+    "Connive": [
+      "Connive",
+      "CardDrawn",
+      "Discard"
+    ],
+    "Goad": [
+      "Goad"
+    ],
+    "Poison": [
+      "PoisonCounter"
+    ],
+    "Shuffle": [
+      "Shuffle"
+    ],
+    "Reveal": [
+      "Reveal"
+    ],
+    "RevealHand": [
+      "Reveal"
+    ],
+    "PreventDamage": [
+      "DamagePrevented"
+    ],
+    "Fog": [
+      "DamagePrevented"
+    ],
+    "Protection": [
+      "GainProtection"
+    ],
+    "ProtectionAll": [
+      "GainProtection"
+    ],
+    "Debuff": [
+      "LoseAbility"
+    ],
+    "AddTurn": [
+      "ExtraTurn"
+    ],
+    "AddPhase": [
+      "ExtraPhase"
+    ],
+    "BecomeMonarch": [
+      "BecomeMonarch"
+    ],
+    "TakeInitiative": [
+      "TakeInitiative"
+    ],
+    "Venture": [
+      "Venture"
+    ],
+    "RingTemptsYou": [
+      "RingTemptsYou"
+    ],
+    "Phases": [
+      "PhaseOut"
+    ],
+    "SetState": [
+      "Transform"
+    ],
+    "Manifest": [
+      "Manifest"
+    ],
+    "ManifestDread": [
+      "Manifest"
+    ],
+    "Cloak": [
+      "Manifest"
+    ],
+    "Discover": [
+      "Discover",
+      "CastWithoutPaying"
+    ],
+    "MakeCard": [
+      "CardCreated"
+    ],
+    "Seek": [
+      "Tutor"
+    ],
+    "Learn": [
+      "Tutor"
+    ],
+    "Draft": [
+      "CardCreated"
+    ],
+    "LosesGame": [
+      "PlayerLoses"
+    ],
+    "WinsGame": [
+      "PlayerWins"
+    ],
+    "MustBlock": [
+      "ForceBlock"
+    ],
+    "RemoveFromCombat": [
+      "RemoveFromCombat"
+    ],
+    "SkipPhase": [
+      "SkipPhase"
+    ],
+    "SkipTurn": [
+      "SkipTurn"
+    ],
+    "Detain": [
+      "Detain"
+    ],
+    "Earthbend": [
+      "Earthbend",
+      "CounterPlaced"
+    ],
+    "Airbend": [
+      "Airbend",
+      "Exile"
+    ],
+    "Endure": [
+      "CounterPlaced",
+      "TokenCreated"
+    ],
+    "Empower": [
+      "CounterPlaced"
+    ],
+    "Intensify": [
+      "Intensify"
+    ],
+    "PutSticker": [
+      "Sticker"
+    ],
+    "Radiation": [
+      "Mill",
+      "LifeLoss"
+    ],
+    "Recruit": [
+      "Tutor"
+    ],
+    "ExchangeLife": [
+      "LifeTotalSet"
+    ],
+    "GainOwnership": [
+      "GainControl"
+    ],
+    "PermanentCreature": [],
+    "PermanentNoncreature": [],
+    "Abandon": [
+      "Abandon"
+    ],
+    "OpenAttraction": [
+      "OpenAttraction"
+    ],
+    "AssembleContraption": [
+      "Assemble"
+    ],
+    "DayTime": [
+      "DayNight"
+    ],
+    "Planeswalk": [
+      "Planeswalk"
+    ],
+    "ChangeTargets": [
+      "Retarget"
+    ],
+    "ControlSpell": [
+      "GainControl"
+    ],
+    "ChangeText": [
+      "ChangeText"
+    ],
+    "AlterAttribute": [
+      "AlterAttribute"
+    ],
+    "Heist": [
+      "CardCreated"
+    ],
+    "ExchangePower": [
+      "Pump"
+    ],
+    "Balance": [
+      "Sacrifice",
+      "Discard"
+    ],
+    "Meld": [
+      "Meld"
+    ],
+    "TimeTravel": [
+      "CounterPlaced",
+      "CounterRemoved"
+    ],
+    "AddOrRemoveCounter": [
+      "CounterPlaced",
+      "CounterRemoved"
+    ],
+    "Blight": [
+      "Blight"
+    ],
+    "EndTurn": [
+      "EndTurn"
+    ],
+    "Clash": [
+      "Clash"
+    ],
+    "RollDice": [
+      "DieRolled"
+    ],
+    "FlipCoin": [
+      "CoinFlipped"
+    ],
+    "ChaosEnsues": [
+      "ChaosEnsues"
+    ],
+    "Vote": [
+      "Vote"
+    ],
+    "UnlockDoor": [
+      "RoomUnlocked"
+    ],
+    "Effect": "@effect",
+    "DelayedTrigger": "@delayed",
+    "ImmediateTrigger": "@delayed",
+    "Charm": "@choices",
+    "GenericChoice": "@choices",
+    "Branch": "@branch",
+    "RepeatEach": "@repeat",
+    "Repeat": "@repeat",
+    "Cleanup": [],
+    "StoreSVar": [],
+    "ChooseCard": [],
+    "ChooseType": [],
+    "ChooseColor": [],
+    "ChoosePlayer": [],
+    "ChooseNumber": [],
+    "ChooseSource": [],
+    "ChooseEvenOdd": [],
+    "ChooseDirection": [],
+    "ChooseSector": [],
+    "NameCard": [],
+    "TwoPiles": [],
+    "MultiplePiles": [],
+    "BlankLine": [],
+    "LookAt": [],
+    "AssignGroup": [],
+    "ReplaceEffect": [],
+    "ReplaceToken": [],
+    "ReplaceCounter": [],
+    "ReplaceDamage": [],
+    "ReplaceSplitDamage": [],
+    "ReplaceMana": [],
+    "VillainousChoice": [],
+    "GainControlVariant": [
+      "GainControl"
+    ],
+    "ControlPlayer": [
+      "ControlPlayer"
+    ],
+    "ChangeCombatants": [
+      "Retarget"
+    ],
+    "DrainMana": [
+      "ManaLost"
+    ],
+    "BecomesBlocked": [
+      "BecomesBlocked"
+    ],
+    "ExchangeLifeVariant": [
+      "LifeTotalSet"
+    ],
+    "BidLife": [
+      "LifeLoss"
+    ],
+    "Regeneration": [
+      "Regenerate"
+    ],
+    "GameDrawn": [
+      "GameDrawn"
+    ],
+    "ReorderZone": [
+      "LookAtTop"
+    ],
+    "ActivateAbility": [
+      "AbilityActivated"
+    ],
+    "Block": [
+      "ForceBlock"
+    ],
+    "ExchangeTextBox": [
+      "ChangeText"
+    ],
+    "SwitchBlock": [
+      "ForceBlock"
+    ],
+    "HealDamage": [
+      "DamageRemoved"
+    ],
+    "RestartGame": [
+      "RestartGame"
+    ],
+    "ChangeSpeed": [
+      "Speed"
+    ],
+    "ChangeX": [],
+    "TapOrUntapAll": [
+      "Tap",
+      "Untap"
+    ],
+    "TaporUntapAll": [
+      "Tap",
+      "Untap"
+    ],
+    "Camouflage": [
+      "ForceBlock"
+    ],
+    "ReverseTurnOrder": [
+      "TurnOrder"
+    ],
+    "RollPlanarDice": [
+      "PlanarDice"
+    ],
+    "EndCombatPhase": [
+      "EndCombat"
+    ],
+    "ExchangeControlVariant": [
+      "GainControl"
+    ]
+  },
+  "costs": {
+    "T": "Tap",
+    "Q": "Untap",
+    "Sac": "Sacrifice",
+    "Discard": "Discard",
+    "PayLife": "LifeLoss",
+    "SubCounter": "CounterRemoved",
+    "AddCounter": "CounterPlaced",
+    "Exile": "Exile",
+    "ExileFromGrave": "ExileFromGraveyard",
+    "tapXType": "Tap",
+    "untapXType": "Untap",
+    "Return": "Bounce",
+    "Mill": "Mill",
+    "Reveal": "Reveal",
+    "PayEnergy": "EnergySpent",
+    "Draw": "CardDrawn",
+    "Collect": "CollectEvidence",
+    "Forage": "Forage",
+    "RemoveAnyCounter": "CounterRemoved",
+    "PutCardToLib": "ToLibrary",
+    "Unattach": "Unattach",
+    "Exert": "Exert",
+    "Blight": "Blight",
+    "Waterbend": "Tap",
+    "ExileFromHand": "ExileFromHand",
+    "XMin1": null,
+    "CollectEvidence": "CollectEvidence",
+    "ExileFromTop": "ExileFromLibrary",
+    "ExiledMoveToGrave": "ExileToGraveyard",
+    "untapYType": "Untap",
+    "RevealChosen": "Reveal",
+    "Mana": "ManaPaid",
+    "PutCardToLibFromHand": "HandToLibrary",
+    "PutCardToLibFromGrave": "GraveyardToLibrary",
+    "PutCardToLibFromBattlefield": "Tuck",
+    "ExileFromStack": "Exile",
+    "ChooseCreatureType": null,
+    "ExileSameGrave": "ExileFromGraveyard",
+    "RevealOrChoose": "Reveal",
+    "RollDice": "DieRolled",
+    "ExileAnyGrave": "ExileFromGraveyard",
+    "RevealFromExile": "Reveal"
+  },
+  "statics": {
+    "Continuous": "@continuous",
+    "ReduceCost": [
+      "CostReduction"
+    ],
+    "RaiseCost": [
+      "CostIncrease"
+    ],
+    "SetCost": [
+      "CostSet"
+    ],
+    "AlternativeCost": [
+      "AlternativeCost"
+    ],
+    "OptionalCost": [
+      "AdditionalCost"
+    ],
+    "CantBlockBy": [
+      "EvasionRestriction"
+    ],
+    "CantAttack": [
+      "AttackRestriction"
+    ],
+    "CantBlock": [
+      "BlockRestriction"
+    ],
+    "CantBeCast": [
+      "CastRestriction"
+    ],
+    "CantBeActivated": [
+      "ActivationRestriction"
+    ],
+    "MustAttack": [
+      "ForceAttack"
+    ],
+    "MustBlock": [
+      "ForceBlock"
+    ],
+    "CastWithFlash": [
+      "CastTiming"
+    ],
+    "MinMaxBlocker": [
+      "EvasionRestriction"
+    ],
+    "CantTarget": [
+      "TargetRestriction"
+    ],
+    "CantGainLife": [
+      "LifeGainRestriction"
+    ],
+    "CantDraw": [
+      "DrawRestriction"
+    ],
+    "CantPlayLand": [
+      "LandRestriction"
+    ],
+    "MayPlay": [
+      "CastPermission"
+    ],
+    "MayLookAt": [
+      "Reveal"
+    ],
+    "CanAttackDefender": [
+      "AttackPermission"
+    ],
+    "CantAttackUnless": [
+      "AttackRestriction"
+    ],
+    "CantBlockUnless": [
+      "BlockRestriction"
+    ],
+    "CantTransform": [
+      "TransformRestriction"
+    ],
+    "CantUntap": [
+      "UntapRestriction"
+    ],
+    "CantSacrifice": [
+      "SacrificeRestriction"
+    ],
+    "CantPutCounter": [
+      "CounterRestriction"
+    ],
+    "CantChangeZone": [
+      "ZoneRestriction"
+    ],
+    "CantRegenerate": [
+      "RegenerateRestriction"
+    ],
+    "CantPreventDamage": [
+      "PreventRestriction"
+    ],
+    "CantSearchLibrary": [
+      "SearchRestriction"
+    ],
+    "IgnoreHexproof": [
+      "TargetPermission"
+    ],
+    "Panharmonicon": [
+      "TriggerMultiplier"
+    ],
+    "CombatDamageToughness": [
+      "DamageRule"
+    ],
+    "AssignCombatDamageAsUnblocked": [
+      "DamageRule"
+    ],
+    "AttackRequirement": [
+      "ForceAttack"
+    ],
+    "BlockRestrict": [
+      "BlockRestriction"
+    ],
+    "AttackRestrict": [
+      "AttackRestriction"
+    ],
+    "ManaConvert": [
+      "ManaRule"
+    ],
+    "UnspentMana": [
+      "ManaRule"
+    ],
+    "CountersRemain": [
+      "CounterRule"
+    ],
+    "PlayerMustAttack": [
+      "ForceAttack"
+    ],
+    "CanBlockAny": [
+      "BlockPermission"
+    ],
+    "CanBlockAmount": [
+      "BlockPermission"
+    ],
+    "MustBeBlockedBy": [
+      "ForceBlock"
+    ],
+    "MustBeBlockedByAll": [
+      "ForceBlock"
+    ],
+    "CantExile": [
+      "ZoneRestriction"
+    ],
+    "CantBeTargetedBy": [
+      "TargetRestriction"
+    ],
+    "Devotion": [
+      "Devotion"
+    ],
+    "CastFromGraveyard": [
+      "CastPermission"
+    ],
+    "ETBTapped": [
+      "EntersTapped"
+    ],
+    "FlipCoinMod": [
+      "CoinRule"
+    ],
+    "AdaptMod": [
+      "Adapt"
+    ],
+    "NoCleanupDamage": [
+      "DamageRule"
+    ],
+    "OptionalAttackCost": [
+      "AttackCost"
+    ],
+    "CantAttach": [
+      "AttachRestriction"
+    ],
+    "CantCrew": [
+      "CrewRestriction"
+    ],
+    "CantVenture": [
+      "VentureRestriction"
+    ],
+    "DisableTriggers": [
+      "TriggerSuppression"
+    ],
+    "CantWinLose": [
+      "GameRule"
+    ],
+    "CantLoseGame": [
+      "GameRule"
+    ],
+    "CantWinGame": [
+      "GameRule"
+    ],
+    "RaiseCostPerTarget": [
+      "CostIncrease"
+    ],
+    "SacrificeEachTurn": [
+      "Sacrifice"
+    ],
+    "CantTapForMana": [
+      "ManaRule"
+    ],
+    "AttackPermission": [
+      "AttackPermission"
+    ],
+    "MaxHandSize": [
+      "HandSize"
+    ],
+    "Untap": [
+      "Untap"
+    ],
+    "AssignNoCombatDamage": [
+      "DamageRule"
+    ],
+    "UntapOtherPlayer": [
+      "Untap"
+    ],
+    "IgnoreLandWalk": [
+      "EvasionRule"
+    ],
+    "IgnoreLegendRule": [
+      "LegendRule"
+    ],
+    "TapPowerValue": [
+      "CrewRule"
+    ],
+    "NumLoyaltyAct": [
+      "LoyaltyRule"
+    ],
+    "CantChangeLife": [
+      "LifeRule"
+    ],
+    "CantPhaseIn": [
+      "PhaseRule"
+    ],
+    "ActivateAbilityAsIfHaste": [
+      "HasteRule"
+    ],
+    "CanBlockIfShadow": [
+      "BlockPermission"
+    ],
+    "CantBeCopied": [
+      "CopyRestriction"
+    ],
+    "CanAttackIfHaste": [
+      "HasteRule"
+    ],
+    "MustTarget": [
+      "TargetRule"
+    ],
+    "CantPayLife": [
+      "LifeRule"
+    ],
+    "ManaRestriction": [
+      "ManaRule"
+    ],
+    "Activations": [
+      "ActivationRule"
+    ],
+    "CantLoseLife": [
+      "LifeRule"
+    ],
+    "CantPhaseOut": [
+      "PhaseRule"
+    ],
+    "CanBlockIfReach": [
+      "BlockPermission"
+    ],
+    "CantGainControl": [
+      "ControlRestriction"
+    ],
+    "IgnorePlaneswalkerZeroLoyaltyRule": [
+      "LoyaltyRule"
+    ],
+    "DrawFromBottom": [
+      "DrawRule"
+    ],
+    "ForetellAnyTurn": [
+      "Foretell"
+    ],
+    "InfectDamage": [
+      "PoisonCounter"
+    ],
+    "ColorlessDamageSource": [
+      "DamageRule"
+    ],
+    "CantDiscard": [
+      "DiscardRestriction"
+    ],
+    "PlotZone": [
+      "Plot"
+    ],
+    "ManaBurn": [
+      "ManaRule"
+    ],
+    "CanAdapt": [
+      "Adapt"
+    ],
+    "FlipCoinDoubler": [
+      "CoinRule"
+    ],
+    "AttackVigilance": [
+      "Keyword:Vigilance"
+    ],
+    "CantBecomeMonarch": [
+      "MonarchRestriction"
+    ],
+    "BlockTapped": [
+      "BlockPermission"
+    ],
+    "SurveilNum": [
+      "Surveil"
+    ],
+    "IgnoreShroud": [
+      "TargetPermission"
+    ],
+    "CantBeSuspected": [
+      "SuspectRestriction"
+    ],
+    "WitherDamage": [
+      "CounterPlaced"
+    ],
+    "CombatDamageNegatePower": [
+      "DamageRule"
+    ],
+    "GainLifeRadiation": [
+      "LifeGain"
+    ],
+    "MaxCounter": [
+      "CounterRule"
+    ]
+  },
+  "continuous": {
+    "AddKeyword": "Keyword:{value}",
+    "AddPower": "Power",
+    "AddToughness": "Toughness",
+    "SetPower": "Power",
+    "SetToughness": "Toughness",
+    "AddType": "Type",
+    "AddAllCreatureTypes": "Type",
+    "RemoveType": "Type",
+    "SetColor": "Color",
+    "AddColor": "Color",
+    "AddAbility": "GrantedAbility",
+    "AddTrigger": "GrantedAbility",
+    "AddStaticAbility": "GrantedAbility",
+    "AddReplacementEffect": "GrantedAbility",
+    "AddHiddenKeyword": "Keyword:{value}",
+    "RemoveKeyword": "LoseKeyword",
+    "RemoveAllAbilities": "LoseAbility",
+    "GainControl": "GainControl",
+    "MayPlay": "CastPermission",
+    "MayLookAt": "Reveal",
+    "AddSVar": null,
+    "Affected": null,
+    "AffectedZone": null,
+    "AffectedDefined": null,
+    "Description": null,
+    "Mode": null,
+    "CharacteristicDefining": null,
+    "Condition": null,
+    "IsPresent": null,
+    "CheckSVar": null,
+    "SVarCompare": null,
+    "EffectZone": null,
+    "ValidCard": null,
+    "MayPlayLimit": null,
+    "MayPlayWithoutManaCost": null,
+    "MayPlayIgnoreType": null,
+    "MayPlayIgnoreColor": null,
+    "MayPlayAltManaCost": null,
+    "MayPlayDontGrantZonePermissions": null,
+    "MayPlayPlayer": null,
+    "MayPlayText": null,
+    "MayPlayWithFlash": null,
+    "MayPlaySnowIgnoreColor": null,
+    "GainsAbilitiesLimitPerTurn": null,
+    "SetMaxHandSize": "HandSize",
+    "RemoveCreatureTypes": "Type",
+    "RemoveLandTypes": "Type",
+    "RemoveCardTypes": "Type",
+    "RemoveArtifactTypes": "Type",
+    "GainsAbilitiesOf": "GrantedAbility",
+    "GainsAbilitiesOfZones": "GrantedAbility",
+    "GainsAbilitiesOfDefined": "GrantedAbility",
+    "GainsValidAbilities": "GrantedAbility",
+    "GainsTriggerAbsOf": "GrantedAbility",
+    "GainTextOf": "ChangeText",
+    "GainTextAbilities": "GrantedAbility",
+    "GainsStickerAbilitiesOfDefined": "GrantedAbility",
+    "GainsStickerAbilitiesOf": "GrantedAbility",
+    "SetName": "Name",
+    "AddNames": "Name",
+    "AdditionalOptionalVote": "Vote",
+    "AdditionalVote": "Vote",
+    "AdditionalVillainousChoice": "Vote",
+    "RemoveNonManaAbilities": "LoseAbility",
+    "PresentCompare": null,
+    "PresentZone": null,
+    "Secondary": null,
+    "SharedRestrictions": null,
+    "SharedKeywordsZone": null,
+    "ValidAfterStack": null,
+    "TopCardOfLibraryIs": null,
+    "ValidSA": null,
+    "CheckSecondSVar": null,
+    "SecondSVarCompare": null,
+    "CheckThirdSVar": null,
+    "Player": null,
+    "Phases": null,
+    "LockInText": null,
+    "KeywordDefined": null,
+    "GameStage": null,
+    "FromDraftNotes": null,
+    "ExcludeZone": null,
+    "DeclaresBlockers": null,
+    "Caster": null,
+    "CalcKeywordN": null,
+    "ActivationZone": null,
+    "Activator": null,
+    "ValidPlayer": null,
+    "Origin": null,
+    "Destination": null,
+    "AdjustLandPlays": "LandPlays",
+    "CanBlockAmount": "BlockPermission",
+    "CanBlockAny": "BlockPermission",
+    "RaiseMaxHandSize": "HandSize",
+    "Goad": "Goad",
+    "RaiseCost": "CostIncrease",
+    "CantHaveKeyword": "LoseKeyword",
+    "LethalDamageByPower": "DamageRule",
+    "ControlOpponentsSearchingLibrary": "ControlPlayer",
+    "ChangeColorWordsTo": "ChangeText",
+    "ManaConversion": "ManaRule",
+    "ReplaceGraveyard": "ZoneRule",
+    "IgnoreEffectCost": "CostReduction",
+    "Duration": null,
+    "ControlVote": "Vote",
+    "DeclaresAttackers": "ControlPlayer"
+  },
+  "replacements": {
+    "Moved": "@zone",
+    "CreateToken": [
+      "TokenCreated"
+    ],
+    "AddCounter": [
+      "CounterPlaced"
+    ],
+    "DamageDone": [
+      "Damage"
+    ],
+    "Untap": [
+      "Untap"
+    ],
+    "Counter": [
+      "SpellCountered"
+    ],
+    "Draw": [
+      "CardDrawn"
+    ],
+    "GainLife": [
+      "LifeGain"
+    ],
+    "LoseLife": [
+      "LifeLoss"
+    ],
+    "BeginPhase": [
+      "PhaseBegins"
+    ],
+    "BeginTurn": [
+      "TurnBegins"
+    ],
+    "GameLoss": [
+      "PlayerLoses"
+    ],
+    "GameWin": [
+      "PlayerWins"
+    ],
+    "ProduceMana": [
+      "ManaAdded"
+    ],
+    "TurnFaceUp": [
+      "TurnFaceUp"
+    ],
+    "Discard": [
+      "Discard"
+    ],
+    "Destroy": [
+      "Destroy"
+    ],
+    "Tap": [
+      "Tap"
+    ],
+    "Scry": [
+      "Scry"
+    ],
+    "Mill": [
+      "Mill"
+    ],
+    "Explore": [
+      "Explore"
+    ],
+    "Proliferate": [
+      "Proliferate"
+    ],
+    "PayLife": [
+      "LifeLoss"
+    ],
+    "SetInMotion": [
+      "SchemeSetInMotion"
+    ],
+    "Planeswalk": [
+      "Planeswalk"
+    ],
+    "RollPlanarDice": [
+      "PlanarDice"
+    ],
+    "Transform": [
+      "Transform"
+    ],
+    "Attached": [
+      "Attach"
+    ],
+    "Cascade": [
+      "Cascade"
+    ],
+    "AssembleContraption": [
+      "Assemble"
+    ],
+    "DrawCards": [
+      "CardDrawn"
+    ],
+    "PlanarDiceResult": [
+      "PlanarDice"
+    ],
+    "RemoveCounter": [
+      "CounterRemoved"
+    ],
+    "LifeReduced": [
+      "LifeLoss"
+    ],
+    "Learn": [
+      "Tutor"
+    ],
+    "DeclareBlocker": [
+      "BlockersDeclared"
+    ],
+    "RollDice": [
+      "DieRolled"
+    ],
+    "FlipCoin": [
+      "CoinFlipped"
+    ],
+    "Copy": [
+      "SpellCopied"
+    ],
+    "PlayLand": [
+      "LandPlayed"
+    ],
+    "Cast": [
+      "SpellCast"
+    ],
+    "LoseMana": [
+      "ManaLost"
+    ],
+    "CopySpell": [
+      "SpellCopied"
+    ],
+    "Connive": [
+      "Connive"
+    ]
+  },
+  "extraImplications": [
+    {
+      "from": "Dies",
+      "implies": "PutIntoGraveyard",
+      "note": "A creature dying is a permanent put into a graveyard from the battlefield."
+    },
+    {
+      "from": "Reanimate",
+      "implies": "ETB"
+    },
+    {
+      "from": "TokenCreated",
+      "implies": "ETB"
+    },
+    {
+      "from": "Manifest",
+      "implies": "ETB"
+    },
+    {
+      "from": "Meld",
+      "implies": "ETB"
+    },
+    {
+      "from": "Copy",
+      "implies": "ETB"
+    }
+  ],
+  "keywords": {
+    "selfAttribute": [
+      "Flying",
+      "Trample",
+      "Vigilance",
+      "Haste",
+      "Flash",
+      "Reach",
+      "Menace",
+      "First Strike",
+      "Double Strike",
+      "Deathtouch",
+      "Defender",
+      "Indestructible",
+      "Hexproof",
+      "Shroud",
+      "Fear",
+      "Shadow",
+      "Intimidate",
+      "Horsemanship",
+      "Skulk",
+      "Changeling",
+      "Devoid",
+      "Ward",
+      "Protection",
+      "Landwalk",
+      "Infect",
+      "Wither",
+      "Toxic",
+      "Flanking",
+      "Banding",
+      "Partner",
+      "Partner with",
+      "Choose a Background",
+      "Doctor",
+      "Enchant",
+      "Convoke",
+      "Delve",
+      "Improvise",
+      "Affinity",
+      "Kicker",
+      "Multikicker",
+      "Entwine",
+      "Splice",
+      "Buyback",
+      "Split second",
+      "Storm",
+      "Cascade",
+      "Rebound",
+      "Read ahead",
+      "Start your engines",
+      "Compleated",
+      "Daybound",
+      "Nightbound",
+      "Ascend",
+      "Myriad",
+      "Melee",
+      "Battle cry",
+      "Annihilator",
+      "Bushido",
+      "Rampage",
+      "Provoke",
+      "Living weapon",
+      "Totem armor",
+      "Umbra armor",
+      "Soulbond",
+      "Undying",
+      "Persist",
+      "Exalted",
+      "Evolve",
+      "Extort",
+      "Prowess",
+      "Training",
+      "Mentor",
+      "Riot",
+      "Afflict",
+      "Afterlife",
+      "Fabricate",
+      "Decayed",
+      "Ravenous",
+      "Squad",
+      "Gift",
+      "Offspring",
+      "Saddle",
+      "Station",
+      "Mobilize",
+      "Job select",
+      "For Mirrodin",
+      "Backup",
+      "Bargain",
+      "Casualty",
+      "Craft",
+      "Disturb",
+      "Escape",
+      "Flashback",
+      "Jump-start",
+      "Retrace",
+      "Aftermath",
+      "Unearth",
+      "Embalm",
+      "Eternalize",
+      "Encore",
+      "Foretell",
+      "Plot",
+      "Warp",
+      "Suspend",
+      "Madness",
+      "Evoke",
+      "Echo",
+      "Cumulative upkeep",
+      "Morph",
+      "Megamorph",
+      "Disguise",
+      "Mutate",
+      "Bestow",
+      "Ninjutsu",
+      "Dash",
+      "Blitz",
+      "Prototype",
+      "Overload",
+      "Spectacle",
+      "Surge",
+      "Emerge",
+      "Escalate",
+      "Replicate",
+      "Sneak",
+      "Exploit",
+      "Devour",
+      "Modular",
+      "Graft",
+      "Dethrone",
+      "Renown",
+      "Hideaway",
+      "Sunburst",
+      "Amplify",
+      "Fading",
+      "Vanishing",
+      "Level up",
+      "Reconfigure",
+      "Specialize",
+      "Champion",
+      "Haunt",
+      "Ripple",
+      "Soulshift",
+      "Splice onto Arcane",
+      "Tribute",
+      "Dredge",
+      "Transmute",
+      "Forecast",
+      "Reinforce",
+      "Outlast",
+      "Scavenge",
+      "Bloodthirst",
+      "Crew",
+      "Firebending",
+      "Max speed",
+      "Harmonize",
+      "More Than Meets the Eye",
+      "Impending",
+      "Freerunning",
+      "Tiered",
+      "Spree",
+      "Cleave",
+      "Demonstrate",
+      "Hexproof from",
+      "Protection from black",
+      "Protection from red",
+      "Protection from white",
+      "Protection from blue",
+      "Protection from green",
+      "Protection from artifacts",
+      "Protection from everything",
+      "Lifelink",
+      "Equip",
+      "Cycling",
+      "TypeCycling",
+      "Landcycling",
+      "AlternateAdditionalCost",
+      "MayEffectFromOpeningHand",
+      "StickerSheet",
+      "You may choose not to untap CARDNAME during your untap step",
+      "Fuse",
+      "Companion",
+      "Conspire",
+      "Cipher",
+      "Phasing",
+      "Epic",
+      "Gravestorm",
+      "Poisonous",
+      "Frenzy",
+      "Horsemanship",
+      "Absorb",
+      "Aura swap",
+      "Bloodrush",
+      "Recover",
+      "Awaken",
+      "Ingest",
+      "Partner with",
+      "Hidden agenda",
+      "Double agenda",
+      "Assist",
+      "Visit",
+      "Prize",
+      "Enlist",
+      "Read Ahead",
+      "Compleated",
+      "Miracle",
+      "Paradox",
+      "Doctor's companion",
+      "Strive",
+      "Teamwork",
+      "Living metal",
+      "MayFlashCost",
+      "MayFlashSac",
+      "Storied",
+      "Undaunted",
+      "Paradigm",
+      "DeckLimit",
+      "MayEffectFromOpeningDeck",
+      "Space sculptor",
+      "Prowl",
+      "Mayhem",
+      "Web-slinging",
+      "MustBeBlockedByAll"
+    ],
+    "relations": {
+      "Lifelink": [
+        {
+          "relation": "produces",
+          "hook": "LifeGain",
+          "selector": "You"
+        }
+      ],
+      "Equip": [
+        {
+          "relation": "consumes",
+          "hook": "ManaPaid",
+          "selector": "You"
+        },
+        {
+          "relation": "produces",
+          "hook": "Attach",
+          "selector": "Creature.YouCtrl"
+        }
+      ],
+      "Cycling": [
+        {
+          "relation": "produces",
+          "hook": "Cycle",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Discard",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CardDrawn",
+          "selector": "You"
+        }
+      ],
+      "TypeCycling": [
+        {
+          "relation": "produces",
+          "hook": "Cycle",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Discard",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Tutor",
+          "selector": "You"
+        }
+      ],
+      "Landcycling": [
+        {
+          "relation": "produces",
+          "hook": "Cycle",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Discard",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Tutor",
+          "selector": "Land"
+        }
+      ],
+      "Flashback": [
+        {
+          "relation": "modifies",
+          "hook": "CastPermission",
+          "selector": "Card.Self"
+        }
+      ],
+      "Escape": [
+        {
+          "relation": "modifies",
+          "hook": "CastPermission",
+          "selector": "Card.Self"
+        }
+      ],
+      "Unearth": [
+        {
+          "relation": "produces",
+          "hook": "Reanimate",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "ETB",
+          "selector": "Card.Self"
+        }
+      ],
+      "Persist": [
+        {
+          "relation": "triggers_on",
+          "hook": "Dies",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Reanimate",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Undying": [
+        {
+          "relation": "triggers_on",
+          "hook": "Dies",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Reanimate",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Prowess": [
+        {
+          "relation": "triggers_on",
+          "hook": "SpellCast",
+          "selector": "Card.nonCreature+YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Card.Self"
+        }
+      ],
+      "Exalted": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Creature.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Creature.attacking"
+        }
+      ],
+      "Afterlife": [
+        {
+          "relation": "triggers_on",
+          "hook": "Dies",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Creature.YouCtrl+token"
+        }
+      ],
+      "Fabricate": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Creature.YouCtrl+token"
+        }
+      ],
+      "Evolve": [
+        {
+          "relation": "triggers_on",
+          "hook": "ETB",
+          "selector": "Creature.YouCtrl+Other"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Extort": [
+        {
+          "relation": "triggers_on",
+          "hook": "SpellCast",
+          "selector": "Card.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "LifeLoss",
+          "selector": "Opponent"
+        },
+        {
+          "relation": "produces",
+          "hook": "LifeGain",
+          "selector": "You"
+        }
+      ],
+      "Annihilator": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Permanent.OppCtrl"
+        }
+      ],
+      "Toxic": [
+        {
+          "relation": "produces",
+          "hook": "PoisonCounter",
+          "selector": "Opponent"
+        }
+      ],
+      "Infect": [
+        {
+          "relation": "produces",
+          "hook": "PoisonCounter",
+          "selector": "Opponent"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Creature"
+        }
+      ],
+      "Wither": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Creature"
+        }
+      ],
+      "Mentor": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Creature.attacking"
+        }
+      ],
+      "Training": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Modular": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "triggers_on",
+          "hook": "Dies",
+          "selector": "Card.Self"
+        }
+      ],
+      "Exploit": [
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Creature.YouCtrl"
+        }
+      ],
+      "Devour": [
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Creature.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Crew": [
+        {
+          "relation": "consumes",
+          "hook": "Tap",
+          "selector": "Creature.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "Crew",
+          "selector": "Card.Self"
+        }
+      ],
+      "Storm": [
+        {
+          "relation": "consumes",
+          "hook": "SpellCast",
+          "selector": "Card"
+        },
+        {
+          "relation": "produces",
+          "hook": "SpellCopied",
+          "selector": "Card.Self"
+        }
+      ],
+      "Cascade": [
+        {
+          "relation": "produces",
+          "hook": "Cascade",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CastWithoutPaying",
+          "selector": "You"
+        }
+      ],
+      "Morph": [
+        {
+          "relation": "produces",
+          "hook": "TurnFaceUp",
+          "selector": "Card.Self"
+        }
+      ],
+      "Megamorph": [
+        {
+          "relation": "produces",
+          "hook": "TurnFaceUp",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Disguise": [
+        {
+          "relation": "produces",
+          "hook": "TurnFaceUp",
+          "selector": "Card.Self"
+        }
+      ],
+      "Madness": [
+        {
+          "relation": "triggers_on",
+          "hook": "Discard",
+          "selector": "Card.Self"
+        }
+      ],
+      "Ninjutsu": [
+        {
+          "relation": "consumes",
+          "hook": "Bounce",
+          "selector": "Creature.YouCtrl+unblocked"
+        },
+        {
+          "relation": "produces",
+          "hook": "ETB",
+          "selector": "Card.Self"
+        }
+      ],
+      "Warp": [
+        {
+          "relation": "modifies",
+          "hook": "AlternativeCost",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Exile",
+          "selector": "Card.Self"
+        }
+      ],
+      "Encore": [
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Card.Self"
+        }
+      ],
+      "Embalm": [
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Card.Self"
+        }
+      ],
+      "Eternalize": [
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Card.Self"
+        }
+      ],
+      "Myriad": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Card.Self"
+        }
+      ],
+      "Squad": [
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Card.Self"
+        }
+      ],
+      "Offspring": [
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Card.Self"
+        }
+      ],
+      "Backup": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Creature"
+        }
+      ],
+      "Riot": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Bloodthirst": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Ravenous": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Casualty": [
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Creature.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "SpellCopied",
+          "selector": "Card.Self"
+        }
+      ],
+      "Bargain": [
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Permanent.YouCtrl"
+        }
+      ],
+      "Emerge": [
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Creature.YouCtrl"
+        }
+      ],
+      "Convoke": [
+        {
+          "relation": "consumes",
+          "hook": "Tap",
+          "selector": "Creature.YouCtrl"
+        }
+      ],
+      "Improvise": [
+        {
+          "relation": "consumes",
+          "hook": "Tap",
+          "selector": "Artifact.YouCtrl"
+        }
+      ],
+      "Delve": [
+        {
+          "relation": "consumes",
+          "hook": "ExileFromGraveyard",
+          "selector": "Card.YouOwn"
+        }
+      ],
+      "Saddle": [
+        {
+          "relation": "consumes",
+          "hook": "Tap",
+          "selector": "Creature.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "Saddle",
+          "selector": "Card.Self"
+        }
+      ],
+      "Melee": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Card.Self"
+        }
+      ],
+      "Battle cry": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Creature.attacking+Other"
+        }
+      ],
+      "Dredge": [
+        {
+          "relation": "produces",
+          "hook": "Mill",
+          "selector": "You"
+        },
+        {
+          "relation": "produces",
+          "hook": "Regrowth",
+          "selector": "Card.Self"
+        }
+      ],
+      "Scavenge": [
+        {
+          "relation": "consumes",
+          "hook": "ExileFromGraveyard",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Creature"
+        }
+      ],
+      "Outlast": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Mobilize": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Creature.YouCtrl+token"
+        }
+      ],
+      "Living weapon": [
+        {
+          "relation": "produces",
+          "hook": "TokenCreated",
+          "selector": "Creature.YouCtrl+token"
+        },
+        {
+          "relation": "produces",
+          "hook": "Attach",
+          "selector": "Card.Self"
+        }
+      ],
+      "Decayed": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Card.Self"
+        }
+      ],
+      "Echo": [
+        {
+          "relation": "consumes",
+          "hook": "ManaPaid",
+          "selector": "You"
+        }
+      ],
+      "Cumulative upkeep": [
+        {
+          "relation": "triggers_on",
+          "hook": "Upkeep",
+          "selector": "You"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Fading": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "triggers_on",
+          "hook": "Upkeep",
+          "selector": "You"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterRemoved",
+          "selector": "Card.Self"
+        }
+      ],
+      "Vanishing": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "triggers_on",
+          "hook": "Upkeep",
+          "selector": "You"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterRemoved",
+          "selector": "Card.Self"
+        }
+      ],
+      "Suspend": [
+        {
+          "relation": "produces",
+          "hook": "ExileFromHand",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CastWithoutPaying",
+          "selector": "Card.Self"
+        }
+      ],
+      "Foretell": [
+        {
+          "relation": "produces",
+          "hook": "ExileFromHand",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Foretell",
+          "selector": "Card.Self"
+        }
+      ],
+      "Plot": [
+        {
+          "relation": "produces",
+          "hook": "ExileFromHand",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Plot",
+          "selector": "Card.Self"
+        }
+      ],
+      "Evoke": [
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Card.Self"
+        }
+      ],
+      "Dash": [
+        {
+          "relation": "produces",
+          "hook": "Bounce",
+          "selector": "Card.Self"
+        }
+      ],
+      "Blitz": [
+        {
+          "relation": "produces",
+          "hook": "Sacrifice",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CardDrawn",
+          "selector": "You"
+        }
+      ],
+      "Hideaway": [
+        {
+          "relation": "produces",
+          "hook": "ExileFromLibrary",
+          "selector": "You"
+        },
+        {
+          "relation": "produces",
+          "hook": "CastWithoutPaying",
+          "selector": "You"
+        }
+      ],
+      "Afflict": [
+        {
+          "relation": "triggers_on",
+          "hook": "BecomesBlocked",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "LifeLoss",
+          "selector": "Opponent"
+        }
+      ],
+      "Renown": [
+        {
+          "relation": "triggers_on",
+          "hook": "CombatDamage",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Bushido": [
+        {
+          "relation": "triggers_on",
+          "hook": "Blocks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Card.Self"
+        }
+      ],
+      "Rampage": [
+        {
+          "relation": "triggers_on",
+          "hook": "BecomesBlocked",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Card.Self"
+        }
+      ],
+      "Flanking": [
+        {
+          "relation": "triggers_on",
+          "hook": "BecomesBlocked",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Creature.blocking"
+        }
+      ],
+      "Soulshift": [
+        {
+          "relation": "triggers_on",
+          "hook": "Dies",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Regrowth",
+          "selector": "Spirit.YouOwn"
+        }
+      ],
+      "Haunt": [
+        {
+          "relation": "triggers_on",
+          "hook": "Dies",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Exile",
+          "selector": "Card.Self"
+        }
+      ],
+      "Dethrone": [
+        {
+          "relation": "triggers_on",
+          "hook": "Attacks",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Ascend": [
+        {
+          "relation": "produces",
+          "hook": "CitysBlessing",
+          "selector": "You"
+        }
+      ],
+      "Totem armor": [
+        {
+          "relation": "replaces",
+          "hook": "Destroy",
+          "selector": "Creature.EnchantedBy"
+        }
+      ],
+      "Umbra armor": [
+        {
+          "relation": "replaces",
+          "hook": "Destroy",
+          "selector": "Creature.EnchantedBy"
+        }
+      ],
+      "Phasing": [
+        {
+          "relation": "produces",
+          "hook": "PhaseOut",
+          "selector": "Card.Self"
+        }
+      ],
+      "Amplify": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Sunburst": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Graft": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "triggers_on",
+          "hook": "ETB",
+          "selector": "Creature.Other"
+        }
+      ],
+      "Reconfigure": [
+        {
+          "relation": "produces",
+          "hook": "Attach",
+          "selector": "Creature.YouCtrl"
+        }
+      ],
+      "Level up": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced",
+          "selector": "Card.Self"
+        }
+      ],
+      "Champion": [
+        {
+          "relation": "produces",
+          "hook": "Exile",
+          "selector": "Creature.YouCtrl+Other"
+        }
+      ],
+      "Ripple": [
+        {
+          "relation": "produces",
+          "hook": "CastWithoutPaying",
+          "selector": "Card.Self"
+        }
+      ],
+      "Rebound": [
+        {
+          "relation": "produces",
+          "hook": "Exile",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "CastWithoutPaying",
+          "selector": "Card.Self"
+        }
+      ],
+      "Spectacle": [
+        {
+          "relation": "consumes",
+          "hook": "LifeLoss",
+          "selector": "Opponent"
+        }
+      ],
+      "Bloodrush": [
+        {
+          "relation": "produces",
+          "hook": "Discard",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Creature.attacking"
+        }
+      ],
+      "Enlist": [
+        {
+          "relation": "consumes",
+          "hook": "Tap",
+          "selector": "Creature.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "Pump",
+          "selector": "Card.Self"
+        }
+      ],
+      "Mutate": [
+        {
+          "relation": "produces",
+          "hook": "Mutate",
+          "selector": "Creature.YouOwn+nonHuman"
+        }
+      ],
+      "Bestow": [
+        {
+          "relation": "produces",
+          "hook": "Attach",
+          "selector": "Creature"
+        }
+      ],
+      "Jump-start": [
+        {
+          "relation": "modifies",
+          "hook": "CastPermission",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "consumes",
+          "hook": "Discard",
+          "selector": "Card.YouOwn"
+        }
+      ],
+      "Retrace": [
+        {
+          "relation": "modifies",
+          "hook": "CastPermission",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "consumes",
+          "hook": "Discard",
+          "selector": "Land.YouOwn"
+        }
+      ],
+      "Disturb": [
+        {
+          "relation": "modifies",
+          "hook": "CastPermission",
+          "selector": "Card.Self"
+        }
+      ],
+      "Aftermath": [
+        {
+          "relation": "modifies",
+          "hook": "CastPermission",
+          "selector": "Card.Self"
+        }
+      ],
+      "Miracle": [
+        {
+          "relation": "triggers_on",
+          "hook": "CardDrawn",
+          "selector": "Card.Self"
+        }
+      ],
+      "Unleash": [
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced:P1P1",
+          "selector": "Card.Self"
+        }
+      ],
+      "Increment": [
+        {
+          "relation": "triggers_on",
+          "hook": "SpellCast",
+          "selector": "Card.YouCtrl"
+        },
+        {
+          "relation": "produces",
+          "hook": "CounterPlaced:P1P1",
+          "selector": "Card.Self"
+        }
+      ],
+      "Offering": [
+        {
+          "relation": "consumes",
+          "hook": "Sacrifice",
+          "selector": "Creature.YouCtrl"
+        }
+      ],
+      "Fortify": [
+        {
+          "relation": "produces",
+          "hook": "Attach",
+          "selector": "Land.YouCtrl"
+        }
+      ],
+      "Transfigure": [
+        {
+          "relation": "consumes",
+          "hook": "Sacrifice",
+          "selector": "Card.Self"
+        },
+        {
+          "relation": "produces",
+          "hook": "Tutor",
+          "selector": "Creature"
+        }
+      ],
+      "Web-slinging": [
+        {
+          "relation": "consumes",
+          "hook": "Bounce",
+          "selector": "Creature.YouCtrl+tapped"
+        }
+      ],
+      "Mayhem": [
+        {
+          "relation": "modifies",
+          "hook": "CastPermission",
+          "selector": "Card.Self"
+        }
+      ]
+    },
+    "structural": [
+      "Class",
+      "Chapter",
+      "etbCounter",
+      "ETBReplacement",
+      "Landwalk",
+      "Protection",
+      "Hexproof from"
+    ]
+  },
+  "ruleSentences": [
+    {
+      "pattern": "can.t attack or block",
+      "hook": "AttackRestriction"
+    },
+    {
+      "pattern": "can.t attack",
+      "hook": "AttackRestriction"
+    },
+    {
+      "pattern": "can.t block",
+      "hook": "BlockRestriction"
+    },
+    {
+      "pattern": "can only attack alone",
+      "hook": "AttackRestriction"
+    },
+    {
+      "pattern": "must be blocked",
+      "hook": "ForceBlock"
+    },
+    {
+      "pattern": "able to block",
+      "hook": "ForceBlock"
+    },
+    {
+      "pattern": "^Prevent all .*damage",
+      "hook": "DamagePrevented"
+    },
+    {
+      "pattern": "any number of cards named",
+      "hook": "DeckRule"
+    },
+    {
+      "pattern": "can be your commander",
+      "hook": "CommanderRule"
+    },
+    {
+      "pattern": "choose not to untap",
+      "hook": "UntapRestriction"
+    },
+    {
+      "pattern": "assign (its|CARDNAME.s) combat damage",
+      "hook": "DamageRule"
+    },
+    {
+      "pattern": "lethal damage",
+      "hook": "DamageRule"
+    },
+    {
+      "pattern": "roll a die|reroll",
+      "hook": "DieRolled"
+    },
+    {
+      "pattern": "cast CARDNAME from your library",
+      "hook": "CastPermission"
+    },
+    {
+      "pattern": "additional \\+1/\\+1 counters",
+      "hook": "CounterPlaced:P1P1"
+    },
+    {
+      "pattern": "Spend only colored mana",
+      "hook": "ManaRule"
+    }
+  ]
+}

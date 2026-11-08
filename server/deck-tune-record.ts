@@ -2,12 +2,13 @@
 // agent plays the skill turn by turn: it writes each user and assistant turn with this tool, and every tool call goes
 // through a real MCP client over stdio (the server command `.mcp.json` gives), logged with its full result.
 //
-//   bun app/deck-tune-record.ts init <session.jsonl> --title <t> --note <n> --played-by <model> [--real]
-//   bun app/deck-tune-record.ts user <session.jsonl>            (turn text on stdin)
-//   bun app/deck-tune-record.ts assistant <session.jsonl>       (turn text on stdin)
-//   bun app/deck-tune-record.ts read <session.jsonl> <path>     (a file the skill reads, relative to the repo root)
-//   bun app/deck-tune-record.ts call <session.jsonl> <tool> <json-arguments>
-//   bun app/deck-tune-record.ts render <session.jsonl> <out.md>
+//   bun server/deck-tune-record.ts init <session.jsonl> --title <t> --note <n> --played-by <model> [--real]
+//   bun server/deck-tune-record.ts user <session.jsonl>            (turn text on stdin)
+//   bun server/deck-tune-record.ts assistant <session.jsonl>       (turn text on stdin)
+//   bun server/deck-tune-record.ts read <session.jsonl> <path>     (a file the skill reads, relative to the repo root)
+//   bun server/deck-tune-record.ts call <session.jsonl> <tool> <json-arguments>
+//   bun server/deck-tune-record.ts render <session.jsonl> <out.md>
+//   bun server/deck-tune-record.ts convert <claude-code-log.jsonl> <out.jsonl>   (a real session's log as a transcript; the result is private data)
 //
 // Each call starts the server, connects, checks the tool is listed, calls it and closes: the tools are deterministic,
 // so a fresh server per call gives the same answer a long-lived one would.
@@ -17,7 +18,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { parseArgs } from "node:util";
-import { readTranscript, renderTranscript, type ToolEvent, type TranscriptEvent, type TranscriptHeader } from "./deck-tune-transcript";
+import { fromClaudeCodeLog, readTranscript, renderTranscript, serializeTranscript, type ToolEvent, type TranscriptEvent, type TranscriptHeader } from "./deck-tune-transcript";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 const SERVER = "mtg-deck";
@@ -67,7 +68,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<To
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, session, ...rest] = argv;
-  if (!cmd || !session) throw new UsageError("usage: deck-tune-record.ts <init|user|assistant|read|call|render> <session.jsonl> ...");
+  if (!cmd || !session) throw new UsageError("usage: deck-tune-record.ts <init|user|assistant|read|call|render|convert> <session.jsonl> ...");
   switch (cmd) {
     case "init": {
       if (existsSync(session)) throw new UsageError(`${session} already exists`);
@@ -106,6 +107,14 @@ async function main(argv: string[]): Promise<void> {
       const [out] = rest;
       if (!out) throw new UsageError("render needs an output path");
       writeFileSync(out, renderTranscript(readTranscript(session)));
+      return;
+    }
+    case "convert": {
+      // `session` is the Claude Code log to read here; the transcript goes to the path after it.
+      const [out] = rest;
+      if (!out) throw new UsageError("convert needs an output path");
+      if (existsSync(out)) throw new UsageError(`${out} already exists`);
+      writeFileSync(out, serializeTranscript(fromClaudeCodeLog(readFileSync(session, "utf8"), session)));
       return;
     }
     default:

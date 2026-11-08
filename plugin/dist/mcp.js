@@ -34893,11 +34893,6 @@ class StdioServerTransport {
   }
 }
 
-// server/deck-tools.ts
-import { Database } from "bun:sqlite";
-import { readFileSync } from "fs";
-import { isAbsolute, join as join2 } from "path";
-
 // server/color-identity.ts
 var CI_BIT = { W: 1, U: 2, B: 4, R: 8, G: 16 };
 var ciMask = (ci) => {
@@ -34907,6 +34902,60 @@ var ciMask = (ci) => {
   return m;
 };
 var fitsIdentity = (card, ci) => card.ci.every((x) => ci.includes(x));
+
+// server/deck-lines.ts
+var SECTION = /^(commander|commanders|companion|deck|main|mainboard|sideboard|maybeboard|maybe|considering)\b\s*(\(\d+\))?:?$/i;
+var NOT_DECK = /^(sideboard|maybe|considering)/i;
+function cleanName(raw) {
+  let name = raw.replace(/\s+#.*$/, "");
+  let tagNotDeck = false;
+  for (let before = "";before !== name; ) {
+    before = name;
+    name = name.replace(/\s+\*[A-Z]+\*$/i, "").replace(/\s+\^[^^]*\^$/, "").replace(/\s+\[([^\]]*)\]$/, (_, tag) => {
+      if (NOT_DECK.test(tag) || /\{noDeck\}/i.test(tag))
+        tagNotDeck = true;
+      return "";
+    });
+  }
+  name = name.replace(/\s+\([A-Za-z0-9]{2,6}\)(\s+\S+)?$/, "").trim();
+  if (/^[^/]+\/[^/]+$/.test(name))
+    name = name.replace("/", " // ");
+  return { name, tagNotDeck };
+}
+function deckLines(text) {
+  const out = [];
+  let section = "deck";
+  let first = true;
+  text.split(/\r?\n/).forEach((raw, k) => {
+    const line = raw.trim();
+    if (!line)
+      return;
+    const base = { line: k + 1, text: line };
+    const aside = () => {
+      out.push({ ...base, kind: "aside", section, inDeck: false });
+    };
+    if (/^https?:\/\//.test(line))
+      return aside();
+    const header = SECTION.exec(line.replace(/^(\/\/|#)\s*/, ""));
+    if (header) {
+      section = header[1].toLowerCase();
+      first = false;
+      return aside();
+    }
+    if (line.startsWith("//") || line.startsWith("#") || /^SB:\s*/i.test(line))
+      return aside();
+    const m = /^(\d+)\s*x?\s+(.+)$/i.exec(line);
+    if (!m && first && /^[^:]+:\s/.test(line) && !/\s\/\/\s/.test(line)) {
+      first = false;
+      return aside();
+    }
+    first = false;
+    const { name, tagNotDeck } = cleanName(m ? m[2] : line);
+    const inDeck = !NOT_DECK.test(section) && !tagNotDeck;
+    out.push(m ? { ...base, kind: "entry", section, inDeck, qty: Number(m[1]), name } : { ...base, kind: "bare", section, inDeck, name });
+  });
+  return out;
+}
 
 // server/deck-pool.ts
 var normName = (s) => s.normalize("NFKD").replace(/[\u0300-\u036F]/g, "").toLowerCase().replace(/[^a-z0-9/ ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -34942,89 +34991,4580 @@ function resolveName(space, name) {
 var DATA = new URL("../data/", import.meta.url).pathname;
 function parseDecklist(space, text) {
   const entries = [], skipped = [];
-  text.split(/\r?\n/).forEach((raw, k) => {
-    const line = raw.trim();
-    if (!line)
-      return;
-    const m = line.match(/^(\d+)\s*x?\s+(.+)$/i);
-    if (!m) {
-      skipped.push({ line: k + 1, text: line });
-      return;
-    }
-    const name = m[2].replace(/\s+\*[A-Z]+\*$/, "").replace(/\s+\([A-Za-z0-9]{2,6}\)(\s+\S+)?$/, "").replace(/\s+#.*$/, "").trim();
-    entries.push({ line: k + 1, qty: +m[1], text: name, card: resolveName(space, name) });
-  });
+  for (const l of deckLines(text)) {
+    if (l.kind === "entry" && l.inDeck)
+      entries.push({ line: l.line, qty: l.qty, text: l.name, card: resolveName(space, l.name), section: l.section });
+    else
+      skipped.push({ line: l.line, text: l.text });
+  }
   return { entries, unresolved: entries.filter((e) => !e.card), skipped };
 }
+function readsAsDeck(space, text) {
+  const lines = deckLines(text).filter((l) => l.kind !== "aside");
+  const named = lines.filter((l) => l.kind === "entry" && resolveName(space, l.name)).length;
+  return named > 0 && named * 2 >= lines.length;
+}
 
-// server/deck-swaps.ts
-var COLOR = { white: "W", blue: "U", black: "B", red: "R", green: "G" };
-function readPlan(commander) {
-  const t = commander.meta?.text ?? "";
-  const pip = t.match(/noncreature spell with one or more (white|blue|black|red|green) mana symbols/i);
-  const tribe = t.match(/number of (\w+) you control|other (\w+) you control|(\w+) creature tokens/i);
-  const name = tribe?.slice(1).find(Boolean) ?? null;
-  return { spellPips: pip ? COLOR[pip[1].toLowerCase()] : null, tribe: name && /^[A-Z]/.test(name) ? name : null };
+// server/deck-tools.ts
+import { Database } from "bun:sqlite";
+import { readFileSync } from "fs";
+import { isAbsolute, join as join2 } from "path";
+
+// server/errors.ts
+class ToolInputError extends Error {
 }
-var WEIGHTS = { tokens: 1, tribe: 2, payoff: 2 };
-function planScore(c, plan, w = WEIGHTS) {
-  const m = c.meta;
-  const pipRe = plan.spellPips ? new RegExp(`\\{[^}]*${plan.spellPips}[^}]*\\}`, "g") : null;
-  const tokens = pipRe && !/Creature/.test(m.type) ? (m.cost.match(pipRe) ?? []).length : 0;
-  const tribe = plan.tribe && new RegExp(`\\b${plan.tribe}\\b`).test(m.type) ? 1 : 0;
-  const ownText = m.text.split(c.name).join("CARDNAME");
-  const payoff = plan.tribe && new RegExp(`\\b${plan.tribe}\\b`, "i").test(ownText) || /whenever (you cast|a player casts) (a|an|your first|your second|their second) (spell|noncreature|instant|sorcery)/i.test(ownText) ? 1 : 0;
-  return { tokens, tribe, payoff, score: w.tokens * tokens + w.tribe * tribe + w.payoff * payoff };
+
+// server/plan-input.ts
+var MAX_THEMES = 3;
+var MAX_PRIORITIES = 6;
+var MAX_AVOID = 5;
+var planShape = exports_external.object({
+  themes: exports_external.array(exports_external.string().min(1)).max(MAX_THEMES).optional().describe(`EDHREC themes the deck is built around, by name (e.g. ["Aristocrats"]), at most ${MAX_THEMES}`),
+  priorities: exports_external.array(exports_external.string().min(1)).max(MAX_PRIORITIES).optional().describe(`Keystone cards the plan is about, exact card names inside the commander's color identity, at most ${MAX_PRIORITIES}. With no theme, the plan is read under the usable theme these cards fit best, and the result names it`),
+  avoid: exports_external.array(exports_external.string().min(1)).max(MAX_AVOID).optional().describe(`EDHREC themes the player does not want (e.g. ["Tokens"] for a deck that should not go wide), at most ${MAX_AVOID}`)
+}).strict().describe("The player's confirmed plan: at least one theme or one priority card");
+// server/graph/mapping/supply.yaml
+var supply_default = {
+  version: "1.0",
+  description: `What feeds a cost that spends something. A card that "consumes Sacrifice" needs a permanent on the battlefield, so anything that puts one there (ETB) feeds it. Used by src/interact.ts. ManaPaid is left out on purpose (ISA Decisions 2026-11-06): ramp is a role the Galaxy fills, and linking every mana source to every mana cost would drown the real interactions.
+`,
+  supply: [
+    {
+      consumes: "Sacrifice",
+      fed_by: [
+        "ETB"
+      ],
+      note: "Sacrifice outlets eat permanents: tokens, reanimation, anything entering."
+    },
+    {
+      consumes: "Exile",
+      fed_by: [
+        "ETB"
+      ],
+      note: "An exile-a-permanent cost, same source as sacrifice."
+    },
+    {
+      consumes: "Bounce",
+      fed_by: [
+        "ETB"
+      ],
+      note: "A return-a-permanent-to-hand cost."
+    },
+    {
+      consumes: "Tap",
+      fed_by: [
+        "Untap"
+      ],
+      note: "A {T} cost is paid again when the permanent untaps."
+    },
+    {
+      consumes: "Untap",
+      fed_by: [
+        "Tap"
+      ]
+    },
+    {
+      consumes: "Discard",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ],
+      note: "Discard costs spend cards in hand."
+    },
+    {
+      consumes: "ExileFromHand",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ]
+    },
+    {
+      consumes: "HandToLibrary",
+      fed_by: [
+        "CardDrawn",
+        "Regrowth"
+      ]
+    },
+    {
+      consumes: "ExileFromGraveyard",
+      fed_by: [
+        "PutIntoGraveyard",
+        "Mill",
+        "Discard"
+      ],
+      note: "Delve-style and escape-style costs spend graveyard cards."
+    },
+    {
+      consumes: "CollectEvidence",
+      fed_by: [
+        "PutIntoGraveyard",
+        "Mill",
+        "Discard"
+      ]
+    },
+    {
+      consumes: "LifeLoss",
+      fed_by: [
+        "LifeGain"
+      ],
+      note: "Paying life is spent from the life total."
+    },
+    {
+      consumes: "CounterRemoved",
+      fed_by: [
+        "CounterPlaced"
+      ],
+      note: "CounterRemoved:P1P1 is fed by CounterPlaced:P1P1; the subtype carries over (src/interact.ts)."
+    }
+  ]
+};
+
+// server/graph/interact.ts
+function loadSupply() {
+  const y = supply_default;
+  if (!Array.isArray(y?.supply))
+    throw new Error("supply.yaml: missing supply list");
+  return new Map(y.supply.map((s) => [s.consumes, s.fed_by]));
 }
-var SWAP_DEFAULTS = { method: "leidenHi", maxCmcUp: 1, perCard: 3, weights: WEIGHTS, sameRegion: true, minGain: 0.000000001, tieFloor: 0, cmcPenalty: 0, reverse: true };
-var REV = new WeakMap;
-function reverseOf(space) {
-  let m = REV.get(space);
-  if (m)
-    return m;
-  m = new Map;
-  for (const id of space.order) {
-    const c = space.cards.get(id);
-    c.nb.forEach((v, x) => {
-      const l = m.get(v) ?? [];
-      l.push([id, c.ns[x]]);
-      m.set(v, l);
+var PERMANENT_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Land", "Planeswalker"];
+var CARD_TYPES = ["Artifact", "Battle", "Creature", "Enchantment", "Instant", "Kindred", "Land", "Planeswalker", "Sorcery"];
+var SUPERTYPES = ["Basic", "Legendary", "Snow"];
+var ALL_FACES_CAST = new Set(["split", "adventure", "modal_dfc", "omen"]);
+function costColors(cost) {
+  const out = new Set;
+  for (const m of (cost ?? "").matchAll(/\{([^}]+)\}/g))
+    for (const ch of m[1].split("/"))
+      if (/^[WUBRG]$/.test(ch))
+        out.add(ch);
+  return ["W", "U", "B", "R", "G"].filter((x) => out.has(x));
+}
+function costValue(cost) {
+  let v = 0;
+  for (const m of (cost ?? "").matchAll(/\{([^}]+)\}/g)) {
+    const sym = m[1];
+    if (/^\d+$/.test(sym))
+      v += Number(sym);
+    else if (/^[XYZ]$/.test(sym))
+      continue;
+    else if (/^H/.test(sym))
+      v += 0.5;
+    else if (/^\d+\//.test(sym))
+      v += Number(sym.split("/")[0]);
+    else
+      v += 1;
+  }
+  return v;
+}
+function faceOf(typeLine, colors, cost, anySubtype, manaValue) {
+  const [front, sub = ""] = typeLine.split("\u2014");
+  return { types: CARD_TYPES.filter((t) => front.includes(t)), supertypes: SUPERTYPES.filter((t) => front.includes(t)), subtypes: sub.trim().split(/\s+/).filter(Boolean), colors, costColors: costColors(cost), anySubtype, manaValue };
+}
+function cardInfo(g, c) {
+  const anySubtype = c.keywords.includes("Changeling");
+  const sides = c.faces?.length ? c.faces : [{ type_line: c.typeLine, colors: c.colors ?? undefined, mana_cost: c.manaCost }];
+  const ownCost = ALL_FACES_CAST.has(c.layout) && !!c.faces?.length;
+  const faces = sides.map((f) => faceOf(f.type_line ?? "", f.colors ?? (c.faces?.length ? costColors(f.mana_cost) : c.colors ?? []), f.mana_cost, anySubtype, ownCost ? costValue(f.mana_cost) : c.manaValue));
+  const front = faces[0];
+  return {
+    id: c.id,
+    name: g.name,
+    oracleId: g.oracleId,
+    types: front.types,
+    subtypes: front.subtypes,
+    supertypes: front.supertypes ?? [],
+    colors: front.colors ?? [],
+    costColors: front.costColors ?? [],
+    manaValue: front.manaValue ?? c.manaValue,
+    anySubtype,
+    faces: ALL_FACES_CAST.has(c.layout) ? faces : [front],
+    colorIdentity: c.colorIdentity,
+    edhrecRank: c.edhrecRank,
+    graph: g
+  };
+}
+var GENERIC = new Set(["Card", "Permanent", "Spell"]);
+var NO_FACTS = { creatureOnly: new Set, landOnly: new Set, known: new Set };
+var COLOR = { White: "W", Blue: "U", Black: "B", Red: "R", Green: "G" };
+function colorTests(props) {
+  const out = [];
+  for (const p of props) {
+    const m = /^(non)?(ManaCostPartial)?(White|Blue|Black|Red|Green|Colorless|MonoColor|Multicolor)$/.exec(p);
+    if (!m)
+      continue;
+    const pick2 = (me) => (m[2] ? me.costColors : me.colors) ?? [];
+    const base = m[3] === "Colorless" ? (me) => pick2(me).length === 0 : m[3] === "MonoColor" ? (me) => pick2(me).length === 1 : m[3] === "Multicolor" ? (me) => pick2(me).length > 1 : (me) => pick2(me).includes(COLOR[m[3]]);
+    out.push(m[1] ? (me) => !base(me) : base);
+  }
+  return out;
+}
+var BROAD = 1 / 3;
+var MANA_VALUE_PROP = /^cmc(GE|GT|LE|LT|EQ)(\d+)$/;
+function boundsManaValue(sel) {
+  return sel.any.some((a) => a.props.some((p) => MANA_VALUE_PROP.test(p)));
+}
+function manaValueTests(props) {
+  const out = [];
+  for (const p of props) {
+    const m = MANA_VALUE_PROP.exec(p);
+    if (!m)
+      continue;
+    const n = Number(m[2]);
+    const holds = { GE: (v) => v >= n, GT: (v) => v > n, LE: (v) => v <= n, LT: (v) => v < n, EQ: (v) => v === n }[m[1]];
+    out.push((me) => me.manaValue === undefined || holds(me.manaValue));
+  }
+  return out;
+}
+var CHANGES_HANDS = new Set(["GainControl", "ExchangeControl"]);
+function resolve(a, me, facts, hook) {
+  let types = a.types.filter((x) => !GENERIC.has(x) && !SUPERTYPES.includes(x));
+  const supertypes = a.types.filter((x) => SUPERTYPES.includes(x));
+  const nonSupertypes = a.props.flatMap((p) => {
+    const m = /^non([A-Z][a-z]+)$/.exec(p);
+    return m && SUPERTYPES.includes(m[1]) ? [m[1]] : [];
+  });
+  let subtypes = facts.known.size ? a.subtypes.filter((x) => facts.known.has(x)) : a.subtypes;
+  let token = a.token;
+  if (!types.length && supertypes.includes("Basic"))
+    types = ["Land"];
+  if (a.self) {
+    types = [...new Set([...types, ...me.types])];
+    subtypes = [...new Set([...subtypes, ...me.subtypes])];
+    token = false;
+  } else if (!types.length && subtypes.some((x) => facts.creatureOnly.has(x)))
+    types = ["Creature"];
+  else if (!types.length && subtypes.length && subtypes.every((x) => facts.landOnly.has(x)))
+    types = ["Land"];
+  const excluded = a.props.flatMap((p) => {
+    const m = /^non([A-Z][a-z]+)$/.exec(p);
+    return m && CARD_TYPES.includes(m[1]) ? [m[1]] : [];
+  });
+  const controller = a.controller === "any" && (a.props.includes("EquippedBy") || a.self && !CHANGES_HANDS.has(hook ?? "")) ? "you" : a.controller;
+  return { types, subtypes, supertypes, nonSupertypes, ...a.self && me.anySubtype ? { anySubtype: true } : {}, excluded, ...a.self ? { me } : {}, color: colorTests(a.props), manaValue: manaValueTests(a.props), controller, token, self: a.self, player: a.player };
+}
+function playerSide(p) {
+  if (p === "You")
+    return "you";
+  if (p === "Opponent")
+    return "opponent";
+  return "any";
+}
+function overlap(a, b) {
+  if (a.self && b.self)
+    return false;
+  if (a.controller !== "any" && b.controller !== "any" && a.controller !== b.controller)
+    return false;
+  if (a.token !== null && b.token !== null && a.token !== b.token)
+    return false;
+  const aPlayer = a.player !== undefined, bPlayer = b.player !== undefined;
+  if (aPlayer && bPlayer) {
+    const x = playerSide(a.player), y = playerSide(b.player);
+    return x === "any" || y === "any" || x === y;
+  }
+  if (aPlayer && b.types.length || bPlayer && a.types.length)
+    return false;
+  if (a.types.length && b.types.length && !a.types.some((t) => b.types.includes(t)))
+    return false;
+  const excludes = (x, y) => y.excluded.length > 0 && x.types.length > 0 && (x.self ? x.types.some((t) => y.excluded.includes(t)) : x.types.every((t) => y.excluded.includes(t)));
+  if (excludes(a, b) || excludes(b, a))
+    return false;
+  if (a.subtypes.length && b.subtypes.length && !a.anySubtype && !b.anySubtype && !a.subtypes.some((x) => b.subtypes.includes(x)))
+    return false;
+  const superOk = (me, y) => y.supertypes.every((t) => me.supertypes?.includes(t)) && !y.nonSupertypes.some((t) => me.supertypes?.includes(t));
+  if (a.supertypes.some((t) => b.nonSupertypes.includes(t)) || b.supertypes.some((t) => a.nonSupertypes.includes(t)))
+    return false;
+  if (a.me && !superOk(a.me, b))
+    return false;
+  if (b.me && !superOk(b.me, a))
+    return false;
+  if (a.me && !b.color.every((t) => t(a.me)))
+    return false;
+  if (b.me && !a.color.every((t) => t(b.me)))
+    return false;
+  if (a.me && !b.manaValue.every((t) => t(a.me)))
+    return false;
+  if (b.me && !a.manaValue.every((t) => t(b.me)))
+    return false;
+  return true;
+}
+function selectorsOverlap(a, aMe, b, bMe, facts = NO_FACTS, hook) {
+  if (!a.any.length || !b.any.length)
+    return true;
+  return a.any.some((x) => b.any.some((y) => overlap(resolve(x, aMe, facts, hook), resolve(y, bMe, facts, hook))));
+}
+function closureTypes(sel, me, facts) {
+  const out = new Set;
+  for (const a of sel.any) {
+    if (a.player)
+      continue;
+    const r = resolve(a, me, facts);
+    if (!r.types.length && !r.subtypes.length && !r.excluded.includes("Creature"))
+      out.add("creature");
+    for (const x of r.types)
+      out.add(x.toLowerCase());
+  }
+  return [...out];
+}
+
+class InteractionIndex {
+  cards;
+  emits = new Map;
+  listens = new Map;
+  emitsByCard = [];
+  listensByCard = [];
+  byName = new Map;
+  byLower = new Map;
+  hookCards = new Map;
+  facts;
+  constructor(cards, closure, supply, facts = NO_FACTS) {
+    this.cards = cards;
+    this.facts = facts;
+    cards.forEach((c, i) => {
+      this.byName.set(c.name, i);
+      for (const face of c.name.split(" // "))
+        if (!this.byName.has(face))
+          this.byName.set(face, i);
+      for (const n of [c.name, ...c.name.split(" // ")])
+        if (!this.byLower.has(n.toLowerCase()))
+          this.byLower.set(n.toLowerCase(), i);
+      const emits = [], listens = [];
+      const seen = new Set;
+      for (const [ability, ab] of c.graph.abilities.entries())
+        for (const [relation, r] of ab.relations.entries()) {
+          if (r.relation === "produces" || r.relation === "consumes") {
+            const by = r.relation === "produces" ? "effect" : "cost";
+            for (const hook of closure.expand(r.hook, closureTypes(r.selector, c, facts)))
+              emits.push({ card: i, hook, emitted: r.hook, by, sel: r.selector, ability, relation });
+          }
+          if (r.relation === "triggers_on" || r.relation === "replaces")
+            listens.push({ card: i, hook: r.hook, listener: r.relation, sel: r.selector, ability, relation });
+          if (r.relation === "consumes") {
+            const [base, sub] = r.hook.split(":");
+            for (const fed of supply.get(base) ?? []) {
+              if (sub && fed === "CounterPlaced") {
+                listens.push({ card: i, hook: `${fed}:${sub}`, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
+                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, onlyEmitted: fed, ability, relation });
+              } else
+                listens.push({ card: i, hook: fed, listener: "consumes", consumed: r.hook, sel: r.selector, ability, relation });
+            }
+          }
+        }
+      const self = { any: [{ types: [], subtypes: [], controller: "you", token: false, self: true, other: false, props: [] }], raw: "intrinsic" };
+      for (const f of c.faces) {
+        if (!f.types.length)
+          continue;
+        if (!f.types.includes("Land"))
+          emits.push({ card: i, hook: "SpellCast", emitted: "SpellCast", by: "card", sel: self, me: f });
+        if (f.types.some((t) => PERMANENT_TYPES.includes(t)))
+          emits.push({ card: i, hook: "ETB", emitted: "ETB", by: "card", sel: self, me: f });
+      }
+      for (const e of emits) {
+        (this.emits.get(e.hook) ?? this.emits.set(e.hook, []).get(e.hook)).push(e);
+        seen.add(e.hook);
+      }
+      for (const l of listens) {
+        (this.listens.get(l.hook) ?? this.listens.set(l.hook, []).get(l.hook)).push(l);
+        seen.add(l.hook);
+      }
+      for (const h of seen)
+        this.hookCards.set(h, (this.hookCards.get(h) ?? 0) + 1);
+      this.emitsByCard.push(emits);
+      this.listensByCard.push(listens);
     });
   }
-  REV.set(space, m);
-  return m;
+  emitsOf(i) {
+    return this.emitsByCard[i];
+  }
+  listensOf(i) {
+    return this.listensByCard[i];
+  }
+  selectorsMeet(a, aMe, b, bMe, hook) {
+    return selectorsOverlap(a, aMe, b, bMe, this.facts, hook);
+  }
+  indexOf(name) {
+    const i = this.byName.get(name) ?? this.byLower.get(name.toLowerCase());
+    if (i === undefined)
+      throw new Error(`no card named ${name} in the graph`);
+    return i;
+  }
+  link(e, l) {
+    if (e.card === l.card)
+      return null;
+    if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
+      return null;
+    const a = this.cards[e.card], b = this.cards[l.card];
+    if (!selectorsOverlap(e.sel, e.me ?? a, l.sel, b, this.facts, e.hook))
+      return null;
+    return { from: a.name, to: b.name, hook: e.hook, emittedBy: e.by, emitted: e.emitted, listener: l.listener, ...l.consumed ? { consumed: l.consumed } : {} };
+  }
+  linksFrom(i) {
+    const out = [];
+    for (const e of this.emitsByCard[i])
+      for (const l of this.listens.get(e.hook) ?? []) {
+        const k = this.link(e, l);
+        if (k)
+          out.push(k);
+      }
+    return dedupe(out);
+  }
+  linksTo(i) {
+    const out = [];
+    for (const l of this.listensByCard[i])
+      for (const e of this.emits.get(l.hook) ?? []) {
+        const k = this.link(e, l);
+        if (k)
+          out.push(k);
+      }
+    return dedupe(out);
+  }
+  feedersMemo = new Map;
+  feedersOf(l) {
+    const shared = !l.sel.any.some((a) => a.self);
+    const key = `${l.hook}|${l.consumed ?? ""}|${l.onlyEmitted ?? ""}|${l.sel.raw}`;
+    const hit = shared ? this.feedersMemo.get(key) : undefined;
+    if (hit)
+      return hit;
+    const from = new Set;
+    const b = this.cards[l.card];
+    for (const e of this.emits.get(l.hook) ?? []) {
+      if (e.by !== "card" || from.has(e.card))
+        continue;
+      if (l.onlyEmitted && e.emitted !== l.onlyEmitted)
+        continue;
+      if (selectorsOverlap(e.sel, e.me ?? this.cards[e.card], l.sel, b, this.facts, e.hook))
+        from.add(e.card);
+    }
+    const sorted = Int32Array.from(from).sort();
+    if (shared)
+      this.feedersMemo.set(key, sorted);
+    return sorted;
+  }
+  castFeeders(l) {
+    const s = new Set(this.feedersOf(l));
+    s.delete(l.card);
+    return s;
+  }
+  castFeederCount(l) {
+    const f = this.feedersOf(l);
+    let lo = 0, hi = f.length;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (f[mid] < l.card)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+    return f.length - (lo < f.length && f[lo] === l.card ? 1 : 0);
+  }
+  linksWith(i, members2) {
+    const out = [];
+    for (const e of this.emitsByCard[i])
+      for (const l of this.listens.get(e.hook) ?? [])
+        if (members2.has(l.card)) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+    for (const l of this.listensByCard[i])
+      for (const e of this.emits.get(l.hook) ?? [])
+        if (members2.has(e.card)) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+    return dedupe(out);
+  }
+  linkerFor(members2) {
+    const emits = new Map, listens = new Map;
+    for (const [hook, es] of this.emits) {
+      const m = es.filter((e) => members2.has(e.card));
+      if (m.length)
+        emits.set(hook, m);
+    }
+    for (const [hook, ls] of this.listens) {
+      const m = ls.filter((l) => members2.has(l.card));
+      if (m.length)
+        listens.set(hook, m);
+    }
+    return (i) => {
+      const out = [];
+      for (const e of this.emitsByCard[i])
+        for (const l of listens.get(e.hook) ?? []) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+      for (const l of this.listensByCard[i])
+        for (const e of emits.get(l.hook) ?? []) {
+          const k = this.link(e, l);
+          if (k)
+            out.push(k);
+        }
+      return dedupe(out);
+    };
+  }
+  linksBetween(a, b) {
+    const name = this.cards[this.indexOf(b)].name;
+    return this.linksFrom(this.indexOf(a)).filter((l) => l.to === name);
+  }
 }
-function swapsFor(space, card, deck, plan, opts = {}) {
-  const o = { ...SWAP_DEFAULTS, ...opts };
-  const me = space.cards.get(card.id), mine = planScore(me, plan, o.weights), reg = me.r[o.method] ?? -1;
+function dedupe(links) {
+  const seen = new Set;
+  return links.filter((l) => {
+    const k = `${l.from}|${l.to}|${l.hook}|${l.emittedBy}|${l.emitted}|${l.listener}|${l.consumed ?? ""}`;
+    if (seen.has(k))
+      return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+// server/graph/profile.ts
+var byteOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function normalizeProfile(source, entries, { top = 25, gaps = true } = {}) {
+  const by = new Map;
+  for (const e of entries) {
+    if (!(e.weight > 0))
+      continue;
+    const h = by.get(e.hook) ?? by.set(e.hook, { makes: 0, spends: 0, cards: new Map }).get(e.hook);
+    h[e.side] += e.weight;
+    h.cards.set(e.card, (h.cards.get(e.card) ?? 0) + e.weight);
+  }
+  const max = Math.max(0, ...[...by.values()].map((h) => h.makes + h.spends));
+  const hooks = [...by.entries()].map(([hook, h]) => {
+    const side = h.makes > 0 && h.spends > 0 ? "both" : h.makes > 0 ? "makes" : "spends";
+    const gap = !gaps || side === "both" ? undefined : side === "spends" ? "unmade" : "unspent";
+    return {
+      hook,
+      side,
+      weight: max ? Math.round((h.makes + h.spends) / max * 1000) / 1000 : 0,
+      evidence: [...h.cards.entries()].sort((a, b) => b[1] - a[1] || byteOrder(a[0], b[0])).map(([c]) => c),
+      ...gap ? { gap } : {}
+    };
+  });
+  hooks.sort((a, b) => b.weight - a.weight || byteOrder(a.hook, b.hook));
+  return { source, hooks: hooks.slice(0, top) };
+}
+function offProfile(hook) {
+  return hook === "ManaAdded" || hook === "ManaPaid" || hook.startsWith("Keyword:");
+}
+function profileHookKey(hook, token) {
+  return token === null || hook === "TokenCreated" ? hook : `${hook}[${token ? "token" : "nontoken"}]`;
+}
+function parseProfileHook(key) {
+  const m = /^(.+)\[(token|nontoken)\]$/.exec(key);
+  return m ? { hook: m[1], token: m[2] === "token" } : { hook: key, token: null };
+}
+function hookWords(key) {
+  const { hook, token } = parseProfileHook(key);
+  return token === null ? hook : `${token ? "token" : "nontoken"} ${hook}`;
+}
+function touches(idx, i) {
+  const me = idx.cards[i];
+  const src = (x) => ({ source: `${x.ability}.${x.relation}` });
   const out = [];
-  const cand = new Map(me.nb.map((id, x) => [id, me.ns[x]]));
-  if (o.reverse) {
-    for (const [id, v] of reverseOf(space).get(me.id) ?? [])
-      if (!cand.has(id))
-        cand.set(id, v);
+  for (const e of idx.emitsOf(i))
+    if (e.by !== "card" && !offProfile(e.hook))
+      out.push({ card: i, hook: e.hook, side: "makes", sel: e.sel, me, ...src(e), emit: e });
+  const costs = new Map;
+  for (const l of idx.listensOf(i)) {
+    if (l.listener !== "consumes") {
+      if (!offProfile(l.hook))
+        out.push({ card: i, hook: l.hook, side: "spends", sel: l.sel, me, ...src(l), listens: [l] });
+      continue;
+    }
+    const hook = l.consumed ?? l.hook;
+    if (offProfile(hook))
+      continue;
+    const k = `${hook}|${l.sel.raw}`;
+    const t = costs.get(k);
+    if (t)
+      t.listens.push(l);
+    else {
+      const n = { card: i, hook, side: "spends", sel: l.sel, me, ...src(l), listens: [l] };
+      costs.set(k, n);
+      out.push(n);
+    }
   }
-  for (const [id, sim0] of cand) {
-    const c = space.cards.get(id);
-    if (!c?.meta || deck.has(id) || !c.inSpace || !c.legal || c.land)
-      continue;
-    if (o.colorIdentity && !fitsIdentity(c, o.colorIdentity))
-      continue;
-    if (o.sameRegion && (reg < 0 || (c.r[o.method] ?? -1) !== reg))
-      continue;
-    const p = planScore(c, plan, o.weights);
-    if (p.score - mine.score < o.minGain || c.meta.cmc > me.meta.cmc + o.maxCmcUp)
-      continue;
-    const why = [
-      p.tokens > mine.tokens && `${p.tokens} token${p.tokens > 1 ? "s" : ""} per cast vs ${mine.tokens}`,
-      p.tribe > mine.tribe && `is a ${plan.tribe}`,
-      p.payoff > mine.payoff && "plan payoff"
-    ].filter((s) => !!s);
-    const sim = sim0, gain = p.score - mine.score;
-    const rank2 = (gain + o.tieFloor) * sim - o.cmcPenalty * Math.max(0, c.meta.cmc - me.meta.cmc);
-    out.push({ out: me, in: c, sim, gain, rank: rank2, why });
+  return out;
+}
+function sizedPayoff(idx, l) {
+  return boundsManaValue(l.sel) && idx.castFeederCount(l) / idx.cards.length < BROAD;
+}
+function ownTouches(idx, i) {
+  return idx.emitsOf(i).filter((e) => e.by === "card").map((e) => ({ card: i, hook: e.hook, side: "makes", sel: e.sel, me: e.me ?? idx.cards[i], source: `own.${e.hook}`, emit: e }));
+}
+function tokenness(sel) {
+  if (!sel.any.length)
+    return null;
+  const v = sel.any.map((a) => a.self ? false : a.token);
+  return v.every((x) => x === true) ? true : v.every((x) => x === false) ? false : null;
+}
+function planCards(idx, plan) {
+  if (plan.priorities.length > 6)
+    throw new Error(`at most 6 priority cards (got ${plan.priorities.length})`);
+  const out = [plan.commander, ...plan.priorities].map((n) => idx.indexOf(n));
+  if (new Set(out).size !== out.length)
+    throw new Error("the commander and priority cards must all be different cards");
+  const cmd = idx.cards[out[0]];
+  for (const p of out.slice(1)) {
+    const c = idx.cards[p];
+    if (!c.colorIdentity.every((x) => cmd.colorIdentity.includes(x)))
+      throw new Error(`${c.name} is outside ${cmd.name}'s color identity`);
   }
-  return out.sort((a, b) => b.rank - a.rank || b.sim - a.sim || (a.in.name < b.in.name ? -1 : 1)).slice(0, o.perCard);
+  return out;
+}
+function cardProfile(idx, plan) {
+  const planIdx = planCards(idx, plan);
+  const byHook = new Map;
+  for (const p of planIdx)
+    for (const t of touches(idx, p))
+      (byHook.get(t.hook) ?? byHook.set(t.hook, []).get(t.hook)).push(t);
+  const sized = [...byHook.values()].flat().filter((t) => t.side === "spends").flatMap((s) => s.listens.filter((l) => sizedPayoff(idx, l)).map((l) => ({ s, l })));
+  for (const p of planIdx) {
+    const seen = new Set;
+    for (const m of ownTouches(idx, p)) {
+      if (seen.has(m.hook) || !sized.some(({ s, l }) => s.card !== p && l.hook === m.hook && feeds(idx, m, s, l)))
+        continue;
+      seen.add(m.hook);
+      (byHook.get(m.hook) ?? byHook.set(m.hook, []).get(m.hook)).push(m);
+    }
+  }
+  const planMakes = [...byHook.values()].flat().filter((t) => t.side === "makes");
+  const entries = [];
+  for (const [hook, ts] of byHook) {
+    const makers = ts.filter((t) => t.side === "makes"), spenders = ts.filter((t) => t.side === "spends");
+    const engine = spenders.some((s) => s.listens.some((l) => planMakes.some((m) => m.card !== s.card && m.hook === l.hook && feeds(idx, m, s, l))));
+    const deciders = makers.filter((t) => !t.source.startsWith("own."));
+    const deciding = (deciders.length ? deciders : makers.length && !spenders.length ? makers : spenders).map((t) => tokenness(t.sel));
+    const token = deciding.every((x) => x === true) ? true : deciding.every((x) => x === false) ? false : null;
+    const key = profileHookKey(hook, token);
+    for (const card of new Set(ts.map((t) => t.card))) {
+      const sides = [...new Set(ts.filter((t) => t.card === card).map((t) => t.side))];
+      const w = (engine ? 2 : 1) * (card === planIdx[0] ? COMMANDER_WEIGHT : 1);
+      for (const side of sides)
+        entries.push({ hook: key, side, weight: w / sides.length, card: idx.cards[card].name });
+    }
+  }
+  const names = planIdx.map((i) => idx.cards[i].name);
+  return normalizeProfile({ kind: "cards", commander: names[0], priorities: names.slice(1) }, entries);
+}
+var COMMANDER_WEIGHT = 2;
+function feeds(idx, m, s, l) {
+  if (l.onlyEmitted && m.emit.emitted !== l.onlyEmitted)
+    return false;
+  return idx.selectorsMeet(m.sel, m.emit.me ?? m.me, l.sel, s.me, m.hook);
+}
+function isMainHook(h) {
+  return h.weight > 0.5;
+}
+function profileMatcher(idx, profile) {
+  const main = profile.hooks.filter(isMainHook).map((h) => {
+    const { hook, token } = parseProfileHook(h.hook);
+    const evidence = { makes: [], spends: [] };
+    const cards = [];
+    for (const name of h.evidence) {
+      let j;
+      try {
+        j = idx.indexOf(name);
+      } catch {
+        continue;
+      }
+      cards.push(j);
+      for (const t of touches(idx, j))
+        if (t.hook === hook)
+          evidence[t.side].push({ sel: t.sel, me: t.me, card: j, sized: t.side === "spends" && t.listens.some((l) => sizedPayoff(idx, l)) });
+    }
+    const sizedEvidence = evidence.spends.filter((e) => e.sized);
+    for (const j of cards)
+      for (const m of ownTouches(idx, j)) {
+        if (m.hook === hook && sizedEvidence.some((e) => e.card !== j && idx.selectorsMeet(m.sel, m.me, e.sel, e.me, hook)))
+          evidence.makes.push({ sel: m.sel, me: m.me, card: j, sized: false });
+      }
+    const definer = evidence.makes.length ? "makes" : "spends";
+    for (const side of ["makes", "spends"]) {
+      if (side !== definer)
+        continue;
+      evidence[side] = evidence[side].flatMap((e) => {
+        const sel = onSide(e.sel, token);
+        return sel ? [{ ...e, sel }] : [];
+      });
+    }
+    const against = (side) => {
+      const otherSide = side === "makes" ? "spends" : "makes";
+      const use = evidence[otherSide].length ? otherSide : side;
+      return { envelope: evidence[use], qualified: use === definer };
+    };
+    return { key: h.hook, hook, token, weight: h.weight, cards: h.evidence, makes: against("makes"), spends: against("spends") };
+  });
+  return (i) => {
+    const out = new Map;
+    for (const t of touches(idx, i))
+      for (const h of main) {
+        if (t.hook !== h.hook)
+          continue;
+        const sel = t.side === "makes" ? yours(t.sel, t.hook) : notSelf(t.sel);
+        const { envelope, qualified } = h[t.side];
+        if (!sel || qualified && !onSide(sel, h.token))
+          continue;
+        if (envelope.length && !envelope.some((e) => idx.selectorsMeet(sel, t.me, e.sel, e.me, h.hook)))
+          continue;
+        const k = `${h.key}|${t.side}|${t.source}`;
+        const own2 = qualified ? h.key : profileHookKey(h.hook, tokenness(sel));
+        if (!out.has(k))
+          out.set(k, { hook: h.key, side: t.side, weight: h.weight, cards: h.cards, source: t.source, ...own2 !== h.key ? { as: own2 } : {} });
+      }
+    for (const t of ownTouches(idx, i))
+      for (const h of main) {
+        if (t.hook !== h.hook)
+          continue;
+        const { envelope, qualified } = h.makes;
+        const sized = envelope.filter((e) => e.sized && e.card !== i);
+        if (!sized.length || qualified && !onSide(t.sel, h.token))
+          continue;
+        if (!sized.some((e) => idx.selectorsMeet(t.sel, t.me, e.sel, e.me, h.hook)))
+          continue;
+        const k = `${h.key}|makes|${t.source}`;
+        if (!out.has(k))
+          out.set(k, { hook: h.key, side: "makes", weight: h.weight, cards: h.cards, source: t.source });
+      }
+    return [...out.values()];
+  };
+}
+function profileFit(matches) {
+  const order = [...matches].sort((a, b) => byteOrder(a.hook, b.hook) || byteOrder(a.side, b.side) || byteOrder(a.source, b.source));
+  const slot = (m) => `${m.hook}|${m.side}`;
+  const slots = [...new Set(order.map(slot))];
+  const unit = (m) => `${m.source}|${m.side}`;
+  const units = [...new Set(order.map(unit))].sort();
+  if (slots.length > 30)
+    throw new Error(`profileFit: ${slots.length} hook sides is more than the search handles`);
+  const memo2 = new Map;
+  const best = (k, used) => {
+    if (k === units.length)
+      return { total: 0, picks: [] };
+    const key = `${k}|${used}`;
+    const hit = memo2.get(key);
+    if (hit)
+      return hit;
+    let out = best(k + 1, used);
+    for (const m of order) {
+      if (unit(m) !== units[k])
+        continue;
+      const bit = 1 << slots.indexOf(slot(m));
+      if (used & bit)
+        continue;
+      const rest = best(k + 1, used | bit);
+      if (rest.total + m.weight > out.total + 0.000000001)
+        out = { total: rest.total + m.weight, picks: [m, ...rest.picks] };
+    }
+    memo2.set(key, out);
+    return out;
+  };
+  const { total, picks } = best(0, 0);
+  return { score: Math.round(total * 1000) / 1000, counted: [...picks].sort((a, b) => b.weight - a.weight || byteOrder(a.hook, b.hook) || byteOrder(a.side, b.side)) };
+}
+function onSide(sel, token) {
+  if (token === null || !sel.any.length)
+    return sel;
+  const any3 = sel.any.filter((a) => a.player !== undefined || ((a.self ? false : a.token) ?? token) === token).map((a) => a.player !== undefined || a.self ? a : { ...a, token });
+  return any3.length ? { any: any3, raw: sel.raw } : null;
+}
+function yours(sel, hook) {
+  const mine = (a) => a.controller === "you" || a.props.includes("EquippedBy") || hook === "ETB" && a.controller === "any";
+  const any3 = sel.any.filter((a) => !a.self && (a.player !== undefined || mine(a)));
+  return any3.length ? { any: any3, raw: sel.raw } : null;
+}
+function notSelf(sel) {
+  const any3 = sel.any.filter((a) => !a.self);
+  return any3.length ? { any: any3, raw: sel.raw } : null;
+}
+// server/graph/mapping/closure_rules.yaml
+var closure_rules_default = {
+  version: "2.0",
+  description: `Closure rules define implications between events and between effects. Used by the graph compiler to generate transitive edges. Rules may be unconditional or conditional on target card type.
+`,
+  event_implications: [
+    {
+      from: "Sacrifice",
+      implies: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Only creatures and planeswalkers 'die'. Other permanents go to graveyard but don't trigger Dies."
+    },
+    {
+      from: "Sacrifice",
+      implies: "LTB",
+      condition: null,
+      note: "All sacrificed permanents leave the battlefield."
+    },
+    {
+      from: "Sacrifice",
+      implies: "PutIntoGraveyard",
+      condition: null,
+      note: "Any sacrificed permanent goes to the graveyard (Treasure, artifacts, lands too). Added 2026-11-06 for F5."
+    },
+    {
+      from: "Destroy",
+      implies: "PutIntoGraveyard",
+      condition: null,
+      note: "Any destroyed permanent goes to the graveyard. Added 2026-11-06 for F5."
+    },
+    {
+      from: "Dies",
+      implies: "LTB",
+      condition: null,
+      note: "Dying always means leaving the battlefield."
+    },
+    {
+      from: "Destroy",
+      implies: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Destroyed creatures/planeswalkers die. Destroyed artifacts/enchantments go to graveyard without dying."
+    },
+    {
+      from: "Destroy",
+      implies: "LTB",
+      condition: null,
+      note: "All destroyed permanents leave the battlefield."
+    },
+    {
+      from: "Exile",
+      implies: "LTB",
+      condition: null,
+      note: "Exiled permanents leave the battlefield."
+    },
+    {
+      from: "ReturnToHand",
+      implies: "LTB",
+      condition: null,
+      note: "Bounced permanents leave the battlefield."
+    },
+    {
+      from: "Flicker",
+      implies: "LTB",
+      condition: null,
+      note: "Flickered permanent leaves then re-enters."
+    },
+    {
+      from: "Flicker",
+      implies: "ETB",
+      condition: null,
+      note: "Flickered permanent re-enters the battlefield."
+    },
+    {
+      from: "TokenCreated",
+      implies: "ETB",
+      condition: null,
+      note: "Created tokens enter the battlefield."
+    },
+    {
+      from: "Reanimate",
+      implies: "ETB",
+      condition: null,
+      note: "Reanimated cards enter the battlefield."
+    }
+  ],
+  effect_closures: [
+    {
+      effect: "CreateToken",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Creating a token puts it onto the battlefield."
+    },
+    {
+      effect: "CreateToken",
+      triggers_event: "TokenCreated",
+      condition: null,
+      note: "Creating a token fires TokenCreated."
+    },
+    {
+      effect: "Reanimate",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Reanimating puts a card onto the battlefield."
+    },
+    {
+      effect: "LandToBattlefield",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Putting a land onto the battlefield is an ETB."
+    },
+    {
+      effect: "LandToBattlefield",
+      triggers_event: "LandPlayed",
+      condition: null,
+      note: "Land entering triggers LandPlayed."
+    },
+    {
+      effect: "Destroy",
+      triggers_event: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Destroying a creature/planeswalker causes it to die."
+    },
+    {
+      effect: "Destroy",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Destroying any permanent causes LTB."
+    },
+    {
+      effect: "Sacrifice",
+      triggers_event: "Dies",
+      condition: {
+        target_type: [
+          "creature",
+          "planeswalker"
+        ]
+      },
+      note: "Sacrificing a creature/planeswalker causes it to die."
+    },
+    {
+      effect: "Sacrifice",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Sacrificing any permanent causes LTB."
+    },
+    {
+      effect: "Bounce",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Bouncing causes LTB."
+    },
+    {
+      effect: "Exile",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Exiling a permanent causes LTB."
+    },
+    {
+      effect: "Flicker",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Flickering causes LTB then ETB."
+    },
+    {
+      effect: "Flicker",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Flickered permanent re-enters."
+    },
+    {
+      effect: "GainLife",
+      triggers_event: "LifeGained",
+      condition: null,
+      note: "Gaining life triggers LifeGained."
+    },
+    {
+      effect: "LoseLife",
+      triggers_event: "LifeLost",
+      condition: null,
+      note: "Losing life triggers LifeLost."
+    },
+    {
+      effect: "DrainLife",
+      triggers_event: "LifeGained",
+      condition: null,
+      note: "Drain = damage + life gain."
+    },
+    {
+      effect: "DrainLife",
+      triggers_event: "LifeLost",
+      condition: null,
+      note: "Drain = opponent loses life."
+    },
+    {
+      effect: "Damage",
+      triggers_event: "DamageDealt",
+      condition: null,
+      note: "Dealing damage fires DamageDealt."
+    },
+    {
+      effect: "Draw",
+      triggers_event: "DrawCard",
+      condition: null,
+      note: "Drawing fires DrawCard."
+    },
+    {
+      effect: "Discard",
+      triggers_event: "Discard",
+      condition: null,
+      note: "Forcing discard fires Discard event."
+    },
+    {
+      effect: "Mill",
+      triggers_event: "Mill",
+      condition: null,
+      note: "Milling fires Mill event."
+    },
+    {
+      effect: "AddCounter",
+      triggers_event: "CounterPlaced",
+      condition: null,
+      note: "Adding counters fires CounterPlaced."
+    },
+    {
+      effect: "RemoveCounter",
+      triggers_event: "CounterRemoved",
+      condition: null,
+      note: "Removing counters fires CounterRemoved."
+    },
+    {
+      effect: "Proliferate",
+      triggers_event: "CounterPlaced",
+      condition: null,
+      note: "Proliferate adds counters."
+    },
+    {
+      effect: "Control",
+      triggers_event: "Control",
+      condition: null,
+      note: "Gaining control fires Control event."
+    },
+    {
+      effect: "ReturnToHand",
+      triggers_event: "LTB",
+      condition: null,
+      note: "Returning to hand means leaving battlefield."
+    },
+    {
+      effect: "CreateCopy",
+      triggers_event: "ETB",
+      condition: null,
+      note: "Copy of a permanent enters the battlefield."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "ExtraTurn",
+      condition: null,
+      note: "Extra turn effect fires the ExtraTurn event."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "Upkeep",
+      condition: null,
+      note: "Extra turn includes an upkeep step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "DrawStep",
+      condition: null,
+      note: "Extra turn includes a draw step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "MainPhase",
+      condition: null,
+      note: "Extra turn includes main phases."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "EndStep",
+      condition: null,
+      note: "Extra turn includes an end step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "BeginningOfCombat",
+      condition: null,
+      note: "Extra turn includes a combat phase."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "AttackDeclared",
+      condition: null,
+      note: "Extra turn includes declare attackers step."
+    },
+    {
+      effect: "ExtraTurn",
+      triggers_event: "BlockDeclared",
+      condition: null,
+      note: "Extra turn includes declare blockers step."
+    },
+    {
+      effect: "SearchLand",
+      triggers_event: "LandPlayed",
+      condition: null,
+      note: "Searching for a land and putting it onto the battlefield triggers LandPlayed."
+    },
+    {
+      effect: "SearchLand",
+      triggers_event: "ETB",
+      condition: null,
+      note: "The found land enters the battlefield."
+    }
+  ]
+};
+// server/graph/mapping/forge-map.json
+var forge_map_default = {
+  version: "0.4.0",
+  forgeCommit: "c3d29388be82a37e7f648e3254ef04f4cd986d6e",
+  note: "Forge script vocabulary -> card graph hooks. Anything not listed here is reported as unmapped, never dropped. Hook names are open; renaming one is a version bump.",
+  zones: [
+    {
+      origin: "Graveyard",
+      destination: "Battlefield",
+      hooks: [
+        "Reanimate",
+        "ETB"
+      ]
+    },
+    {
+      origin: "Exile",
+      destination: "Battlefield",
+      hooks: [
+        "ReturnFromExile",
+        "ETB"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Battlefield",
+      hooks: [
+        "PutOntoBattlefield",
+        "ETB"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Battlefield",
+      hooks: [
+        "PutOntoBattlefield",
+        "ETB"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Battlefield",
+      hooks: [
+        "ETB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Graveyard",
+      hooks: [
+        "PutIntoGraveyard",
+        "LTB"
+      ],
+      creatureHooks: [
+        "Dies"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Exile",
+      hooks: [
+        "Exile",
+        "LTB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Hand",
+      hooks: [
+        "Bounce",
+        "LTB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "Library",
+      hooks: [
+        "Tuck",
+        "LTB"
+      ]
+    },
+    {
+      origin: "Battlefield",
+      destination: "*",
+      hooks: [
+        "LTB"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Hand",
+      hooks: [
+        "Tutor"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Graveyard",
+      hooks: [
+        "Mill"
+      ]
+    },
+    {
+      origin: "Library",
+      destination: "Exile",
+      hooks: [
+        "ExileFromLibrary"
+      ]
+    },
+    {
+      origin: "Graveyard",
+      destination: "Hand",
+      hooks: [
+        "Regrowth"
+      ]
+    },
+    {
+      origin: "Graveyard",
+      destination: "Exile",
+      hooks: [
+        "ExileFromGraveyard"
+      ]
+    },
+    {
+      origin: "Graveyard",
+      destination: "Library",
+      hooks: [
+        "GraveyardToLibrary"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Graveyard",
+      hooks: [
+        "Discard"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Exile",
+      hooks: [
+        "ExileFromHand"
+      ]
+    },
+    {
+      origin: "Hand",
+      destination: "Library",
+      hooks: [
+        "HandToLibrary"
+      ]
+    },
+    {
+      origin: "Stack",
+      destination: "*",
+      hooks: [
+        "SpellMoved"
+      ]
+    },
+    {
+      origin: "Exile",
+      destination: "Hand",
+      hooks: [
+        "ExileToHand"
+      ]
+    },
+    {
+      origin: "Exile",
+      destination: "Graveyard",
+      hooks: [
+        "ExileToGraveyard"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Graveyard",
+      hooks: [
+        "PutIntoGraveyard"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Exile",
+      hooks: [
+        "Exile"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Hand",
+      hooks: [
+        "ToHand"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "Library",
+      hooks: [
+        "ToLibrary"
+      ]
+    },
+    {
+      origin: "*",
+      destination: "*",
+      hooks: [
+        "ZoneChange"
+      ]
+    }
+  ],
+  phases: {
+    Upkeep: "Upkeep",
+    Draw: "DrawStep",
+    Main1: "PrecombatMain",
+    Main2: "PostcombatMain",
+    BeginCombat: "BeginningOfCombat",
+    "Declare Attackers": "AttackersDeclared",
+    "End Combat": "EndOfCombat",
+    "End of Turn": "EndStep",
+    Cleanup: "Cleanup",
+    EndCombat: "EndOfCombat",
+    "End Of Turn": "EndStep",
+    Main: "Main",
+    Untap: "UntapStep"
+  },
+  triggers: {
+    Attacks: "Attacks",
+    AttackersDeclared: "AttackersDeclared",
+    AttackersDeclaredOneTarget: "AttackersDeclared",
+    Blocks: "Blocks",
+    AttackerBlocked: "BecomesBlocked",
+    AttackerBlockedOnce: "BecomesBlocked",
+    AttackerUnblocked: "Unblocked",
+    AttackerUnblockedOnce: "Unblocked",
+    BlockersDeclared: "BlockersDeclared",
+    SpellCast: "SpellCast",
+    SpellCopy: "SpellCopied",
+    SpellAbilityCast: "SpellCast",
+    AbilityCast: "AbilityActivated",
+    AbilityActivated: "AbilityActivated",
+    Drawn: "CardDrawn",
+    Discarded: "Discard",
+    DiscardedAll: "Discard",
+    Milled: "Mill",
+    MilledAll: "Mill",
+    Sacrificed: "Sacrifice",
+    SacrificedOnce: "Sacrifice",
+    Destroyed: "Destroy",
+    Exiled: "Exile",
+    TokenCreated: "TokenCreated",
+    TokenCreatedOnce: "TokenCreated",
+    CounterAdded: "CounterPlaced",
+    CounterAddedOnce: "CounterPlaced",
+    CounterAddedAll: "CounterPlaced",
+    CounterRemoved: "CounterRemoved",
+    CounterRemovedOnce: "CounterRemoved",
+    LifeGained: "LifeGain",
+    LifeLost: "LifeLoss",
+    LifeLostAll: "LifeLoss",
+    Taps: "Tap",
+    TapAll: "Tap",
+    Untaps: "Untap",
+    UntapAll: "Untap",
+    Scry: "Scry",
+    Surveil: "Surveil",
+    Shuffled: "Shuffle",
+    BecomesTarget: "BecomesTarget",
+    BecomesTargetOnce: "BecomesTarget",
+    Attached: "Attach",
+    Unattach: "Unattach",
+    TurnFaceUp: "TurnFaceUp",
+    Transformed: "Transform",
+    Countered: "SpellCountered",
+    Fight: "Fight",
+    FightOnce: "Fight",
+    Explored: "Explore",
+    Investigated: "Investigate",
+    LandPlayed: "LandPlayed",
+    ManaAdded: "ManaAdded",
+    TapsForMana: "TapForMana",
+    Cycled: "Cycle",
+    Crewed: "Crew",
+    Exploited: "Exploit",
+    ChaosEnsues: "ChaosEnsues",
+    BecomeMonarch: "BecomeMonarch",
+    Proliferate: "Proliferate",
+    RolledDie: "DieRolled",
+    RolledDieOnce: "DieRolled",
+    FlippedCoin: "CoinFlipped",
+    Championed: "Champion",
+    Evolved: "Evolve",
+    Mutates: "Mutate",
+    Foretell: "Foretell",
+    ClassLevelGained: "ClassLevelGained",
+    NewGame: "GameStart",
+    Always: "StateCheck",
+    Immediate: "Immediate",
+    Phase: "@phase",
+    ChangesZone: "@zone",
+    ChangesZoneAll: "@zone",
+    DamageDone: "@damage",
+    DamageDoneOnce: "@damage",
+    DamageAll: "@damage",
+    DamageDealtOnce: "@damage",
+    DamagePreventedOnce: "DamagePrevented",
+    Devoured: "Devour",
+    Enlisted: "Enlist",
+    Abandoned: "Abandon",
+    BecomesCrewed: "Crew",
+    Clashed: "Clash",
+    Adapt: "Adapt",
+    Exerted: "Exert",
+    PayLife: "LifeLoss",
+    PayCumulativeUpkeep: "CumulativeUpkeep",
+    RingTemptsYou: "RingTemptsYou",
+    VisitAttraction: "VisitAttraction",
+    Specializes: "Specialize",
+    TakesInitiative: "TakeInitiative",
+    DayTimeChanges: "DayNight",
+    Stationed: "Station",
+    Forage: "Forage",
+    CommitCrime: "CommitCrime",
+    Collected: "CollectEvidence",
+    Expend: "Expend",
+    ManifestDread: "ManifestDread",
+    BecomesSaddled: "Saddle",
+    Saddled: "Saddle",
+    RoomEntered: "RoomUnlocked",
+    UnlockDoor: "RoomUnlocked",
+    FullyUnlock: "RoomUnlocked",
+    Discover: "Discover",
+    Airbend: "Airbend",
+    Earthbend: "Earthbend",
+    Firebend: "Firebend",
+    Waterbend: "Waterbend",
+    Trains: "Train",
+    Plotted: "Plot",
+    BecomeRenowned: "Renown",
+    BecomesPlotted: "Plot",
+    SetInMotion: "SchemeSetInMotion",
+    PlanarDice: "PlanarDice",
+    PlaneswalkedTo: "Planeswalk",
+    PlaneswalkedFrom: "Planeswalk",
+    LosesGame: "PlayerLoses",
+    Vote: "Vote",
+    Revealed: "Reveal",
+    SearchedLibrary: "SearchLibrary",
+    Attains: "Attain",
+    ConniveCompleted: "Connive",
+    CaseSolved: "CaseSolved",
+    BecomesTargetedOnce: "BecomesTarget",
+    Blight: "Blight",
+    Sneak: "Sneak",
+    Endure: "Endure",
+    ExcessDamage: "ExcessDamage",
+    ExcessDamageAll: "ExcessDamage",
+    MutatesOnto: "Mutate",
+    SpellCastOrCopy: "SpellCast",
+    LifeGainedOnce: "LifeGain",
+    AttackerBlockedByCreature: "Blocks",
+    BecomeMonstrous: "Monstrous",
+    ManaExpend: "Expend",
+    ChangesController: "GainControl",
+    StickerPlaced: "Sticker",
+    CounterPlayerAddedAll: "CounterPlaced",
+    Explores: "Explore",
+    Unattached: "Unattach",
+    DungeonCompleted: "DungeonCompleted",
+    PhaseIn: "PhaseIn",
+    AbilityTriggered: "AbilityTriggered",
+    Connives: "Connive",
+    AbilityResolves: "AbilityResolves",
+    CounterTypeAddedAll: "CounterPlaced",
+    MilledOnce: "Mill",
+    PhaseOut: "PhaseOut",
+    PhaseOutAll: "PhaseOut",
+    CollectEvidence: "CollectEvidence",
+    PayEcho: "Echo",
+    GiveGift: "Gift",
+    Mentored: "Mentor",
+    ElementalBend: "Bend",
+    SpellAbilityCopy: "SpellCopied",
+    ClaimPrize: "ClaimPrize",
+    TurnBegin: "TurnBegins"
+  },
+  effects: {
+    ChangeZone: "@zone",
+    ChangeZoneAll: "@zone",
+    Pump: [
+      "Pump"
+    ],
+    PumpAll: [
+      "Pump"
+    ],
+    Draw: [
+      "CardDrawn"
+    ],
+    Token: [
+      "TokenCreated"
+    ],
+    PutCounter: [
+      "CounterPlaced"
+    ],
+    PutCounterAll: [
+      "CounterPlaced"
+    ],
+    DealDamage: [
+      "Damage"
+    ],
+    DamageAll: [
+      "Damage"
+    ],
+    EachDamage: [
+      "Damage"
+    ],
+    DamageResolve: [],
+    Mana: [
+      "ManaAdded"
+    ],
+    ManaReflected: [
+      "ManaAdded"
+    ],
+    GainLife: [
+      "LifeGain"
+    ],
+    LoseLife: [
+      "LifeLoss"
+    ],
+    SetLife: [
+      "LifeTotalSet"
+    ],
+    Destroy: [
+      "Destroy"
+    ],
+    DestroyAll: [
+      "Destroy"
+    ],
+    Tap: [
+      "Tap"
+    ],
+    TapAll: [
+      "Tap"
+    ],
+    Untap: [
+      "Untap"
+    ],
+    UntapAll: [
+      "Untap"
+    ],
+    TapOrUntap: [
+      "Tap",
+      "Untap"
+    ],
+    Discard: [
+      "Discard"
+    ],
+    Animate: [
+      "Animate"
+    ],
+    AnimateAll: [
+      "Animate"
+    ],
+    Dig: [
+      "LookAtTop"
+    ],
+    DigUntil: [
+      "RevealUntil"
+    ],
+    DigMultiple: [
+      "LookAtTop"
+    ],
+    PeekAndReveal: [
+      "LookAtTop"
+    ],
+    RearrangeTopOfLibrary: [
+      "LookAtTop"
+    ],
+    Sacrifice: [
+      "Sacrifice"
+    ],
+    SacrificeAll: [
+      "Sacrifice"
+    ],
+    Mill: [
+      "Mill"
+    ],
+    Counter: [
+      "SpellCountered"
+    ],
+    Scry: [
+      "Scry"
+    ],
+    Surveil: [
+      "Surveil"
+    ],
+    CopyPermanent: [
+      "TokenCreated",
+      "Copy"
+    ],
+    Clone: [
+      "Copy"
+    ],
+    Play: [
+      "CastWithoutPaying"
+    ],
+    GainControl: [
+      "GainControl"
+    ],
+    ExchangeControl: [
+      "GainControl"
+    ],
+    Regenerate: [
+      "Regenerate"
+    ],
+    CopySpellAbility: [
+      "SpellCopied"
+    ],
+    Attach: [
+      "Attach"
+    ],
+    Unattach: [
+      "Unattach"
+    ],
+    RemoveCounter: [
+      "CounterRemoved"
+    ],
+    RemoveCounterAll: [
+      "CounterRemoved"
+    ],
+    MoveCounter: [
+      "CounterRemoved",
+      "CounterPlaced"
+    ],
+    MultiplyCounter: [
+      "CounterPlaced"
+    ],
+    Proliferate: [
+      "Proliferate",
+      "CounterPlaced"
+    ],
+    Fight: [
+      "Fight",
+      "Damage"
+    ],
+    Investigate: [
+      "Investigate",
+      "TokenCreated"
+    ],
+    Amass: [
+      "Amass",
+      "CounterPlaced"
+    ],
+    Incubate: [
+      "Incubate",
+      "TokenCreated"
+    ],
+    Explore: [
+      "Explore"
+    ],
+    Connive: [
+      "Connive",
+      "CardDrawn",
+      "Discard"
+    ],
+    Goad: [
+      "Goad"
+    ],
+    Poison: [
+      "PoisonCounter"
+    ],
+    Shuffle: [
+      "Shuffle"
+    ],
+    Reveal: [
+      "Reveal"
+    ],
+    RevealHand: [
+      "Reveal"
+    ],
+    PreventDamage: [
+      "DamagePrevented"
+    ],
+    Fog: [
+      "DamagePrevented"
+    ],
+    Protection: [
+      "GainProtection"
+    ],
+    ProtectionAll: [
+      "GainProtection"
+    ],
+    Debuff: [
+      "LoseAbility"
+    ],
+    AddTurn: [
+      "ExtraTurn"
+    ],
+    AddPhase: [
+      "ExtraPhase"
+    ],
+    BecomeMonarch: [
+      "BecomeMonarch"
+    ],
+    TakeInitiative: [
+      "TakeInitiative"
+    ],
+    Venture: [
+      "Venture"
+    ],
+    RingTemptsYou: [
+      "RingTemptsYou"
+    ],
+    Phases: [
+      "PhaseOut"
+    ],
+    SetState: [
+      "Transform"
+    ],
+    Manifest: [
+      "Manifest"
+    ],
+    ManifestDread: [
+      "Manifest"
+    ],
+    Cloak: [
+      "Manifest"
+    ],
+    Discover: [
+      "Discover",
+      "CastWithoutPaying"
+    ],
+    MakeCard: [
+      "CardCreated"
+    ],
+    Seek: [
+      "Tutor"
+    ],
+    Learn: [
+      "Tutor"
+    ],
+    Draft: [
+      "CardCreated"
+    ],
+    LosesGame: [
+      "PlayerLoses"
+    ],
+    WinsGame: [
+      "PlayerWins"
+    ],
+    MustBlock: [
+      "ForceBlock"
+    ],
+    RemoveFromCombat: [
+      "RemoveFromCombat"
+    ],
+    SkipPhase: [
+      "SkipPhase"
+    ],
+    SkipTurn: [
+      "SkipTurn"
+    ],
+    Detain: [
+      "Detain"
+    ],
+    Earthbend: [
+      "Earthbend",
+      "CounterPlaced"
+    ],
+    Airbend: [
+      "Airbend",
+      "Exile"
+    ],
+    Endure: [
+      "CounterPlaced",
+      "TokenCreated"
+    ],
+    Empower: [
+      "CounterPlaced"
+    ],
+    Intensify: [
+      "Intensify"
+    ],
+    PutSticker: [
+      "Sticker"
+    ],
+    Radiation: [
+      "Mill",
+      "LifeLoss"
+    ],
+    Recruit: [
+      "Tutor"
+    ],
+    ExchangeLife: [
+      "LifeTotalSet"
+    ],
+    GainOwnership: [
+      "GainControl"
+    ],
+    PermanentCreature: [],
+    PermanentNoncreature: [],
+    Abandon: [
+      "Abandon"
+    ],
+    OpenAttraction: [
+      "OpenAttraction"
+    ],
+    AssembleContraption: [
+      "Assemble"
+    ],
+    DayTime: [
+      "DayNight"
+    ],
+    Planeswalk: [
+      "Planeswalk"
+    ],
+    ChangeTargets: [
+      "Retarget"
+    ],
+    ControlSpell: [
+      "GainControl"
+    ],
+    ChangeText: [
+      "ChangeText"
+    ],
+    AlterAttribute: [
+      "AlterAttribute"
+    ],
+    Heist: [
+      "CardCreated"
+    ],
+    ExchangePower: [
+      "Pump"
+    ],
+    Balance: [
+      "Sacrifice",
+      "Discard"
+    ],
+    Meld: [
+      "Meld"
+    ],
+    TimeTravel: [
+      "CounterPlaced",
+      "CounterRemoved"
+    ],
+    AddOrRemoveCounter: [
+      "CounterPlaced",
+      "CounterRemoved"
+    ],
+    Blight: [
+      "Blight"
+    ],
+    EndTurn: [
+      "EndTurn"
+    ],
+    Clash: [
+      "Clash"
+    ],
+    RollDice: [
+      "DieRolled"
+    ],
+    FlipCoin: [
+      "CoinFlipped"
+    ],
+    ChaosEnsues: [
+      "ChaosEnsues"
+    ],
+    Vote: [
+      "Vote"
+    ],
+    UnlockDoor: [
+      "RoomUnlocked"
+    ],
+    Effect: "@effect",
+    DelayedTrigger: "@delayed",
+    ImmediateTrigger: "@delayed",
+    Charm: "@choices",
+    GenericChoice: "@choices",
+    Branch: "@branch",
+    RepeatEach: "@repeat",
+    Repeat: "@repeat",
+    Cleanup: [],
+    StoreSVar: [],
+    ChooseCard: [],
+    ChooseType: [],
+    ChooseColor: [],
+    ChoosePlayer: [],
+    ChooseNumber: [],
+    ChooseSource: [],
+    ChooseEvenOdd: [],
+    ChooseDirection: [],
+    ChooseSector: [],
+    NameCard: [],
+    TwoPiles: [],
+    MultiplePiles: [],
+    BlankLine: [],
+    LookAt: [],
+    AssignGroup: [],
+    ReplaceEffect: [],
+    ReplaceToken: [],
+    ReplaceCounter: [],
+    ReplaceDamage: [],
+    ReplaceSplitDamage: [],
+    ReplaceMana: [],
+    VillainousChoice: [],
+    GainControlVariant: [
+      "GainControl"
+    ],
+    ControlPlayer: [
+      "ControlPlayer"
+    ],
+    ChangeCombatants: [
+      "Retarget"
+    ],
+    DrainMana: [
+      "ManaLost"
+    ],
+    BecomesBlocked: [
+      "BecomesBlocked"
+    ],
+    ExchangeLifeVariant: [
+      "LifeTotalSet"
+    ],
+    BidLife: [
+      "LifeLoss"
+    ],
+    Regeneration: [
+      "Regenerate"
+    ],
+    GameDrawn: [
+      "GameDrawn"
+    ],
+    ReorderZone: [
+      "LookAtTop"
+    ],
+    ActivateAbility: [
+      "AbilityActivated"
+    ],
+    Block: [
+      "ForceBlock"
+    ],
+    ExchangeTextBox: [
+      "ChangeText"
+    ],
+    SwitchBlock: [
+      "ForceBlock"
+    ],
+    HealDamage: [
+      "DamageRemoved"
+    ],
+    RestartGame: [
+      "RestartGame"
+    ],
+    ChangeSpeed: [
+      "Speed"
+    ],
+    ChangeX: [],
+    TapOrUntapAll: [
+      "Tap",
+      "Untap"
+    ],
+    TaporUntapAll: [
+      "Tap",
+      "Untap"
+    ],
+    Camouflage: [
+      "ForceBlock"
+    ],
+    ReverseTurnOrder: [
+      "TurnOrder"
+    ],
+    RollPlanarDice: [
+      "PlanarDice"
+    ],
+    EndCombatPhase: [
+      "EndCombat"
+    ],
+    ExchangeControlVariant: [
+      "GainControl"
+    ]
+  },
+  costs: {
+    T: "Tap",
+    Q: "Untap",
+    Sac: "Sacrifice",
+    Discard: "Discard",
+    PayLife: "LifeLoss",
+    SubCounter: "CounterRemoved",
+    AddCounter: "CounterPlaced",
+    Exile: "Exile",
+    ExileFromGrave: "ExileFromGraveyard",
+    tapXType: "Tap",
+    untapXType: "Untap",
+    Return: "Bounce",
+    Mill: "Mill",
+    Reveal: "Reveal",
+    PayEnergy: "EnergySpent",
+    Draw: "CardDrawn",
+    Collect: "CollectEvidence",
+    Forage: "Forage",
+    RemoveAnyCounter: "CounterRemoved",
+    PutCardToLib: "ToLibrary",
+    Unattach: "Unattach",
+    Exert: "Exert",
+    Blight: "Blight",
+    Waterbend: "Tap",
+    ExileFromHand: "ExileFromHand",
+    XMin1: null,
+    CollectEvidence: "CollectEvidence",
+    ExileFromTop: "ExileFromLibrary",
+    ExiledMoveToGrave: "ExileToGraveyard",
+    untapYType: "Untap",
+    RevealChosen: "Reveal",
+    Mana: "ManaPaid",
+    PutCardToLibFromHand: "HandToLibrary",
+    PutCardToLibFromGrave: "GraveyardToLibrary",
+    PutCardToLibFromBattlefield: "Tuck",
+    ExileFromStack: "Exile",
+    ChooseCreatureType: null,
+    ExileSameGrave: "ExileFromGraveyard",
+    RevealOrChoose: "Reveal",
+    RollDice: "DieRolled",
+    ExileAnyGrave: "ExileFromGraveyard",
+    RevealFromExile: "Reveal"
+  },
+  statics: {
+    Continuous: "@continuous",
+    ReduceCost: [
+      "CostReduction"
+    ],
+    RaiseCost: [
+      "CostIncrease"
+    ],
+    SetCost: [
+      "CostSet"
+    ],
+    AlternativeCost: [
+      "AlternativeCost"
+    ],
+    OptionalCost: [
+      "AdditionalCost"
+    ],
+    CantBlockBy: [
+      "EvasionRestriction"
+    ],
+    CantAttack: [
+      "AttackRestriction"
+    ],
+    CantBlock: [
+      "BlockRestriction"
+    ],
+    CantBeCast: [
+      "CastRestriction"
+    ],
+    CantBeActivated: [
+      "ActivationRestriction"
+    ],
+    MustAttack: [
+      "ForceAttack"
+    ],
+    MustBlock: [
+      "ForceBlock"
+    ],
+    CastWithFlash: [
+      "CastTiming"
+    ],
+    MinMaxBlocker: [
+      "EvasionRestriction"
+    ],
+    CantTarget: [
+      "TargetRestriction"
+    ],
+    CantGainLife: [
+      "LifeGainRestriction"
+    ],
+    CantDraw: [
+      "DrawRestriction"
+    ],
+    CantPlayLand: [
+      "LandRestriction"
+    ],
+    MayPlay: [
+      "CastPermission"
+    ],
+    MayLookAt: [
+      "Reveal"
+    ],
+    CanAttackDefender: [
+      "AttackPermission"
+    ],
+    CantAttackUnless: [
+      "AttackRestriction"
+    ],
+    CantBlockUnless: [
+      "BlockRestriction"
+    ],
+    CantTransform: [
+      "TransformRestriction"
+    ],
+    CantUntap: [
+      "UntapRestriction"
+    ],
+    CantSacrifice: [
+      "SacrificeRestriction"
+    ],
+    CantPutCounter: [
+      "CounterRestriction"
+    ],
+    CantChangeZone: [
+      "ZoneRestriction"
+    ],
+    CantRegenerate: [
+      "RegenerateRestriction"
+    ],
+    CantPreventDamage: [
+      "PreventRestriction"
+    ],
+    CantSearchLibrary: [
+      "SearchRestriction"
+    ],
+    IgnoreHexproof: [
+      "TargetPermission"
+    ],
+    Panharmonicon: [
+      "TriggerMultiplier"
+    ],
+    CombatDamageToughness: [
+      "DamageRule"
+    ],
+    AssignCombatDamageAsUnblocked: [
+      "DamageRule"
+    ],
+    AttackRequirement: [
+      "ForceAttack"
+    ],
+    BlockRestrict: [
+      "BlockRestriction"
+    ],
+    AttackRestrict: [
+      "AttackRestriction"
+    ],
+    ManaConvert: [
+      "ManaRule"
+    ],
+    UnspentMana: [
+      "ManaRule"
+    ],
+    CountersRemain: [
+      "CounterRule"
+    ],
+    PlayerMustAttack: [
+      "ForceAttack"
+    ],
+    CanBlockAny: [
+      "BlockPermission"
+    ],
+    CanBlockAmount: [
+      "BlockPermission"
+    ],
+    MustBeBlockedBy: [
+      "ForceBlock"
+    ],
+    MustBeBlockedByAll: [
+      "ForceBlock"
+    ],
+    CantExile: [
+      "ZoneRestriction"
+    ],
+    CantBeTargetedBy: [
+      "TargetRestriction"
+    ],
+    Devotion: [
+      "Devotion"
+    ],
+    CastFromGraveyard: [
+      "CastPermission"
+    ],
+    ETBTapped: [
+      "EntersTapped"
+    ],
+    FlipCoinMod: [
+      "CoinRule"
+    ],
+    AdaptMod: [
+      "Adapt"
+    ],
+    NoCleanupDamage: [
+      "DamageRule"
+    ],
+    OptionalAttackCost: [
+      "AttackCost"
+    ],
+    CantAttach: [
+      "AttachRestriction"
+    ],
+    CantCrew: [
+      "CrewRestriction"
+    ],
+    CantVenture: [
+      "VentureRestriction"
+    ],
+    DisableTriggers: [
+      "TriggerSuppression"
+    ],
+    CantWinLose: [
+      "GameRule"
+    ],
+    CantLoseGame: [
+      "GameRule"
+    ],
+    CantWinGame: [
+      "GameRule"
+    ],
+    RaiseCostPerTarget: [
+      "CostIncrease"
+    ],
+    SacrificeEachTurn: [
+      "Sacrifice"
+    ],
+    CantTapForMana: [
+      "ManaRule"
+    ],
+    AttackPermission: [
+      "AttackPermission"
+    ],
+    MaxHandSize: [
+      "HandSize"
+    ],
+    Untap: [
+      "Untap"
+    ],
+    AssignNoCombatDamage: [
+      "DamageRule"
+    ],
+    UntapOtherPlayer: [
+      "Untap"
+    ],
+    IgnoreLandWalk: [
+      "EvasionRule"
+    ],
+    IgnoreLegendRule: [
+      "LegendRule"
+    ],
+    TapPowerValue: [
+      "CrewRule"
+    ],
+    NumLoyaltyAct: [
+      "LoyaltyRule"
+    ],
+    CantChangeLife: [
+      "LifeRule"
+    ],
+    CantPhaseIn: [
+      "PhaseRule"
+    ],
+    ActivateAbilityAsIfHaste: [
+      "HasteRule"
+    ],
+    CanBlockIfShadow: [
+      "BlockPermission"
+    ],
+    CantBeCopied: [
+      "CopyRestriction"
+    ],
+    CanAttackIfHaste: [
+      "HasteRule"
+    ],
+    MustTarget: [
+      "TargetRule"
+    ],
+    CantPayLife: [
+      "LifeRule"
+    ],
+    ManaRestriction: [
+      "ManaRule"
+    ],
+    Activations: [
+      "ActivationRule"
+    ],
+    CantLoseLife: [
+      "LifeRule"
+    ],
+    CantPhaseOut: [
+      "PhaseRule"
+    ],
+    CanBlockIfReach: [
+      "BlockPermission"
+    ],
+    CantGainControl: [
+      "ControlRestriction"
+    ],
+    IgnorePlaneswalkerZeroLoyaltyRule: [
+      "LoyaltyRule"
+    ],
+    DrawFromBottom: [
+      "DrawRule"
+    ],
+    ForetellAnyTurn: [
+      "Foretell"
+    ],
+    InfectDamage: [
+      "PoisonCounter"
+    ],
+    ColorlessDamageSource: [
+      "DamageRule"
+    ],
+    CantDiscard: [
+      "DiscardRestriction"
+    ],
+    PlotZone: [
+      "Plot"
+    ],
+    ManaBurn: [
+      "ManaRule"
+    ],
+    CanAdapt: [
+      "Adapt"
+    ],
+    FlipCoinDoubler: [
+      "CoinRule"
+    ],
+    AttackVigilance: [
+      "Keyword:Vigilance"
+    ],
+    CantBecomeMonarch: [
+      "MonarchRestriction"
+    ],
+    BlockTapped: [
+      "BlockPermission"
+    ],
+    SurveilNum: [
+      "Surveil"
+    ],
+    IgnoreShroud: [
+      "TargetPermission"
+    ],
+    CantBeSuspected: [
+      "SuspectRestriction"
+    ],
+    WitherDamage: [
+      "CounterPlaced"
+    ],
+    CombatDamageNegatePower: [
+      "DamageRule"
+    ],
+    GainLifeRadiation: [
+      "LifeGain"
+    ],
+    MaxCounter: [
+      "CounterRule"
+    ]
+  },
+  continuous: {
+    AddKeyword: "Keyword:{value}",
+    AddPower: "Power",
+    AddToughness: "Toughness",
+    SetPower: "Power",
+    SetToughness: "Toughness",
+    AddType: "Type",
+    AddAllCreatureTypes: "Type",
+    RemoveType: "Type",
+    SetColor: "Color",
+    AddColor: "Color",
+    AddAbility: "GrantedAbility",
+    AddTrigger: "GrantedAbility",
+    AddStaticAbility: "GrantedAbility",
+    AddReplacementEffect: "GrantedAbility",
+    AddHiddenKeyword: "Keyword:{value}",
+    RemoveKeyword: "LoseKeyword",
+    RemoveAllAbilities: "LoseAbility",
+    GainControl: "GainControl",
+    MayPlay: "CastPermission",
+    MayLookAt: "Reveal",
+    AddSVar: null,
+    Affected: null,
+    AffectedZone: null,
+    AffectedDefined: null,
+    Description: null,
+    Mode: null,
+    CharacteristicDefining: null,
+    Condition: null,
+    IsPresent: null,
+    CheckSVar: null,
+    SVarCompare: null,
+    EffectZone: null,
+    ValidCard: null,
+    MayPlayLimit: null,
+    MayPlayWithoutManaCost: null,
+    MayPlayIgnoreType: null,
+    MayPlayIgnoreColor: null,
+    MayPlayAltManaCost: null,
+    MayPlayDontGrantZonePermissions: null,
+    MayPlayPlayer: null,
+    MayPlayText: null,
+    MayPlayWithFlash: null,
+    MayPlaySnowIgnoreColor: null,
+    GainsAbilitiesLimitPerTurn: null,
+    SetMaxHandSize: "HandSize",
+    RemoveCreatureTypes: "Type",
+    RemoveLandTypes: "Type",
+    RemoveCardTypes: "Type",
+    RemoveArtifactTypes: "Type",
+    GainsAbilitiesOf: "GrantedAbility",
+    GainsAbilitiesOfZones: "GrantedAbility",
+    GainsAbilitiesOfDefined: "GrantedAbility",
+    GainsValidAbilities: "GrantedAbility",
+    GainsTriggerAbsOf: "GrantedAbility",
+    GainTextOf: "ChangeText",
+    GainTextAbilities: "GrantedAbility",
+    GainsStickerAbilitiesOfDefined: "GrantedAbility",
+    GainsStickerAbilitiesOf: "GrantedAbility",
+    SetName: "Name",
+    AddNames: "Name",
+    AdditionalOptionalVote: "Vote",
+    AdditionalVote: "Vote",
+    AdditionalVillainousChoice: "Vote",
+    RemoveNonManaAbilities: "LoseAbility",
+    PresentCompare: null,
+    PresentZone: null,
+    Secondary: null,
+    SharedRestrictions: null,
+    SharedKeywordsZone: null,
+    ValidAfterStack: null,
+    TopCardOfLibraryIs: null,
+    ValidSA: null,
+    CheckSecondSVar: null,
+    SecondSVarCompare: null,
+    CheckThirdSVar: null,
+    Player: null,
+    Phases: null,
+    LockInText: null,
+    KeywordDefined: null,
+    GameStage: null,
+    FromDraftNotes: null,
+    ExcludeZone: null,
+    DeclaresBlockers: null,
+    Caster: null,
+    CalcKeywordN: null,
+    ActivationZone: null,
+    Activator: null,
+    ValidPlayer: null,
+    Origin: null,
+    Destination: null,
+    AdjustLandPlays: "LandPlays",
+    CanBlockAmount: "BlockPermission",
+    CanBlockAny: "BlockPermission",
+    RaiseMaxHandSize: "HandSize",
+    Goad: "Goad",
+    RaiseCost: "CostIncrease",
+    CantHaveKeyword: "LoseKeyword",
+    LethalDamageByPower: "DamageRule",
+    ControlOpponentsSearchingLibrary: "ControlPlayer",
+    ChangeColorWordsTo: "ChangeText",
+    ManaConversion: "ManaRule",
+    ReplaceGraveyard: "ZoneRule",
+    IgnoreEffectCost: "CostReduction",
+    Duration: null,
+    ControlVote: "Vote",
+    DeclaresAttackers: "ControlPlayer"
+  },
+  replacements: {
+    Moved: "@zone",
+    CreateToken: [
+      "TokenCreated"
+    ],
+    AddCounter: [
+      "CounterPlaced"
+    ],
+    DamageDone: [
+      "Damage"
+    ],
+    Untap: [
+      "Untap"
+    ],
+    Counter: [
+      "SpellCountered"
+    ],
+    Draw: [
+      "CardDrawn"
+    ],
+    GainLife: [
+      "LifeGain"
+    ],
+    LoseLife: [
+      "LifeLoss"
+    ],
+    BeginPhase: [
+      "PhaseBegins"
+    ],
+    BeginTurn: [
+      "TurnBegins"
+    ],
+    GameLoss: [
+      "PlayerLoses"
+    ],
+    GameWin: [
+      "PlayerWins"
+    ],
+    ProduceMana: [
+      "ManaAdded"
+    ],
+    TurnFaceUp: [
+      "TurnFaceUp"
+    ],
+    Discard: [
+      "Discard"
+    ],
+    Destroy: [
+      "Destroy"
+    ],
+    Tap: [
+      "Tap"
+    ],
+    Scry: [
+      "Scry"
+    ],
+    Mill: [
+      "Mill"
+    ],
+    Explore: [
+      "Explore"
+    ],
+    Proliferate: [
+      "Proliferate"
+    ],
+    PayLife: [
+      "LifeLoss"
+    ],
+    SetInMotion: [
+      "SchemeSetInMotion"
+    ],
+    Planeswalk: [
+      "Planeswalk"
+    ],
+    RollPlanarDice: [
+      "PlanarDice"
+    ],
+    Transform: [
+      "Transform"
+    ],
+    Attached: [
+      "Attach"
+    ],
+    Cascade: [
+      "Cascade"
+    ],
+    AssembleContraption: [
+      "Assemble"
+    ],
+    DrawCards: [
+      "CardDrawn"
+    ],
+    PlanarDiceResult: [
+      "PlanarDice"
+    ],
+    RemoveCounter: [
+      "CounterRemoved"
+    ],
+    LifeReduced: [
+      "LifeLoss"
+    ],
+    Learn: [
+      "Tutor"
+    ],
+    DeclareBlocker: [
+      "BlockersDeclared"
+    ],
+    RollDice: [
+      "DieRolled"
+    ],
+    FlipCoin: [
+      "CoinFlipped"
+    ],
+    Copy: [
+      "SpellCopied"
+    ],
+    PlayLand: [
+      "LandPlayed"
+    ],
+    Cast: [
+      "SpellCast"
+    ],
+    LoseMana: [
+      "ManaLost"
+    ],
+    CopySpell: [
+      "SpellCopied"
+    ],
+    Connive: [
+      "Connive"
+    ]
+  },
+  extraImplications: [
+    {
+      from: "Dies",
+      implies: "PutIntoGraveyard",
+      note: "A creature dying is a permanent put into a graveyard from the battlefield."
+    },
+    {
+      from: "Reanimate",
+      implies: "ETB"
+    },
+    {
+      from: "TokenCreated",
+      implies: "ETB"
+    },
+    {
+      from: "Manifest",
+      implies: "ETB"
+    },
+    {
+      from: "Meld",
+      implies: "ETB"
+    },
+    {
+      from: "Copy",
+      implies: "ETB"
+    }
+  ],
+  keywords: {
+    selfAttribute: [
+      "Flying",
+      "Trample",
+      "Vigilance",
+      "Haste",
+      "Flash",
+      "Reach",
+      "Menace",
+      "First Strike",
+      "Double Strike",
+      "Deathtouch",
+      "Defender",
+      "Indestructible",
+      "Hexproof",
+      "Shroud",
+      "Fear",
+      "Shadow",
+      "Intimidate",
+      "Horsemanship",
+      "Skulk",
+      "Changeling",
+      "Devoid",
+      "Ward",
+      "Protection",
+      "Landwalk",
+      "Infect",
+      "Wither",
+      "Toxic",
+      "Flanking",
+      "Banding",
+      "Partner",
+      "Partner with",
+      "Choose a Background",
+      "Doctor",
+      "Enchant",
+      "Convoke",
+      "Delve",
+      "Improvise",
+      "Affinity",
+      "Kicker",
+      "Multikicker",
+      "Entwine",
+      "Splice",
+      "Buyback",
+      "Split second",
+      "Storm",
+      "Cascade",
+      "Rebound",
+      "Read ahead",
+      "Start your engines",
+      "Compleated",
+      "Daybound",
+      "Nightbound",
+      "Ascend",
+      "Myriad",
+      "Melee",
+      "Battle cry",
+      "Annihilator",
+      "Bushido",
+      "Rampage",
+      "Provoke",
+      "Living weapon",
+      "Totem armor",
+      "Umbra armor",
+      "Soulbond",
+      "Undying",
+      "Persist",
+      "Exalted",
+      "Evolve",
+      "Extort",
+      "Prowess",
+      "Training",
+      "Mentor",
+      "Riot",
+      "Afflict",
+      "Afterlife",
+      "Fabricate",
+      "Decayed",
+      "Ravenous",
+      "Squad",
+      "Gift",
+      "Offspring",
+      "Saddle",
+      "Station",
+      "Mobilize",
+      "Job select",
+      "For Mirrodin",
+      "Backup",
+      "Bargain",
+      "Casualty",
+      "Craft",
+      "Disturb",
+      "Escape",
+      "Flashback",
+      "Jump-start",
+      "Retrace",
+      "Aftermath",
+      "Unearth",
+      "Embalm",
+      "Eternalize",
+      "Encore",
+      "Foretell",
+      "Plot",
+      "Warp",
+      "Suspend",
+      "Madness",
+      "Evoke",
+      "Echo",
+      "Cumulative upkeep",
+      "Morph",
+      "Megamorph",
+      "Disguise",
+      "Mutate",
+      "Bestow",
+      "Ninjutsu",
+      "Dash",
+      "Blitz",
+      "Prototype",
+      "Overload",
+      "Spectacle",
+      "Surge",
+      "Emerge",
+      "Escalate",
+      "Replicate",
+      "Sneak",
+      "Exploit",
+      "Devour",
+      "Modular",
+      "Graft",
+      "Dethrone",
+      "Renown",
+      "Hideaway",
+      "Sunburst",
+      "Amplify",
+      "Fading",
+      "Vanishing",
+      "Level up",
+      "Reconfigure",
+      "Specialize",
+      "Champion",
+      "Haunt",
+      "Ripple",
+      "Soulshift",
+      "Splice onto Arcane",
+      "Tribute",
+      "Dredge",
+      "Transmute",
+      "Forecast",
+      "Reinforce",
+      "Outlast",
+      "Scavenge",
+      "Bloodthirst",
+      "Crew",
+      "Firebending",
+      "Max speed",
+      "Harmonize",
+      "More Than Meets the Eye",
+      "Impending",
+      "Freerunning",
+      "Tiered",
+      "Spree",
+      "Cleave",
+      "Demonstrate",
+      "Hexproof from",
+      "Protection from black",
+      "Protection from red",
+      "Protection from white",
+      "Protection from blue",
+      "Protection from green",
+      "Protection from artifacts",
+      "Protection from everything",
+      "Lifelink",
+      "Equip",
+      "Cycling",
+      "TypeCycling",
+      "Landcycling",
+      "AlternateAdditionalCost",
+      "MayEffectFromOpeningHand",
+      "StickerSheet",
+      "You may choose not to untap CARDNAME during your untap step",
+      "Fuse",
+      "Companion",
+      "Conspire",
+      "Cipher",
+      "Phasing",
+      "Epic",
+      "Gravestorm",
+      "Poisonous",
+      "Frenzy",
+      "Horsemanship",
+      "Absorb",
+      "Aura swap",
+      "Bloodrush",
+      "Recover",
+      "Awaken",
+      "Ingest",
+      "Partner with",
+      "Hidden agenda",
+      "Double agenda",
+      "Assist",
+      "Visit",
+      "Prize",
+      "Enlist",
+      "Read Ahead",
+      "Compleated",
+      "Miracle",
+      "Paradox",
+      "Doctor's companion",
+      "Strive",
+      "Teamwork",
+      "Living metal",
+      "MayFlashCost",
+      "MayFlashSac",
+      "Storied",
+      "Undaunted",
+      "Paradigm",
+      "DeckLimit",
+      "MayEffectFromOpeningDeck",
+      "Space sculptor",
+      "Prowl",
+      "Mayhem",
+      "Web-slinging",
+      "MustBeBlockedByAll"
+    ],
+    relations: {
+      Lifelink: [
+        {
+          relation: "produces",
+          hook: "LifeGain",
+          selector: "You"
+        }
+      ],
+      Equip: [
+        {
+          relation: "consumes",
+          hook: "ManaPaid",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Cycling: [
+        {
+          relation: "produces",
+          hook: "Cycle",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CardDrawn",
+          selector: "You"
+        }
+      ],
+      TypeCycling: [
+        {
+          relation: "produces",
+          hook: "Cycle",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Tutor",
+          selector: "You"
+        }
+      ],
+      Landcycling: [
+        {
+          relation: "produces",
+          hook: "Cycle",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Tutor",
+          selector: "Land"
+        }
+      ],
+      Flashback: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Escape: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Unearth: [
+        {
+          relation: "produces",
+          hook: "Reanimate",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "ETB",
+          selector: "Card.Self"
+        }
+      ],
+      Persist: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Reanimate",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Undying: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Reanimate",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Prowess: [
+        {
+          relation: "triggers_on",
+          hook: "SpellCast",
+          selector: "Card.nonCreature+YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Exalted: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.attacking"
+        }
+      ],
+      Afterlife: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        }
+      ],
+      Fabricate: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        }
+      ],
+      Evolve: [
+        {
+          relation: "triggers_on",
+          hook: "ETB",
+          selector: "Creature.YouCtrl+Other"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Extort: [
+        {
+          relation: "triggers_on",
+          hook: "SpellCast",
+          selector: "Card.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "LifeLoss",
+          selector: "Opponent"
+        },
+        {
+          relation: "produces",
+          hook: "LifeGain",
+          selector: "You"
+        }
+      ],
+      Annihilator: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Permanent.OppCtrl"
+        }
+      ],
+      Toxic: [
+        {
+          relation: "produces",
+          hook: "PoisonCounter",
+          selector: "Opponent"
+        }
+      ],
+      Infect: [
+        {
+          relation: "produces",
+          hook: "PoisonCounter",
+          selector: "Opponent"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Wither: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Mentor: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature.attacking"
+        }
+      ],
+      Training: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Modular: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        }
+      ],
+      Exploit: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Devour: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Crew: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Crew",
+          selector: "Card.Self"
+        }
+      ],
+      Storm: [
+        {
+          relation: "consumes",
+          hook: "SpellCast",
+          selector: "Card"
+        },
+        {
+          relation: "produces",
+          hook: "SpellCopied",
+          selector: "Card.Self"
+        }
+      ],
+      Cascade: [
+        {
+          relation: "produces",
+          hook: "Cascade",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "You"
+        }
+      ],
+      Morph: [
+        {
+          relation: "produces",
+          hook: "TurnFaceUp",
+          selector: "Card.Self"
+        }
+      ],
+      Megamorph: [
+        {
+          relation: "produces",
+          hook: "TurnFaceUp",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Disguise: [
+        {
+          relation: "produces",
+          hook: "TurnFaceUp",
+          selector: "Card.Self"
+        }
+      ],
+      Madness: [
+        {
+          relation: "triggers_on",
+          hook: "Discard",
+          selector: "Card.Self"
+        }
+      ],
+      Ninjutsu: [
+        {
+          relation: "consumes",
+          hook: "Bounce",
+          selector: "Creature.YouCtrl+unblocked"
+        },
+        {
+          relation: "produces",
+          hook: "ETB",
+          selector: "Card.Self"
+        }
+      ],
+      Warp: [
+        {
+          relation: "modifies",
+          hook: "AlternativeCost",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Card.Self"
+        }
+      ],
+      Encore: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Embalm: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Eternalize: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Myriad: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Squad: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Offspring: [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Card.Self"
+        }
+      ],
+      Backup: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Riot: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Bloodthirst: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Ravenous: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Casualty: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "SpellCopied",
+          selector: "Card.Self"
+        }
+      ],
+      Bargain: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Permanent.YouCtrl"
+        }
+      ],
+      Emerge: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Convoke: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Improvise: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Artifact.YouCtrl"
+        }
+      ],
+      Delve: [
+        {
+          relation: "consumes",
+          hook: "ExileFromGraveyard",
+          selector: "Card.YouOwn"
+        }
+      ],
+      Saddle: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Saddle",
+          selector: "Card.Self"
+        }
+      ],
+      Melee: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      "Battle cry": [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.attacking+Other"
+        }
+      ],
+      Dredge: [
+        {
+          relation: "produces",
+          hook: "Mill",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "Regrowth",
+          selector: "Card.Self"
+        }
+      ],
+      Scavenge: [
+        {
+          relation: "consumes",
+          hook: "ExileFromGraveyard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Creature"
+        }
+      ],
+      Outlast: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Mobilize: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        }
+      ],
+      "Living weapon": [
+        {
+          relation: "produces",
+          hook: "TokenCreated",
+          selector: "Creature.YouCtrl+token"
+        },
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Card.Self"
+        }
+      ],
+      Decayed: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        }
+      ],
+      Echo: [
+        {
+          relation: "consumes",
+          hook: "ManaPaid",
+          selector: "You"
+        }
+      ],
+      "Cumulative upkeep": [
+        {
+          relation: "triggers_on",
+          hook: "Upkeep",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Fading: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "Upkeep",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CounterRemoved",
+          selector: "Card.Self"
+        }
+      ],
+      Vanishing: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "Upkeep",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CounterRemoved",
+          selector: "Card.Self"
+        }
+      ],
+      Suspend: [
+        {
+          relation: "produces",
+          hook: "ExileFromHand",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "Card.Self"
+        }
+      ],
+      Foretell: [
+        {
+          relation: "produces",
+          hook: "ExileFromHand",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Foretell",
+          selector: "Card.Self"
+        }
+      ],
+      Plot: [
+        {
+          relation: "produces",
+          hook: "ExileFromHand",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Plot",
+          selector: "Card.Self"
+        }
+      ],
+      Evoke: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        }
+      ],
+      Dash: [
+        {
+          relation: "produces",
+          hook: "Bounce",
+          selector: "Card.Self"
+        }
+      ],
+      Blitz: [
+        {
+          relation: "produces",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CardDrawn",
+          selector: "You"
+        }
+      ],
+      Hideaway: [
+        {
+          relation: "produces",
+          hook: "ExileFromLibrary",
+          selector: "You"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "You"
+        }
+      ],
+      Afflict: [
+        {
+          relation: "triggers_on",
+          hook: "BecomesBlocked",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "LifeLoss",
+          selector: "Opponent"
+        }
+      ],
+      Renown: [
+        {
+          relation: "triggers_on",
+          hook: "CombatDamage",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Bushido: [
+        {
+          relation: "triggers_on",
+          hook: "Blocks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Rampage: [
+        {
+          relation: "triggers_on",
+          hook: "BecomesBlocked",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Flanking: [
+        {
+          relation: "triggers_on",
+          hook: "BecomesBlocked",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.blocking"
+        }
+      ],
+      Soulshift: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Regrowth",
+          selector: "Spirit.YouOwn"
+        }
+      ],
+      Haunt: [
+        {
+          relation: "triggers_on",
+          hook: "Dies",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Card.Self"
+        }
+      ],
+      Dethrone: [
+        {
+          relation: "triggers_on",
+          hook: "Attacks",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Ascend: [
+        {
+          relation: "produces",
+          hook: "CitysBlessing",
+          selector: "You"
+        }
+      ],
+      "Totem armor": [
+        {
+          relation: "replaces",
+          hook: "Destroy",
+          selector: "Creature.EnchantedBy"
+        }
+      ],
+      "Umbra armor": [
+        {
+          relation: "replaces",
+          hook: "Destroy",
+          selector: "Creature.EnchantedBy"
+        }
+      ],
+      Phasing: [
+        {
+          relation: "produces",
+          hook: "PhaseOut",
+          selector: "Card.Self"
+        }
+      ],
+      Amplify: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Sunburst: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Graft: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        },
+        {
+          relation: "triggers_on",
+          hook: "ETB",
+          selector: "Creature.Other"
+        }
+      ],
+      Reconfigure: [
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      "Level up": [
+        {
+          relation: "produces",
+          hook: "CounterPlaced",
+          selector: "Card.Self"
+        }
+      ],
+      Champion: [
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Creature.YouCtrl+Other"
+        }
+      ],
+      Ripple: [
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "Card.Self"
+        }
+      ],
+      Rebound: [
+        {
+          relation: "produces",
+          hook: "Exile",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "CastWithoutPaying",
+          selector: "Card.Self"
+        }
+      ],
+      Spectacle: [
+        {
+          relation: "consumes",
+          hook: "LifeLoss",
+          selector: "Opponent"
+        }
+      ],
+      Bloodrush: [
+        {
+          relation: "produces",
+          hook: "Discard",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Creature.attacking"
+        }
+      ],
+      Enlist: [
+        {
+          relation: "consumes",
+          hook: "Tap",
+          selector: "Creature.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "Pump",
+          selector: "Card.Self"
+        }
+      ],
+      Mutate: [
+        {
+          relation: "produces",
+          hook: "Mutate",
+          selector: "Creature.YouOwn+nonHuman"
+        }
+      ],
+      Bestow: [
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Creature"
+        }
+      ],
+      "Jump-start": [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        },
+        {
+          relation: "consumes",
+          hook: "Discard",
+          selector: "Card.YouOwn"
+        }
+      ],
+      Retrace: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        },
+        {
+          relation: "consumes",
+          hook: "Discard",
+          selector: "Land.YouOwn"
+        }
+      ],
+      Disturb: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Aftermath: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ],
+      Miracle: [
+        {
+          relation: "triggers_on",
+          hook: "CardDrawn",
+          selector: "Card.Self"
+        }
+      ],
+      Unleash: [
+        {
+          relation: "produces",
+          hook: "CounterPlaced:P1P1",
+          selector: "Card.Self"
+        }
+      ],
+      Increment: [
+        {
+          relation: "triggers_on",
+          hook: "SpellCast",
+          selector: "Card.YouCtrl"
+        },
+        {
+          relation: "produces",
+          hook: "CounterPlaced:P1P1",
+          selector: "Card.Self"
+        }
+      ],
+      Offering: [
+        {
+          relation: "consumes",
+          hook: "Sacrifice",
+          selector: "Creature.YouCtrl"
+        }
+      ],
+      Fortify: [
+        {
+          relation: "produces",
+          hook: "Attach",
+          selector: "Land.YouCtrl"
+        }
+      ],
+      Transfigure: [
+        {
+          relation: "consumes",
+          hook: "Sacrifice",
+          selector: "Card.Self"
+        },
+        {
+          relation: "produces",
+          hook: "Tutor",
+          selector: "Creature"
+        }
+      ],
+      "Web-slinging": [
+        {
+          relation: "consumes",
+          hook: "Bounce",
+          selector: "Creature.YouCtrl+tapped"
+        }
+      ],
+      Mayhem: [
+        {
+          relation: "modifies",
+          hook: "CastPermission",
+          selector: "Card.Self"
+        }
+      ]
+    },
+    structural: [
+      "Class",
+      "Chapter",
+      "etbCounter",
+      "ETBReplacement",
+      "Landwalk",
+      "Protection",
+      "Hexproof from"
+    ]
+  },
+  ruleSentences: [
+    {
+      pattern: "can.t attack or block",
+      hook: "AttackRestriction"
+    },
+    {
+      pattern: "can.t attack",
+      hook: "AttackRestriction"
+    },
+    {
+      pattern: "can.t block",
+      hook: "BlockRestriction"
+    },
+    {
+      pattern: "can only attack alone",
+      hook: "AttackRestriction"
+    },
+    {
+      pattern: "must be blocked",
+      hook: "ForceBlock"
+    },
+    {
+      pattern: "able to block",
+      hook: "ForceBlock"
+    },
+    {
+      pattern: "^Prevent all .*damage",
+      hook: "DamagePrevented"
+    },
+    {
+      pattern: "any number of cards named",
+      hook: "DeckRule"
+    },
+    {
+      pattern: "can be your commander",
+      hook: "CommanderRule"
+    },
+    {
+      pattern: "choose not to untap",
+      hook: "UntapRestriction"
+    },
+    {
+      pattern: "assign (its|CARDNAME.s) combat damage",
+      hook: "DamageRule"
+    },
+    {
+      pattern: "lethal damage",
+      hook: "DamageRule"
+    },
+    {
+      pattern: "roll a die|reroll",
+      hook: "DieRolled"
+    },
+    {
+      pattern: "cast CARDNAME from your library",
+      hook: "CastPermission"
+    },
+    {
+      pattern: "additional \\+1/\\+1 counters",
+      hook: "CounterPlaced:P1P1"
+    },
+    {
+      pattern: "Spend only colored mana",
+      hook: "ManaRule"
+    }
+  ]
+};
+
+// server/graph/closure.ts
+var MAPPING_VERSION = forge_map_default.version;
+var EFFECT_TO_HOOK = { CreateToken: "TokenCreated", Bounce: "Bounce", LandToBattlefield: "PutOntoBattlefield" };
+
+class Closure {
+  rules = [];
+  constructor() {
+    const y = closure_rules_default;
+    if (!Array.isArray(y?.event_implications) || !Array.isArray(y?.effect_closures))
+      throw new Error("closure_rules.yaml: missing event_implications or effect_closures");
+    this.rules.push(...y.event_implications);
+    for (const e of y.effect_closures)
+      this.rules.push({ from: EFFECT_TO_HOOK[e.effect] ?? e.effect, implies: e.triggers_event, condition: e.condition });
+    for (const z2 of forge_map_default.zones)
+      for (const h of z2.hooks.slice(1))
+        this.rules.push({ from: z2.hooks[0], implies: h });
+    for (const z2 of forge_map_default.zones)
+      for (const h of z2.creatureHooks ?? [])
+        for (const i of z2.hooks)
+          this.rules.push({ from: h, implies: i });
+    for (const x of forge_map_default.extraImplications)
+      this.rules.push({ from: x.from, implies: x.implies });
+  }
+  get ruleCount() {
+    return this.rules.length;
+  }
+  expand(hook, types = []) {
+    const lower = types.map((x) => x.toLowerCase());
+    const out = new Set([hook]);
+    const queue = [hook];
+    while (queue.length) {
+      const h = queue.shift();
+      const parent = h.includes(":") ? h.slice(0, h.indexOf(":")) : null;
+      const next = this.rules.filter((r) => r.from === h && (!r.condition?.target_type || r.condition.target_type.some((t) => lower.includes(t)))).map((r) => r.implies);
+      if (parent)
+        next.push(parent);
+      for (const n of next)
+        if (!out.has(n)) {
+          out.add(n);
+          queue.push(n);
+        }
+    }
+    return [...out].sort();
+  }
+}
+
+// server/graph/store-graph.ts
+function checkMappingVersion(db) {
+  const row = db.query("SELECT value FROM meta WHERE key = 'graph_mapping_version'").get();
+  if (row?.value !== MAPPING_VERSION) {
+    throw new Error(`the card store's graph was extracted under mapping ${row ? row.value : "(none recorded)"}, but this server's ` + `closure and zone tables are mapping ${MAPPING_VERSION}; rebuild the store from a corpus of mapping ${MAPPING_VERSION}`);
+  }
+}
+function subtypeFacts(db) {
+  const rows = db.query("SELECT subtype, creature_only, land_only FROM subtype_facts ORDER BY subtype").all();
+  if (!rows.length)
+    throw new Error("the card store has no subtype facts (subtype_facts is empty)");
+  return {
+    creatureOnly: new Set(rows.filter((r) => r.creature_only).map((r) => r.subtype)),
+    landOnly: new Set(rows.filter((r) => r.land_only).map((r) => r.subtype)),
+    known: new Set(rows.map((r) => r.subtype))
+  };
+}
+function buildGraph(db) {
+  checkMappingVersion(db);
+  const rows = db.query(`SELECT c.id, c.oracle_id, c.name, c.layout, c.type_line, c.mana_cost, c.mana_value, c.keywords, c.color_identity,
+      s.colors, s.card_faces, s.edhrec_rank, g.abilities
+    FROM card_graph g JOIN cards c ON c.id = g.card_id LEFT JOIN card_scryfall s ON s.card_id = c.id ORDER BY c.id`).all();
+  if (!rows.length)
+    throw new Error("the card store has no card graph (card_graph is empty)");
+  const infos = rows.map((r) => {
+    const abilities = JSON.parse(r.abilities);
+    if (!Array.isArray(abilities))
+      throw new Error(`card_graph row for ${r.name} is not an ability list`);
+    const graph = { name: r.name, oracleId: r.oracle_id, abilities };
+    return cardInfo(graph, {
+      id: r.id,
+      layout: r.layout,
+      typeLine: r.type_line,
+      manaCost: r.mana_cost,
+      manaValue: r.mana_value,
+      keywords: JSON.parse(r.keywords),
+      colorIdentity: [...r.color_identity],
+      colors: r.colors === null ? null : JSON.parse(r.colors),
+      faces: r.card_faces === null ? null : JSON.parse(r.card_faces),
+      edhrecRank: r.edhrec_rank
+    });
+  });
+  const index = new InteractionIndex(infos, new Closure, loadSupply(), subtypeFacts(db));
+  return { index, positionOf: new Map(infos.map((c, i) => [c.id, i])) };
+}
+var GRAPHS = new WeakMap;
+function graphOf(db) {
+  let g = GRAPHS.get(db);
+  if (!g)
+    GRAPHS.set(db, g = buildGraph(db));
+  return g;
+}
+
+// server/graph/strategy.ts
+var STRATEGY_DEFAULTS = { minShare: 0.15, minThemeDecks: 20, minCardDecks: 3, minLift: 1.25, minCards: 3, minCommanders: 10, top: 25, evidence: 12 };
+
+class UnknownThemeError extends ToolInputError {
+  theme;
+  closest;
+  constructor(theme, closest) {
+    super(`no theme named "${theme}" in the commander data${closest.length ? `; closest known themes: ${closest.join(", ")}` : ""}`);
+    this.theme = theme;
+    this.closest = closest;
+  }
+}
+
+class ThinThemeError2 extends ToolInputError {
+  theme;
+  commanders;
+  constructor(theme, commanders, detail) {
+    super(`the theme "${theme}" is known but has too little data to build a profile: ${detail}; ` + "name a few keystone cards of the deck instead and plan from those");
+    this.theme = theme;
+    this.commanders = commanders;
+  }
+}
+var PAGES = new WeakMap;
+function loadPages(db) {
+  const hit = PAGES.get(db);
+  if (hit)
+    return hit;
+  const rows = db.query(`SELECT cm.card_id, cm.edhrec_slug, cm.decks, c.name FROM commanders cm JOIN cards c ON c.id = cm.card_id
+    WHERE cm.decks > 0`).all();
+  rows.sort((a, b) => byteOrder(`${a.edhrec_slug}.json`, `${b.edhrec_slug}.json`));
+  const pages = rows.map((r) => ({ cardId: r.card_id, slug: r.edhrec_slug, name: r.name, decks: r.decks, tagMentions: 0, tags: new Map }));
+  if (!pages.length)
+    throw new Error("the card store has no commander data (commanders is empty)");
+  const byId = new Map(pages.map((p) => [p.cardId, p]));
+  for (const t of db.query(`SELECT ct.commander_id, t.slug, ct.decks FROM commander_themes ct JOIN themes t ON t.id = ct.theme_id
+    WHERE ct.decks > 0 ORDER BY ct.commander_id, t.slug`).all()) {
+    const p = byId.get(t.commander_id);
+    if (!p)
+      continue;
+    p.tags.set(t.slug, t.decks);
+    p.tagMentions += t.decks;
+  }
+  const themeNames = new Map(db.query("SELECT slug, name FROM themes ORDER BY slug").all().map((t) => [t.slug, t.name]));
+  const out = { pages, themeNames };
+  PAGES.set(db, out);
+  return out;
+}
+var share = (p, slug) => p.tagMentions ? (p.tags.get(slug) ?? 0) / p.tagMentions : 0;
+function qualifies(p, slug, minShare, minThemeDecks) {
+  return (p.tags.get(slug) ?? 0) >= minThemeDecks && share(p, slug) >= minShare;
+}
+function themeSlug(s) {
+  return s.toLowerCase().replace(/\+/g, " plus ").replace(/-/g, " minus ").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+function listThemes(db, opts = {}) {
+  const { pages, themeNames } = loadPages(db);
+  const minShare = opts.minShare ?? STRATEGY_DEFAULTS.minShare, minThemeDecks = opts.minThemeDecks ?? STRATEGY_DEFAULTS.minThemeDecks;
+  const minCommanders = opts.minCommanders ?? STRATEGY_DEFAULTS.minCommanders;
+  const by = new Map;
+  for (const p of pages)
+    for (const [slug, count] of p.tags) {
+      const t = by.get(slug) ?? by.set(slug, { slug, name: themeNames.get(slug) ?? slug, decks: 0, commanders: 0, qualifying: 0, usable: false }).get(slug);
+      t.decks += count;
+      t.commanders++;
+      if (qualifies(p, slug, minShare, minThemeDecks))
+        t.qualifying++;
+    }
+  for (const t of by.values())
+    t.usable = t.qualifying >= minCommanders;
+  return [...by.values()].sort((a, b) => b.decks - a.decks || byteOrder(a.slug, b.slug));
+}
+function closestThemes(db, theme) {
+  const want = themeSlug(theme);
+  const budget = Math.max(2, Math.floor(want.length / 3));
+  return listThemes(db).map((t) => ({ t, d: editDistance(want, t.slug), sub: !!want && (t.slug.includes(want) || want.includes(t.slug)) })).filter((x) => x.d <= budget || x.sub).sort((a, b) => a.d - b.d || Number(b.sub) - Number(a.sub) || b.t.decks - a.t.decks || byteOrder(a.t.name, b.t.name)).slice(0, 5).map((x) => x.t.name);
+}
+function resolveTheme(db, theme) {
+  const data = loadPages(db);
+  const want = themeSlug(theme);
+  if (!want)
+    throw new ToolInputError("a theme name is empty");
+  for (const [slug, name] of data.themeNames)
+    if (slug === want || themeSlug(name) === want || themeSlug(slug) === want)
+      return slug;
+  throw new UnknownThemeError(theme, closestThemes(db, theme));
+}
+function qualifyingCommanders(db, slug, opts = {}) {
+  const minShare = opts.minShare ?? STRATEGY_DEFAULTS.minShare, minThemeDecks = opts.minThemeDecks ?? STRATEGY_DEFAULTS.minThemeDecks;
+  return loadPages(db).pages.filter((p) => qualifies(p, slug, minShare, minThemeDecks)).map((page) => ({ page, share: share(page, slug) }));
+}
+function themeCommanders(db, theme, opts = {}) {
+  const o = { ...STRATEGY_DEFAULTS, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) };
+  const data = loadPages(db);
+  const slug = resolveTheme(db, theme);
+  const name = data.themeNames.get(slug) ?? slug;
+  const chosen = qualifyingCommanders(db, slug, o).map((c) => c.page);
+  if (chosen.length < Math.max(1, o.minCommanders)) {
+    const rule = `at least ${o.minShare} of their theme tags and ${o.minThemeDecks}+ decks`;
+    if (!chosen.length) {
+      const best = data.pages.filter((p) => p.tags.has(slug)).sort((a, b) => share(b, slug) - share(a, slug) || byteOrder(a.slug, b.slug))[0];
+      throw new ThinThemeError2(name, 0, `0 commanders play it as a main theme (${rule}; ${o.minCommanders} needed)` + (best ? `; the most devoted is ${best.name}, ${best.tags.get(slug)} decks, share ${share(best, slug).toFixed(2)}` : ""));
+    }
+    throw new ThinThemeError2(name, chosen.length, `only ${chosen.length} commander${chosen.length === 1 ? "" : "s"} play it as a main theme ` + `(${rule}; ${o.minCommanders} needed): ${chosen.map((p) => p.name).join("; ")}`);
+  }
+  return { slug, name, chosen: chosen.map((page) => ({ page, share: share(page, slug) })) };
+}
+var FACTS = new WeakMap;
+function cardFacts(graph) {
+  const hit = FACTS.get(graph);
+  if (hit)
+    return hit;
+  const idx = graph.index;
+  const keys = idx.cards.map((_, i) => {
+    const out = new Set;
+    for (const e of idx.emitsOf(i))
+      if (e.by !== "card" && !offProfile(e.hook))
+        out.add(`makes|${e.hook}`);
+    for (const l of idx.listensOf(i)) {
+      const hook = l.listener === "consumes" ? l.consumed ?? l.hook : l.hook;
+      if (!offProfile(hook))
+        out.add(`spends|${hook}`);
+    }
+    return [...out].sort();
+  });
+  FACTS.set(graph, keys);
+  return keys;
+}
+function strategyFacts(graph, cardId) {
+  const i = graph.positionOf.get(cardId);
+  return i === undefined ? [] : cardFacts(graph)[i];
+}
+var MINED = new WeakMap;
+function mined(db, graph, minCardDecks) {
+  const per = MINED.get(graph) ?? MINED.set(graph, new Map).get(graph);
+  const hit = per.get(minCardDecks);
+  if (hit)
+    return hit;
+  const { pages } = loadPages(db);
+  const facts = cardFacts(graph);
+  const rows = new Map;
+  for (const r of db.query(`SELECT commander_id, card_id, synergy FROM commander_cards WHERE synergy > 0 AND decks >= ?
+    ORDER BY commander_id, card_id`).all(minCardDecks)) {
+    const i = graph.positionOf.get(r.card_id);
+    if (i === undefined)
+      continue;
+    (rows.get(r.commander_id) ?? rows.set(r.commander_id, []).get(r.commander_id)).push([i, r.synergy]);
+  }
+  const weighted = new Map;
+  const baseline = new Map;
+  let baselineMass = 0;
+  for (const p of pages) {
+    const w = rows.get(p.cardId) ?? [];
+    for (const [i, s] of w) {
+      baselineMass += s;
+      for (const k of facts[i])
+        baseline.set(k, (baseline.get(k) ?? 0) + s);
+    }
+    weighted.set(p.slug, w);
+  }
+  const out = { weighted, baseline, baselineMass };
+  per.set(minCardDecks, out);
+  return out;
+}
+function strategyProfile(db, graph, theme, opts = {}) {
+  const o = { ...STRATEGY_DEFAULTS, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) };
+  if (!(o.minLift > 1))
+    throw new Error(`minLift must be above 1 (got ${o.minLift})`);
+  const { name, chosen } = themeCommanders(db, theme, o);
+  const m = mined(db, graph, o.minCardDecks);
+  const keys = cardFacts(graph);
+  const idx = graph.index;
+  const mass = new Map;
+  const byCard = new Map;
+  let total = 0;
+  for (const { page, share: a } of chosen) {
+    for (const [i, w] of m.weighted.get(page.slug) ?? []) {
+      const x = a * w;
+      total += x;
+      for (const k of keys[i]) {
+        mass.set(k, (mass.get(k) ?? 0) + x);
+        const cards = byCard.get(k) ?? byCard.set(k, new Map).get(k);
+        cards.set(i, (cards.get(i) ?? 0) + x);
+      }
+    }
+  }
+  if (!(total > 0))
+    throw new ThinThemeError2(name, chosen.length, `the ${chosen.length} commanders that play it have no positive-synergy cards in the card graph`);
+  const entries = [];
+  for (const [k, tMass] of [...mass.entries()].sort((a, b) => byteOrder(a[0], b[0]))) {
+    const t = tMass / total, b = (m.baseline.get(k) ?? 0) / m.baselineMass;
+    const lift = t / b;
+    if (!(lift >= o.minLift) || byCard.get(k).size < o.minCards)
+      continue;
+    const score = t * Math.log(lift);
+    const [side, hook] = k.split("|");
+    const top = [...byCard.get(k).entries()].sort((x, y) => y[1] - x[1] || byteOrder(idx.cards[x[0]].name, idx.cards[y[0]].name)).slice(0, o.evidence);
+    const kept = top.reduce((s, [, c]) => s + c, 0);
+    for (const [i, c] of top)
+      entries.push({ hook, side, weight: score * c / kept, card: idx.cards[i].name });
+  }
+  if (!entries.length)
+    throw new ThinThemeError2(name, chosen.length, `no hook carried by ${o.minCards}+ of its cards is at least ${o.minLift}x as common there as across all commanders`);
+  return normalizeProfile({ kind: "strategy", theme: name, commanders: chosen.length }, entries, { top: o.top, gaps: false });
+}
+
+// server/plan.ts
+var TOP_TAGS = 25;
+var resolvePlanInput = exports_external.object({
+  commander: exports_external.string().min(1),
+  plan: planShape
+}).strict();
+function unpack(blob) {
+  if (blob.byteLength % 6 !== 0)
+    throw new Error(`Tagger vector of ${blob.byteLength} bytes is not n float32 + n uint16`);
+  const n = blob.byteLength / 6;
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const out = [];
+  for (let i = 0;i < n; i++)
+    out.push([view.getUint16(n * 4 + i * 2, true), view.getFloat32(i * 4, true)]);
+  return out;
+}
+var TAGS = new WeakMap;
+function tagData(store) {
+  const hit = TAGS.get(store);
+  if (hit)
+    return hit;
+  const labels = new Map(store.db.query("SELECT id, label FROM tags").all().map((t) => [t.id, t.label]));
+  const sum = new Map;
+  let n = 0;
+  for (const r of store.db.query("SELECT tagger_deck FROM commanders WHERE decks > 0 ORDER BY card_id").iterate()) {
+    n++;
+    for (const [t, w] of unpack(r.tagger_deck))
+      sum.set(t, (sum.get(t) ?? 0) + w);
+  }
+  const meanDeck = new Map([...sum].map(([t, s]) => [t, s / n]));
+  const out = { labels, meanDeck };
+  TAGS.set(store, out);
+  return out;
+}
+function topTags(store, weights) {
+  const { labels } = tagData(store);
+  const max = Math.max(0, ...weights.values());
+  if (!(max > 0))
+    return [];
+  return [...weights].map(([t, w]) => ({ tag: labels.get(t) ?? String(t), weight: Math.round(w / max * 1000) / 1000 })).filter((t) => t.weight > 0).sort((a, b) => b.weight - a.weight || byteOrder(a.tag, b.tag)).slice(0, TOP_TAGS);
+}
+function themeTags(store, chosen) {
+  const { meanDeck } = tagData(store);
+  const q = store.db.query("SELECT tagger_deck FROM commanders WHERE card_id = ?");
+  const t = new Map;
+  let total = 0;
+  for (const { page, share: share2 } of chosen) {
+    total += share2;
+    const row = q.get(page.cardId);
+    for (const [tag, w] of row ? unpack(row.tagger_deck) : [])
+      t.set(tag, (t.get(tag) ?? 0) + share2 * w);
+  }
+  const scored = new Map;
+  for (const [tag, mass] of t) {
+    const tw = mass / total, b = meanDeck.get(tag) ?? 0;
+    if (!(b > 0))
+      continue;
+    const lift = tw / b;
+    if (lift >= STRATEGY_DEFAULTS.minLift)
+      scored.set(tag, tw * Math.log(lift));
+  }
+  return topTags(store, scored);
+}
+function cardTags(store, ids) {
+  const q = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?");
+  const sum = new Map;
+  ids.forEach((id, k) => {
+    const row = q.get(id);
+    for (const [tag, w] of row ? unpack(row.vector) : [])
+      sum.set(tag, (sum.get(tag) ?? 0) + (k === 0 ? COMMANDER_WEIGHT : 1) * w);
+  });
+  return topTags(store, sum);
+}
+var THEME_PROFILES = new WeakMap;
+function themeProfile(store, graph, theme) {
+  const slug = resolveTheme(store.db, theme);
+  const per = THEME_PROFILES.get(store) ?? THEME_PROFILES.set(store, new Map).get(store);
+  const hit = per.get(slug);
+  if (hit)
+    return hit;
+  const hooks = strategyProfile(store.db, graph, theme);
+  const out = { ...hooks, tags: themeTags(store, themeCommanders(store.db, theme).chosen) };
+  per.set(slug, out);
+  return out;
+}
+function priorityCard(store, name) {
+  const r = resolveCard(store, name);
+  const hit = store.names[r.id - 1].name;
+  if (r.matchedBy !== "exact" && r.matchedBy !== "face") {
+    throw new ToolInputError(`priority card "${name}" is not an exact card name; candidates: ${[hit, ...r.alternatives].join("; ")}`);
+  }
+  return { id: r.id, name: hit };
+}
+function cardsProfile(store, graph, commander, priorities) {
+  for (const c of [commander, ...priorities]) {
+    if (!graph.positionOf.has(c.id))
+      throw new ToolInputError(`${c.name} has no card graph data (its card script could not be read), so it cannot anchor a plan; name another card`);
+  }
+  let hooks;
+  try {
+    hooks = cardProfile(graph.index, { commander: commander.name, priorities: priorities.map((p) => p.name) });
+  } catch (e) {
+    if (e instanceof Error && !(e instanceof ToolInputError))
+      throw new ToolInputError(e.message);
+    throw e;
+  }
+  return { ...hooks, tags: cardTags(store, [commander.id, ...priorities.map((p) => p.id)]) };
+}
+function resolvePlan(store, input2) {
+  const f = resolvePlanInput.parse(input2);
+  const themes = f.plan.themes ?? [], names = f.plan.priorities ?? [], avoid = f.plan.avoid ?? [];
+  if (!themes.length && !names.length)
+    throw new ToolInputError("a plan needs at least one theme or one priority card");
+  const { card } = resolveCommander(store, f.commander);
+  const commander = { id: store.names.findIndex((n) => n.oracleId === card.id) + 1, name: card.name };
+  const graph = graphOf(store.db);
+  const priorities = names.map((n) => priorityCard(store, n));
+  const out = {
+    commander: { ...commander, colorIdentity: card.ci.join("") },
+    themes: themes.map((t) => themeProfile(store, graph, t)),
+    priorities: priorities.map((p) => p.name),
+    cards: priorities.length ? cardsProfile(store, graph, commander, priorities) : null,
+    avoid: avoid.map((t) => themeProfile(store, graph, t)),
+    inference: null
+  };
+  if (!themes.length) {
+    const { inference, profile } = inferTheme(store, { ...commander, ci: card.ci }, priorities, new Set(avoid.map((t) => resolveTheme(store.db, t))));
+    out.inference = inference;
+    if (profile)
+      out.themes = [profile];
+  }
+  return out;
+}
+var THEME_SCORERS = new WeakMap;
+function themeScorer(store, graph, profile) {
+  return THEME_SCORERS.get(profile) ?? THEME_SCORERS.set(profile, profileScorer(store, graph, [profile])).get(profile);
+}
+var THEME_COLORS = new WeakMap;
+function themeCommanderColors(store, slug) {
+  const per = THEME_COLORS.get(store) ?? THEME_COLORS.set(store, new Map).get(store);
+  const hit = per.get(slug);
+  if (hit)
+    return hit;
+  const out = qualifyingCommanders(store.db, slug).map(({ page }) => store.space.cards.get(store.names[page.cardId - 1].oracleId).ci);
+  per.set(slug, out);
+  return out;
+}
+function inferTheme(store, commander, priorities, avoid = new Set) {
+  const graph = graphOf(store.db);
+  const of = priorities.length;
+  const candidates = listThemes(store.db).filter((t) => t.usable && !avoid.has(t.slug)).filter((t) => !commander.ci.length || themeCommanderColors(store, t.slug).filter((ci) => ci.some((c) => commander.ci.includes(c))).length >= STRATEGY_DEFAULTS.minCommanders);
+  const measured = [];
+  for (const t of candidates) {
+    let profile;
+    try {
+      profile = themeProfile(store, graph, t.name);
+    } catch (e) {
+      if (e instanceof ThinThemeError)
+        continue;
+      throw e;
+    }
+    const score = themeScorer(store, graph, profile);
+    const scores = priorities.map((p) => score(p.id).score).sort((a, b) => a - b);
+    measured.push({ theme: t.name, profile, fit: Math.round(scores.reduce((s, x) => s + x, 0) / of * 1000) / 1000, fits: scores.filter((x) => x > 0).length });
+  }
+  measured.sort((a, b) => b.fit - a.fit || b.fits - a.fits || byteOrder(a.theme, b.theme));
+  const none = (note) => ({ inference: { theme: null, fit: 0, fits: 0, of, considered: measured.length, runnersUp: [], note }, profile: null });
+  if (!measured.length)
+    return none("no usable theme with data for the commander's colors is left to read the cards under");
+  const best = measured[0];
+  if (!(best.fit > 0))
+    return none(`none of the ${measured.length} usable themes with data for the commander's colors has a hook or tag any priority card carries`);
+  return {
+    inference: { theme: best.theme, fit: best.fit, fits: best.fits, of, considered: measured.length, runnersUp: measured.slice(1, 4).map((m) => ({ theme: m.theme, fit: m.fit })) },
+    profile: best.profile
+  };
+}
+var MAIN = 0.5;
+function profileScorer(store, graph, plan) {
+  const { labels } = tagData(store);
+  const profiles = plan.map((p) => ({
+    match: profileMatcher(graph.index, p),
+    tags: new Map(p.tags.filter((t) => t.weight > MAIN).map((t) => [t.tag, t.weight]))
+  }));
+  const vector = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?");
+  const memo2 = new Map;
+  return (id) => {
+    const hit = memo2.get(id);
+    if (hit)
+      return hit;
+    const i = graph.positionOf.get(id);
+    const row = vector.get(id);
+    const cardTagSet = new Set((row ? unpack(row.vector) : []).map(([t]) => labels.get(t)));
+    let best = { score: 0, hooks: [], tags: [] };
+    for (const p of profiles) {
+      const fit = i === undefined ? { score: 0, counted: [] } : profileFit(p.match(i));
+      const tags = [...p.tags].filter(([t]) => cardTagSet.has(t));
+      const score = Math.round((fit.score + tags.reduce((s, [, w]) => s + w, 0)) * 1000) / 1000;
+      if (score > best.score)
+        best = { score, hooks: [...new Set(fit.counted.map((c) => `${c.side} ${hookWords(c.hook)}`))], tags: tags.map(([t]) => t) };
+    }
+    memo2.set(id, best);
+    return best;
+  };
+}
+function planScorer(store, plan) {
+  const graph = graphOf(store.db);
+  const score = profileScorer(store, graph, [...plan.themes, ...plan.cards ? [plan.cards] : []]);
+  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  const priority = new Set(plan.cards ? plan.priorities.map((name) => store.names.find((n) => n.name === name).id) : []);
+  const lifted = new Map;
+  return (oracleId) => {
+    const id = idOf.get(oracleId);
+    if (id === undefined)
+      throw new Error(`planScorer: no card with oracle id ${oracleId} in the store`);
+    if (!priority.has(id))
+      return score(id);
+    let hit = lifted.get(id);
+    if (!hit) {
+      const f = score(id);
+      lifted.set(id, hit = { ...f, score: Math.max(f.score, 1), priority: true });
+    }
+    return hit;
+  };
+}
+var themeName = (p) => p.source.kind === "strategy" ? p.source.theme : p.source.commander;
+function planEcho(resolved) {
+  return {
+    themes: resolved.inference ? [] : resolved.themes.map(themeName),
+    priorities: resolved.priorities,
+    avoid: resolved.avoid.map(themeName),
+    ...resolved.inference ? { inferred: resolved.inference } : {}
+  };
+}
+function strongestTags(store, cardId, n) {
+  const row = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(cardId);
+  const { labels } = tagData(store);
+  return (row ? unpack(row.vector) : []).slice(0, n).map(([t]) => labels.get(t) ?? String(t));
+}
+function planContext(store, commander, plan) {
+  if (plan === undefined)
+    return null;
+  const resolved = resolvePlan(store, { commander, plan });
+  return { plan: planEcho(resolved), fit: planScorer(store, resolved) };
 }
 
 // server/paths.ts
@@ -35105,11 +39645,11 @@ function compileRoleMap(map3, tags) {
     throw new Error(`role map does not compile:
   ${problems.join(`
   `)}`);
-  const cardTags = new Map;
+  const cardTags2 = new Map;
   for (const t of tags)
     for (const g of t.taggings)
-      push(cardTags, g.oracle_id, t.id);
-  return { roleNames: map3.roles.map((r) => r.role), gives, label: new Map(tags.map((t) => [t.id, t.label])), cardTags };
+      push(cardTags2, g.oracle_id, t.id);
+  return { roleNames: map3.roles.map((r) => r.role), gives, label: new Map(tags.map((t) => [t.id, t.label])), cardTags: cardTags2 };
 }
 function rolesOf(index, oracleId) {
   const evidence = new Map, strong = new Set;
@@ -35152,7 +39692,6 @@ function roleSheet(index, entries) {
       counts[r.role] += c.qty;
   return { cards, unroled: cards.filter((c) => !c.roles.length).map((c) => c.name), counts, lands, unresolved };
 }
-
 // server/deck-tools.ts
 var ROLE_MAP_PATH = new URL("./roles.json", import.meta.url).pathname;
 function storeTagRecords(db) {
@@ -35201,9 +39740,6 @@ function openStore(path = DB_PATH, roleMapPath = ROLE_MAP_PATH) {
     roles: compileRoleMap(map3, storeTagRecords(db))
   };
 }
-
-class ToolInputError extends Error {
-}
 function editDistance(a, b) {
   let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
   for (let i = 1;i <= a.length; i++) {
@@ -35225,6 +39761,7 @@ function known(what, value, map3, spell) {
   const near = closeTo(value, [...map3.values()].map(spell));
   throw new ToolInputError(`unknown ${what} "${value}"${near.length ? `; close matches: ${near.join(", ")}` : ""}`);
 }
+var COLOR_LETTERS = ["W", "U", "B", "R", "G"];
 var range = (what) => exports_external.object({ min: exports_external.number().optional(), max: exports_external.number().optional() }).strict().describe(`${what} range, both ends inclusive`);
 var findCardsShape = {
   colorIdentity: exports_external.string().regex(/^(C|c|[WUBRGwubrg]{1,5})$/).optional().describe('Color identity the cards must fit inside, as WUBRG letters (e.g. "U", "UB"; "C" = colorless only)'),
@@ -35235,6 +39772,11 @@ var findCardsShape = {
   keywords: exports_external.array(exports_external.string().min(1)).optional().describe('Keywords the card must all have (e.g. ["Flying"])'),
   power: range("Power (cards with * in their power never match)").optional(),
   toughness: range("Toughness (cards with * in their toughness never match)").optional(),
+  manaSymbols: exports_external.array(exports_external.object({
+    color: exports_external.enum(COLOR_LETTERS).describe("W, U, B, R or G"),
+    min: exports_external.number().int().min(1).max(20).describe("At least this many symbols of that color")
+  }).strict()).optional().describe("Minimum count of one color's mana symbols in the card's mana cost, one entry per color, all must hold " + '(e.g. [{"color": "U", "min": 2}] = two or more blue symbols). A hybrid or Phyrexian symbol counts once toward each color it ' + "can be paid with ({U}, {U/R}, {2/U}, {U/P} and {G/U/P} all count 1 toward blue), generic and colorless symbols count toward none. " + "Reads the front face's cost, so Fire // Ice is {1}{R}; lands have no cost and never match."),
+  rulesText: exports_external.array(exports_external.string().min(1)).optional().describe("Words or phrases the card's rules text must all contain, typed as they would print " + '(e.g. ["noncreature spell"], or ["whenever you cast", "draw a card"] for both). Capitals are ignored. A part of a word matches too ' + '("draw" also finds "draws" and "drawn"), so write the longer phrase when you want fewer cards. Mana and counter symbols are ' + 'written as printed ("{U}", "+1/+1 counter"). The text of every face of a two-faced card counts. Each entry is matched as one ' + "piece of text, so an entry never spans two abilities (abilities sit on separate lines); put separate ideas in separate entries."),
   maxPrice: exports_external.number().nonnegative().optional().describe("Scryfall USD price ceiling; unpriced cards never match"),
   land: exports_external.boolean().optional().describe("true = lands only, false = nonland only; omit for both"),
   name: exports_external.string().min(1).optional().describe("Part of the card name (case, accents and punctuation ignored)"),
@@ -35294,6 +39836,10 @@ function findCards(store, input2) {
     add(numeric("toughness"));
     between("CAST(c.toughness AS INTEGER)", f.toughness);
   }
+  for (const s of f.manaSymbols ?? [])
+    add("(length(c.mana_cost) - length(replace(c.mana_cost, ?, ''))) >= ?", s.color, s.min);
+  for (const w of f.rulesText ?? [])
+    add("instr(lower(c.oracle_text), ?) > 0", w.replace(/[A-Z]/g, (ch) => ch.toLowerCase()));
   if (f.maxPrice !== undefined)
     add("c.usd_price IS NOT NULL AND c.usd_price <= ?", f.maxPrice);
   if (f.land !== undefined)
@@ -35374,14 +39920,69 @@ function cardDetails(store, input2) {
     }
   };
 }
+var LOOKUP_MAX = 50;
+var cardLookupNames = exports_external.array(exports_external.string()).min(1).max(LOOKUP_MAX).optional().describe(`Up to ${LOOKUP_MAX} card names, looked up together; give this or \`name\`. Each name resolves as \`name\` does`);
+var noCard = (note) => ({ name: null, manaCost: null, manaValue: null, typeLine: null, power: null, toughness: null, keywords: null, oracleText: null, note });
+function lookupCards(store, names) {
+  const q = store.db.query("SELECT * FROM cards WHERE id = ?");
+  return names.map((asked) => {
+    let hit;
+    try {
+      hit = resolveCard(store, asked);
+    } catch (e) {
+      if (e instanceof ToolInputError)
+        return noCard(e.message);
+      throw e;
+    }
+    const first = store.names[hit.id - 1];
+    const rivals = hit.matchedBy !== "fuzzy" ? hit.alternatives : hit.alternatives.filter((a) => editDistance(normName(asked), normName(a)) === editDistance(normName(asked), first.norm));
+    if (rivals.length)
+      return noCard(`"${asked}" fits several cards, so none was picked: ${[first.name, ...rivals].join("; ")}`);
+    const r = q.get(hit.id);
+    if (!r)
+      throw new Error(`card store is inconsistent: id ${hit.id} resolved but has no row`);
+    return {
+      name: r.name,
+      manaCost: r.mana_cost,
+      manaValue: r.mana_value,
+      typeLine: r.type_line,
+      power: r.power,
+      toughness: r.toughness,
+      keywords: JSON.parse(r.keywords),
+      oracleText: r.oracle_text,
+      note: hit.matchedBy === "exact" || hit.matchedBy === "face" ? null : `"${asked}" is not an exact name; read as this card`
+    };
+  });
+}
 var CURVE = ["0", "1", "2", "3", "4", "5", "6", "7+"];
 var COLORS = ["W", "U", "B", "R", "G"];
 var deckStatsShape = {
   commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored); use the card tool to look a partial name up"),
   deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
-  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile")
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid); with it, planFit says which cards fit it")
 };
 var deckStatsInput = exports_external.object(deckStatsShape).strict();
+var STORE_IDS = new WeakMap;
+function storeIdOf(store, oracleId) {
+  let m = STORE_IDS.get(store);
+  if (!m)
+    STORE_IDS.set(store, m = new Map(store.names.map((n) => [n.oracleId, n.id])));
+  const id = m.get(oracleId);
+  if (id === undefined)
+    throw new Error(`card store is inconsistent: oracle id ${oracleId} has no store id`);
+  return id;
+}
+function cardFacts2(store, commander, entries) {
+  const ids = new Set([commander.id, ...entries.flatMap((e) => e.card ? [e.card.id] : [])]);
+  const q = store.db.query("SELECT name, mana_value, type_line, power, toughness, oracle_text FROM cards WHERE id = ?");
+  return [...ids].map((oracleId) => {
+    const r = q.get(storeIdOf(store, oracleId));
+    if (!r)
+      throw new Error(`card store is inconsistent: oracle id ${oracleId} resolved but has no row`);
+    return { name: r.name, manaValue: r.mana_value, typeLine: r.type_line, power: r.power, toughness: r.toughness, oracleText: r.oracle_text };
+  }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
 var deckPath = (deckFile) => isAbsolute(deckFile) ? deckFile : join2(DECK_ROOT, deckFile);
 function readDeck(input2) {
   if (input2.deckFile === undefined === (input2.decklist === undefined))
@@ -35419,7 +40020,7 @@ function unresolvedLines(store, misses) {
     return { line: e.line, text: e.text, closeMatches };
   });
 }
-function deckNumbers(store, commander, deckEntries) {
+function deckNumbers(store, commander, deckEntries, plan = null) {
   const entries = deckEntries.filter((e) => !!e.card);
   const nonland = entries.filter((e) => !e.card.land);
   const copies = (es) => es.reduce((n2, e) => n2 + e.qty, 0);
@@ -35437,9 +40038,8 @@ function deckNumbers(store, commander, deckEntries) {
   }
   const n = copies(nonland);
   const sheet = roleSheet(store.roles, deckEntries);
-  const plan = readPlan(commander);
   const scored = [...new Map(nonland.filter((e) => e.card.id !== commander.id).map((e) => [e.card.id, e.card])).values()];
-  const offPlan = scored.filter((c) => planScore(c, plan).score === 0).map((c) => c.name);
+  const offPlan = plan ? scored.filter((c) => plan.fit(c.id).score === 0).map((c) => c.name) : [];
   const distinct = [...new Map(entries.map((e) => [e.card.id, e.card])).values()];
   const offIdentity = distinct.filter((c) => !fitsIdentity(c, commander.ci)).map((c) => c.name);
   return {
@@ -35452,7 +40052,7 @@ function deckNumbers(store, commander, deckEntries) {
     roleCounts: sheet.counts,
     unroled: sheet.unroled,
     pipLoad,
-    planFit: { plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan },
+    planFit: plan ? { plan: plan.plan, onPlan: scored.length - offPlan.length, of: scored.length, offPlan } : null,
     offIdentity
   };
 }
@@ -35461,9 +40061,11 @@ function deckStats(store, input2) {
   const text = readDeck(f);
   const { card: commander, matchedBy } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
+  const plan = planContext(store, commander.name, f.plan);
   return {
     commander: { name: commander.name, colorIdentity: commander.ci.join(""), matchedBy },
-    ...deckNumbers(store, commander, deck.entries),
+    ...deckNumbers(store, commander, deck.entries, plan),
+    cardFacts: cardFacts2(store, commander, deck.entries),
     unresolved: unresolvedLines(store, deck.unresolved)
   };
 }
@@ -35541,58 +40143,668 @@ function findTags(store, input2) {
   };
 }
 
-// server/store.ts
-import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "fs";
-import { dirname } from "path";
-var MANIFEST_PATH = process.env.MTG_DECK_STORE_MANIFEST ?? new URL("./store.json", import.meta.url).pathname;
-var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-var stampPath = (dbPath) => `${dbPath}.sha256`;
-function readManifest(path = MANIFEST_PATH) {
-  const m = JSON.parse(readFileSync2(path, "utf8"));
-  for (const k of ["version", "url", "gzSha256", "dbSha256"]) {
-    if (typeof m[k] !== "string" || !m[k])
-      throw new Error(`${path}: missing "${k}"`);
+// server/commander.ts
+var THEME_LIMIT = 10;
+var TAG_LIMIT = 12;
+var MATCH_THEMES = 5;
+var NAMED = 5;
+var { minShare: MIN_SHARE, minCardDecks: MIN_CARD_DECKS, minLift: MIN_LIFT, minCommanders: MIN_COMMANDERS } = STRATEGY_DEFAULTS;
+var commanderProfileShape = {
+  commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
+  deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory; with it (or `decklist`) the answer also says how strongly the deck matches each top theme"),
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile, or neither"),
+  themeLimit: exports_external.number().int().min(1).max(500).optional().describe(`How many themes to list, strongest first (default ${THEME_LIMIT}); the rest come back as one summed \`otherThemes\` entry`),
+  tagLimit: exports_external.number().int().min(1).max(100).optional().describe(`How many Tagger Deck tags to list, strongest first (default ${TAG_LIMIT})`),
+  matchThemes: exports_external.number().int().min(1).max(20).optional().describe(`With a decklist, how many of the strongest themes to match it against (default ${MATCH_THEMES})`)
+};
+var input2 = exports_external.object(commanderProfileShape).strict();
+var NOTES = {
+  "no page": () => "this commander has no EDHREC page, so the profile comes from its own card tags",
+  thin: (decks) => `its EDHREC page covers ${decks} decks, too few to say how it is usually played, so the profile comes from its own card tags`,
+  "no kept tags": () => "the cards on its EDHREC page carry no usable tags, so the profile comes from its own card tags"
+};
+var round = (x, places) => Math.round(x * 10 ** places) / 10 ** places;
+var byteCmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function unpackVector(blob) {
+  const n = blob.byteLength / 6;
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  return Array.from({ length: n }, (_, i) => ({ weight: view.getFloat32(i * 4, true), tagId: view.getUint16(n * 4 + i * 2, true) }));
+}
+var mined2 = new WeakMap;
+function minedFor(store) {
+  const hit = mined2.get(store.db);
+  if (hit)
+    return hit;
+  const baseline = new Map;
+  let baselineMass = 0;
+  for (const r of store.db.query("SELECT card_id AS id, SUM(synergy) AS s FROM commander_cards WHERE synergy > 0 AND decks >= ? GROUP BY card_id ORDER BY card_id").all(MIN_CARD_DECKS)) {
+    baseline.set(r.id, r.s);
+    baselineMass += r.s;
   }
-  return m;
+  const out = { baseline, baselineMass, profiles: new Map };
+  mined2.set(store.db, out);
+  return out;
 }
-function storeIsCurrent(manifest, dbPath = DB_PATH) {
-  return existsSync(dbPath) && existsSync(stampPath(dbPath)) && readFileSync2(stampPath(dbPath), "utf8").trim() === manifest.dbSha256;
-}
-async function installStore(manifest, dbPath = DB_PATH, fetchImpl = fetch) {
-  const res = await fetchImpl(manifest.url, { redirect: "follow" });
-  if (!res.ok)
-    throw new Error(`card data download failed: HTTP ${res.status} from ${manifest.url}`);
-  const gz = new Uint8Array(await res.arrayBuffer());
-  if (sha256(gz) !== manifest.gzSha256)
-    throw new Error(`card data download failed its checksum (${manifest.url})`);
-  const db = Bun.gunzipSync(gz);
-  if (sha256(db) !== manifest.dbSha256)
-    throw new Error("card data unpacked to the wrong checksum");
-  mkdirSync(dirname(dbPath), { recursive: true });
-  const tmp = `${dbPath}.download`;
-  writeFileSync(tmp, db);
-  renameSync(tmp, dbPath);
-  writeFileSync(stampPath(dbPath), `${manifest.dbSha256}
-`);
-}
-async function ensureStore(dbPath = DB_PATH) {
-  if (!IN_PLUGIN || process.env.MTG_DECK_DB) {
-    if (!existsSync(dbPath))
-      throw new Error(`no card store at ${dbPath}`);
-    return;
+function themeProfile2(store, themeId) {
+  const m = minedFor(store);
+  const hit = m.profiles.get(themeId);
+  if (hit)
+    return hit;
+  const slug = store.db.query("SELECT slug FROM themes WHERE id = ?").get(themeId)?.slug;
+  if (slug === undefined)
+    throw new Error(`card store is inconsistent: theme id ${themeId} has no row`);
+  const chosen = qualifyingCommanders(store.db, slug).map((q) => ({ id: q.page.cardId, share: q.share })).sort((a, b) => a.id - b.id);
+  const weights = new Map;
+  if (chosen.length >= MIN_COMMANDERS) {
+    const mass = new Map;
+    let total = 0;
+    const cards = store.db.query("SELECT card_id AS id, synergy FROM commander_cards WHERE commander_id = ? AND synergy > 0 AND decks >= ? ORDER BY card_id");
+    for (const c of chosen)
+      for (const r of cards.all(c.id, MIN_CARD_DECKS)) {
+        const x = c.share * r.synergy;
+        mass.set(r.id, (mass.get(r.id) ?? 0) + x);
+        total += x;
+      }
+    for (const [id, x] of [...mass].sort((a, b) => a[0] - b[0])) {
+      const t = x / total, b = m.baseline.get(id) / m.baselineMass;
+      if (t / b >= MIN_LIFT)
+        weights.set(id, t * Math.log(t / b));
+    }
   }
-  const manifest = readManifest();
-  if (storeIsCurrent(manifest, dbPath))
-    return;
-  rmSync(stampPath(dbPath), { force: true });
-  await installStore(manifest, dbPath);
+  const out = { weights, commanders: chosen.length };
+  m.profiles.set(themeId, out);
+  return out;
 }
-if (false) {}
+function commanderProfile(store, raw) {
+  const f = input2.parse(raw);
+  if (f.deckFile !== undefined && f.decklist !== undefined)
+    throw new ToolInputError("give deckFile or decklist, not both");
+  const { card } = resolveCommander(store, f.commander);
+  const id = store.names.find((n) => n.oracleId === card.id).id;
+  const page = store.db.query("SELECT decks, tagger_deck, tagger_deck_fallback FROM commanders WHERE card_id = ?").get(id);
+  const reason = !page ? "no page" : page.tagger_deck_fallback ? page.tagger_deck_fallback : null;
+  const themed = reason !== "no page" && reason !== "thin";
+  const rows = !themed ? [] : store.db.query("SELECT t.id AS themeId, t.name AS theme, t.slug, ct.decks FROM commander_themes ct JOIN themes t ON t.id = ct.theme_id WHERE ct.commander_id = ? ORDER BY ct.decks DESC, t.slug").all(id);
+  const mentions = rows.reduce((n, r) => n + r.decks, 0);
+  const share2 = (n) => mentions ? n / mentions : 0;
+  const shown = rows.slice(0, f.themeLimit ?? THEME_LIMIT);
+  const rest = rows.slice(shown.length);
+  const own2 = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(id);
+  const deckVector = page && !page.tagger_deck_fallback ? page.tagger_deck : null;
+  const vector = deckVector ?? own2?.vector;
+  const labels = new Map(store.db.query("SELECT id, label FROM tags").all().map((t) => [t.id, t.label]));
+  const tags = (vector ? unpackVector(vector) : []).slice(0, f.tagLimit ?? TAG_LIMIT).map((v) => ({ tag: labels.get(v.tagId), weight: round(v.weight, 5) }));
+  const out = {
+    commander: { name: card.name, colorIdentity: card.ci.join("") },
+    decks: page?.decks ?? null,
+    themeMentions: mentions,
+    themes: shown.map(({ themeId: _, ...r }) => ({ ...r, share: round(share2(r.decks), 6) })),
+    otherThemes: rest.length ? { count: rest.length, decks: rest.reduce((n, r) => n + r.decks, 0), share: round(share2(rest.reduce((n, r) => n + r.decks, 0)), 6) } : null,
+    taggerDeck: { source: deckVector ? "deck" : "card", tags },
+    fallback: reason ? { reason, note: NOTES[reason](page?.decks ?? 0) } : null
+  };
+  if (f.deckFile !== undefined || f.decklist !== undefined) {
+    const deck = parseDecklist(store.space, readDeck(f));
+    const held = new Set(deck.entries.filter((e) => e.card && e.card.id !== card.id).map((e) => store.names.find((n) => n.oracleId === e.card.id).id));
+    const storeId = new Map(store.names.map((n) => [n.id, n]));
+    const themes = rows.slice(0, f.matchThemes ?? MATCH_THEMES).map((r) => {
+      const prof = themeProfile2(store, r.themeId);
+      const base = { theme: r.theme, slug: r.slug, share: round(share2(r.decks), 6) };
+      if (prof.commanders < MIN_COMMANDERS) {
+        return { ...base, match: null, held: [], missing: [], note: `only ${prof.commanders} ${prof.commanders === 1 ? "commander plays" : "commanders play"} ${r.theme} as at least ${MIN_SHARE * 100}% of their themes, too few commanders to say what the theme looks like` };
+      }
+      const usable = [...prof.weights].filter(([cid]) => cid !== id && fitsIdentity(store.space.cards.get(storeId.get(cid).oracleId), card.ci));
+      const sorted = usable.sort((a, b) => b[1] - a[1] || byteCmp(storeId.get(a[0]).name, storeId.get(b[0]).name));
+      const total = sorted.reduce((s, [, w]) => s + w, 0);
+      const heldW = sorted.filter(([cid]) => held.has(cid));
+      return {
+        ...base,
+        match: total ? round(heldW.reduce((s, [, w]) => s + w, 0) / total, 6) : 0,
+        held: heldW.slice(0, NAMED).map(([cid]) => storeId.get(cid).name),
+        missing: sorted.filter(([cid]) => !held.has(cid)).slice(0, NAMED).map(([cid]) => storeId.get(cid).name)
+      };
+    });
+    themes.sort((a, b) => (b.match ?? -1) - (a.match ?? -1) || b.share - a.share || byteCmp(a.slug, b.slug));
+    out.deckMatch = {
+      deckCards: held.size,
+      unresolved: unresolvedLines(store, deck.unresolved),
+      strongest: themes[0]?.match != null ? themes[0].theme : null,
+      themes
+    };
+  }
+  return out;
+}
+
+// server/compact.ts
+import { basename } from "path";
+var detailFlag = exports_external.boolean().optional().describe("true = the full result, every field (see the tool description for what the default leaves out)");
+function table(columns, records) {
+  return { columns: [...columns], rows: records.map((r) => columns.map((c) => r[c] === undefined ? null : r[c])) };
+}
+var FOUND_COLUMNS = ["name", "manaCost", "manaValue", "typeLine", "colorIdentity", "power", "toughness", "keywords", "usd"];
+function compactFindCards(r) {
+  const columns = [...FOUND_COLUMNS, ...r.cards.some((c) => c.oracleText !== undefined) ? ["oracleText"] : []];
+  return { total: r.total, offset: r.offset, cards: table(columns, r.cards) };
+}
+function compactCard(r) {
+  const c = r.card;
+  return {
+    matchedBy: r.matchedBy,
+    ...r.alternatives.length && { alternatives: r.alternatives },
+    card: {
+      name: c.name,
+      manaCost: c.manaCost,
+      manaValue: c.manaValue,
+      typeLine: c.typeLine,
+      oracleText: c.oracleText,
+      ...c.power !== null && { power: c.power, toughness: c.toughness },
+      ...c.keywords.length && { keywords: c.keywords },
+      colorIdentity: c.colorIdentity,
+      usd: c.usd,
+      tags: c.tags.map((t) => t.label),
+      roles: c.roles.map((h) => h.role),
+      ...c.incidentalRoles.length && { incidentalRoles: c.incidentalRoles.map((h) => h.role) }
+    }
+  };
+}
+var LOOKUP_COLUMNS = ["name", "manaCost", "manaValue", "typeLine", "power", "toughness", "keywords", "oracleText", "note"];
+var cardLookupTable = (cards) => ({ cards: table(LOOKUP_COLUMNS, cards) });
+var FACT_COLUMNS = ["name", "manaValue", "typeLine", "power", "toughness", "oracleText"];
+var cardFactsTable = (facts) => table(FACT_COLUMNS, facts);
+function compactDeckStats(r, opts) {
+  const { cardFacts: cardFacts3, ...rest } = r;
+  return opts.cardFacts ? { ...rest, cardFacts: cardFactsTable(cardFacts3) } : rest;
+}
+function groupBy(items, key, item) {
+  const groups = new Map;
+  for (const t of items) {
+    const k = key(t);
+    const g = groups.get(k);
+    if (g)
+      g.push(item(t));
+    else
+      groups.set(k, [item(t)]);
+  }
+  return [...groups].map(([k, v]) => ({ key: k, items: v }));
+}
+function compactDiagnosis(r, opts) {
+  return {
+    commander: r.commander,
+    plan: r.plan,
+    engineGaps: r.engineGaps,
+    roles: r.roles.map(({ basis: _, ...role }) => role),
+    targetBasis: Object.fromEntries(groupBy(r.roles, (x) => x.basis, (x) => x.role).map((g) => [g.key, g.items])),
+    over: r.over.map((o) => ({ role: o.role, trims: o.trims })),
+    under: r.under.map((u) => u.role),
+    offPlan: groupBy(r.offPlan, (o) => o.reason, (o) => ({ name: o.name, roles: o.roles, ...o.fitsAvoided.length && { fitsAvoided: o.fitsAvoided } })).map((g) => ({ reason: g.key, cards: g.items })),
+    doingLeast: r.doingLeast,
+    unread: groupBy(r.unread, (u) => u.reason, (u) => u.name).map((g) => ({ reason: g.key, cards: g.items })),
+    cards: table(["name", "partners", "bucket", "reason"], r.cards),
+    lowPartners: r.lowPartners,
+    noGraphData: r.noGraphData,
+    ...opts.cardFacts && { cardFacts: cardFactsTable(r.cardFacts) },
+    unresolved: r.unresolved
+  };
+}
+var deltaOf = (d) => ({ averageManaValue: d.averageManaValue, onPlan: d.onPlan, roleCounts: d.roleCounts });
+var linkWords = (links) => links.length ? links.map((l) => [l.feeds.length && `feeds ${l.feeds.length}`, l.fedBy.length && `fed by ${l.fedBy.length}`].filter(Boolean).join(" and ") + ` on ${l.on}`).join("; ") : null;
+var SHORTLIST_COLUMNS = [
+  "name",
+  "manaValue",
+  "usd",
+  "typeLine",
+  "roles",
+  "labels",
+  "commanderSynergy",
+  "taggerFit",
+  "edhrecRank",
+  "partners",
+  "planPartners",
+  "planFit",
+  "priorityLinks",
+  "feeds",
+  "links",
+  "genericLinks",
+  "noLinks",
+  "delta",
+  "after",
+  "planGain"
+];
+function compactShortlist(r) {
+  const rows = r.cards.map((c) => ({
+    name: c.name,
+    manaValue: c.manaValue,
+    usd: c.usd,
+    typeLine: c.typeLine,
+    roles: c.roles,
+    labels: c.labels,
+    commanderSynergy: c.evidence.commanderSynergy,
+    taggerFit: c.evidence.taggerFit,
+    edhrecRank: c.evidence.edhrecRank,
+    partners: c.evidence.partners,
+    planPartners: c.evidence.planPartners,
+    planFit: c.evidence.planFit.score,
+    priorityLinks: c.evidence.priorityLinks,
+    feeds: c.evidence.feeds,
+    links: linkWords(c.links),
+    genericLinks: c.genericLinks,
+    noLinks: c.noLinks,
+    delta: deltaOf(c.delta),
+    after: c.after,
+    planGain: c.planGain
+  }));
+  const swap = r.out !== null;
+  const columns = SHORTLIST_COLUMNS.filter((col) => col === "after" || col === "planGain" ? swap : col === "feeds" || col === "noLinks" ? rows.some((x) => x[col] !== undefined) : true);
+  return { ...r, cards: table(columns, rows) };
+}
+function compactCandidate(c) {
+  return {
+    out: c.out,
+    in: c.in,
+    reason: c.reason,
+    after: { averageManaValue: c.after.averageManaValue, onPlan: c.after.onPlan },
+    ...Object.keys(c.delta.roleCounts).length && { delta: { roleCounts: c.delta.roleCounts } },
+    ...c.roleDrops.length && { roleDrops: c.roleDrops },
+    ...c.rolesBelowTarget.length && { rolesBelowTarget: c.rolesBelowTarget }
+  };
+}
+var compactSwapCandidates = (r) => ({ ...r, candidates: r.candidates.map(compactCandidate) });
+var RECEIPT_MAX = 300;
+function acceptReceipt(r) {
+  const changed = [];
+  if (r.before.averageManaValue !== r.after.averageManaValue)
+    changed.push(["averageManaValue", [r.before.averageManaValue, r.after.averageManaValue]]);
+  for (const role of Object.keys(r.after.roleCounts)) {
+    const was = r.before.roleCounts[role] ?? 0, is = r.after.roleCounts[role];
+    if (was !== is)
+      changed.push([role, [was, is]]);
+  }
+  const off = r.offColor;
+  const build = (file3, n, names) => ({
+    verdict: "accept",
+    file: file3,
+    changeLog: r.changeLog,
+    changed: Object.fromEntries(changed.slice(0, n)),
+    ...off && { offColor: { count: off.length, names: off.slice(0, names) } },
+    ...r.oldCommander && { oldCommander: r.oldCommander },
+    ...r.before.cards !== r.after.cards && r.oldCommander && { cards: [r.before.cards, r.after.cards] }
+  });
+  const size = (x) => JSON.stringify(x).length;
+  const file2 = basename(r.deckFile);
+  const allNames = off?.length ?? 0;
+  for (let n = changed.length;n >= 0; n--)
+    if (size(build(file2, n, allNames)) <= RECEIPT_MAX)
+      return build(file2, n, allNames);
+  for (let names = allNames - 1;names >= 0; names--)
+    if (size(build(file2, 0, names)) <= RECEIPT_MAX)
+      return build(file2, 0, names);
+  const chars = [...file2];
+  for (let keep = chars.length - 1;keep >= 1; keep--) {
+    const short = build(`\u2026${chars.slice(-keep).join("")}`, 0, 0);
+    if (size(short) <= RECEIPT_MAX)
+      return short;
+  }
+  throw new Error(`accept receipt: the change-log line alone is over ${RECEIPT_MAX} characters: ${r.changeLog}`);
+}
+function rejectReceipt(r) {
+  const l = r.label;
+  return { verdict: "reject", ...l.out !== null && { out: l.out }, ...l.in !== null && { in: l.in }, ...l.lever !== null && { lever: l.lever } };
+}
+
+// server/graph/deck.ts
+function deckGraph(idx, entries, commanders = [], roleIndex) {
+  const unresolved = [];
+  const members2 = new Map;
+  const sectionCommanders = new Set;
+  for (const e of entries) {
+    let i;
+    try {
+      i = idx.indexOf(e.name);
+    } catch {
+      unresolved.push(e.name);
+      continue;
+    }
+    members2.set(i, (members2.get(i) ?? 0) + e.count);
+    if (e.commander)
+      sectionCommanders.add(i);
+  }
+  const cmdIdx = commanders.length ? commanders.map((n) => {
+    let i;
+    try {
+      i = idx.indexOf(n);
+    } catch {
+      throw new Error(`${n} is not a card the graph knows`);
+    }
+    if (!members2.has(i))
+      throw new Error(`${idx.cards[i].name} is not in the list`);
+    return i;
+  }) : [...sectionCommanders];
+  const memberSet = new Set(members2.keys());
+  const links = [...members2.keys()].flatMap((i) => idx.linksWith(i, memberSet).filter((l) => l.from === idx.cards[i].name));
+  const degree = new Map;
+  for (const l of links)
+    for (const n of [l.from, l.to])
+      degree.set(n, (degree.get(n) ?? 0) + 1);
+  const cards = [...members2].map(([i, count]) => {
+    const c = idx.cards[i];
+    const isLand = c.types.includes("Land");
+    const r = roleIndex && !isLand ? rolesOf(roleIndex, c.oracleId) : undefined;
+    return { name: c.name, oracleId: c.oracleId, count, isLand, degree: degree.get(c.name) ?? 0, ...r ? { roles: r.roles } : {} };
+  }).sort((a, b) => b.degree - a.degree || byteOrder(a.name, b.name));
+  let roles;
+  if (roleIndex) {
+    const counts = Object.fromEntries(roleIndex.roleNames.map((n) => [n, 0]));
+    for (const c of cards)
+      for (const r of c.roles ?? [])
+        counts[r.role] += c.count;
+    roles = { counts, unroled: cards.filter((c) => !c.isLand && !c.roles?.length).map((c) => c.name) };
+  }
+  return { cards, links, unresolved, commanders: cmdIdx.map((i) => idx.cards[i].name), ...roles ? { roles } : {} };
+}
+
+// server/graph/diagnose.ts
+var GAME_FED = new Set([
+  ...Object.values(forge_map_default.phases),
+  "Attacks",
+  "AttackersDeclared",
+  "BlockersDeclared",
+  "Blocks",
+  "BecomesBlocked",
+  "CombatDamage",
+  "Damage",
+  "ExcessDamage",
+  "CumulativeUpkeep"
+]);
+var selfOnly = (l) => l.sel.any.length > 0 && l.sel.any.every((a) => a.self);
+var selfOnlySel = (s) => s.any.length > 0 && s.any.every((a) => a.self);
+var opponentOnly = (l) => l.sel.any.length > 0 && l.sel.any.every((a) => a.controller === "opponent" || a.player === "Opponent");
+var ACTOR_HOOKS = new Set(["SpellCast", "CardDrawn", "LandPlayed"]);
+var opponentFed = (l) => opponentOnly(l) && (ACTOR_HOOKS.has(l.hook) || l.sel.any.some((a) => a.player === undefined));
+var UNFED_COSTS = new Set(["Tap", "LifeLoss"]);
+function isPayoff(l) {
+  return !offProfile(l.hook) && !GAME_FED.has(l.hook) && !UNFED_COSTS.has(l.consumed ?? "") && !selfOnly(l) && !opponentFed(l);
+}
+var MANA_HOOKS = new Set(["ManaAdded", "ManaPaid", "Tap"]);
+var AGAIN = new Set(["activated", "mana", "static", "replacement"]);
+var ONCE_SELF = new Set(["ETB", "SpellCast", "LTB", "Dies"]);
+function makesOwn(idx, i, hook) {
+  let own2 = false, repeatable = false;
+  const abilities = idx.cards[i].graph.abilities;
+  for (const e of idx.emitsOf(i)) {
+    if (e.hook !== hook)
+      continue;
+    const ok = e.by !== "effect" || e.sel.any.some((a) => a.self || a.player !== undefined || a.controller === "you" || a.props.includes("EquippedBy") || hook === "ETB" && a.controller === "any");
+    if (!ok)
+      continue;
+    own2 = true;
+    if (e.ability === undefined || selfOnlySel(e.sel))
+      continue;
+    const ab = abilities[e.ability];
+    if (!ab)
+      continue;
+    if (AGAIN.has(ab.kind))
+      repeatable = true;
+    else if (ab.kind === "triggered") {
+      const once = ab.relations.some((r) => r.relation === "triggers_on" && ONCE_SELF.has(r.hook) && selfOnlySel(r.selector));
+      if (!once)
+        repeatable = true;
+    }
+  }
+  return { own: own2, repeatable };
+}
+function worksThroughStatic(idx, i) {
+  return idx.cards[i].graph.abilities.some((a) => a.relations.some((r) => r.relation === "modifies" && !selfOnlySel(r.selector)));
+}
+function payoffsOf(idx, cards) {
+  const payoffs = new Map;
+  for (const i of cards)
+    for (const l of idx.listensOf(i))
+      if (isPayoff(l))
+        (payoffs.get(l.hook) ?? payoffs.set(l.hook, new Set).get(l.hook)).add(i);
+  return payoffs;
+}
+function outsideFeeders(idx, ctx, hook, payoffs, eligible) {
+  const feeds2 = new Map;
+  const ok = new Map;
+  for (const pi of payoffs)
+    for (const l of idx.linksTo(pi)) {
+      if (l.hook !== hook || ctx.generic(l))
+        continue;
+      const from = idx.indexOf(l.from);
+      if (ctx.members.has(from))
+        continue;
+      let pass = ok.get(from);
+      if (pass === undefined)
+        ok.set(from, pass = eligible(from) && makesOwn(idx, from, hook).own);
+      if (!pass)
+        continue;
+      let f = feeds2.get(from);
+      if (!f)
+        feeds2.set(from, f = { feeds: new Set, repeatable: makesOwn(idx, from, hook).repeatable });
+      f.feeds.add(idx.cards[pi].name);
+    }
+  return feeds2;
+}
+var BROAD_MEMO = new WeakMap;
+function isBroad(idx, i, key) {
+  let byCard = BROAD_MEMO.get(idx);
+  if (!byCard)
+    BROAD_MEMO.set(idx, byCard = new Map);
+  let keys = byCard.get(i);
+  if (!keys)
+    byCard.set(i, keys = new Map);
+  let broad = keys.get(key);
+  if (broad === undefined) {
+    const ls = idx.listensOf(i).filter((l) => `${l.hook}|${l.consumed ?? ""}` === key);
+    let n;
+    if (ls.length === 1)
+      n = idx.castFeederCount(ls[0]);
+    else {
+      const from = new Set;
+      for (const l of ls)
+        for (const f of idx.castFeeders(l))
+          from.add(f);
+      n = from.size;
+    }
+    keys.set(key, broad = n / idx.cards.length >= BROAD);
+  }
+  return broad;
+}
+function deckContext(idx, g) {
+  const members2 = new Set(g.cards.map((c) => idx.indexOf(c.name)));
+  const nameIdx = new Map([...members2].map((i) => [idx.cards[i].name, i]));
+  const byName = (name) => nameIdx.get(name) ?? idx.indexOf(name);
+  const generic = (l) => l.emittedBy === "card" && isBroad(idx, byName(l.to), `${l.hook}|${l.consumed ?? ""}`);
+  const counts = (l) => !offProfile(l.hook) && !generic(l);
+  return { members: members2, nameIdx, generic, counts };
+}
+function diagnose(idx, g, opts = {}, ctx = deckContext(idx, g)) {
+  const top = opts.top ?? 10;
+  const { members: members2, nameIdx, counts } = ctx;
+  const commanders = new Set(g.commanders);
+  const ci = new Set(commanders.size ? g.commanders.flatMap((c) => idx.cards[nameIdx.get(c)].colorIdentity) : [...members2].flatMap((i) => idx.cards[i].colorIdentity));
+  const inColor = (i) => idx.cards[i].colorIdentity.every((x) => ci.has(x));
+  const partners = new Map;
+  for (const l of g.links)
+    if (counts(l))
+      for (const [a, b] of [[l.from, l.to], [l.to, l.from]])
+        (partners.get(a) ?? partners.set(a, new Set).get(a)).add(b);
+  const p = (name) => partners.get(name)?.size ?? 0;
+  const nonland = g.cards.filter((c) => !c.isLand);
+  const ranked = nonland.filter((c) => !commanders.has(c.name)).map((c) => p(c.name)).sort((a, b) => a - b);
+  const lowPartners = ranked.length ? ranked[Math.floor((ranked.length - 1) / 4)] : 0;
+  const rolesKnown = !!g.roles;
+  const manaOnly = (i) => {
+    const rels = idx.cards[i].graph.abilities.flatMap((a) => a.relations);
+    return rels.length > 0 && rels.every((r) => MANA_HOOKS.has(r.hook));
+  };
+  const ownMemo = new Map;
+  const own2 = (i, hook) => {
+    const k = `${i}|${hook}`;
+    let v = ownMemo.get(k);
+    if (!v) {
+      v = makesOwn(idx, i, hook);
+      ownMemo.set(k, v);
+    }
+    return v;
+  };
+  const payoffs = payoffsOf(idx, nonland.map((c) => nameIdx.get(c.name)));
+  const enablers = new Map;
+  for (const l of g.links) {
+    const to = nameIdx.get(l.to);
+    if (to === undefined || !payoffs.get(l.hook)?.has(to) || !own2(nameIdx.get(l.from), l.hook).own)
+      continue;
+    (enablers.get(l.hook) ?? enablers.set(l.hook, new Set).get(l.hook)).add(l.from);
+  }
+  const names = (s) => [...s].sort(byteOrder);
+  const mechanics = [...payoffs].map(([hook, ps]) => ({ hook, payoffs: names([...ps].map((i) => idx.cards[i].name)), enablers: names(enablers.get(hook) ?? []) })).sort((a, b) => b.payoffs.length - a.payoffs.length || byteOrder(a.hook, b.hook));
+  const starved = [];
+  for (const [hook, ps] of payoffs) {
+    const es = enablers.get(hook) ?? new Set;
+    if (ps.size < 2 || ps.size <= es.size)
+      continue;
+    const feeds2 = outsideFeeders(idx, ctx, hook, ps, inColor);
+    const rep = (i) => feeds2.get(i).repeatable ? 0 : 1;
+    const candidates = [...feeds2].filter(([, f]) => f.feeds.size >= 2).sort(([a, x], [b, y]) => y.feeds.size - x.feeds.size || rep(a) - rep(b) || (idx.cards[a].edhrecRank ?? Infinity) - (idx.cards[b].edhrecRank ?? Infinity) || byteOrder(idx.cards[a].name, idx.cards[b].name)).slice(0, top).map(([i, f]) => ({ name: idx.cards[i].name, feeds: names(f.feeds), repeatable: f.repeatable }));
+    starved.push({ hook, payoffs: names([...ps].map((i) => idx.cards[i].name)), enablers: names(es), ratio: `${ps.size}:${es.size}`, candidates });
+  }
+  starved.sort((a, b) => b.payoffs.length / Math.max(1, b.enablers.length) - a.payoffs.length / Math.max(1, a.enablers.length) || byteOrder(a.hook, b.hook));
+  const starvedOf = new Map;
+  for (const s of starved)
+    for (const name of s.payoffs)
+      if (!starvedOf.has(name))
+        starvedOf.set(name, s);
+  const engine = nonland.map((c) => {
+    const i = nameIdx.get(c.name);
+    const roles2 = (c.roles ?? []).map((r) => r.role);
+    const base = { name: c.name, partners: p(c.name), degree: c.degree, roles: roles2 };
+    if (commanders.has(c.name))
+      return { ...base, bucket: "commander" };
+    const low = base.partners <= lowPartners;
+    if (!low)
+      return { ...base, bucket: roles2.length ? "core" : "engine" };
+    if (roles2.length)
+      return { ...base, bucket: "utility", reason: `fills ${roles2.join(" and ")}, so few links is fine` };
+    if (manaOnly(i))
+      return { ...base, bucket: "utility", reason: "only makes mana: a ramp slot, not a plan card" };
+    if (worksThroughStatic(idx, i))
+      return { ...base, bucket: "unread", reason: "works through a static effect (a lord, an anthem, a cost or trigger change) the graph does not link yet" };
+    const s = starvedOf.get(c.name);
+    if (s)
+      return { ...base, bucket: "starved", reason: `waits on ${hookPhrase(s.hook)}, which only ${s.enablers.length} card${s.enablers.length === 1 ? "" : "s"} in the deck make happen` };
+    if (!rolesKnown)
+      return { ...base, bucket: "unjudged", reason: "loosely linked, but there is no role data, so it may fill a role this run cannot see" };
+    const why = base.partners === 0 && c.degree > 0 ? `its ${c.degree} links all come from cards that care about any spell or any creature, so any card would make them` : `links to ${base.partners} card${base.partners === 1 ? "" : "s"} in the deck, in the bottom quarter (${lowPartners} or fewer)`;
+    return { ...base, bucket: "cut", reason: `${why}, and it fills none of the roles` };
+  }).sort((a, b) => b.partners - a.partners || byteOrder(a.name, b.name));
+  let roles;
+  if (g.roles && opts.targets) {
+    const over = [], under = [];
+    for (const [role, target] of Object.entries(opts.targets.targets)) {
+      const count = g.roles.counts[role];
+      if (count === undefined || count === target)
+        continue;
+      if (count > target) {
+        const trims = engine.filter((e) => e.roles.includes(role) && e.bucket !== "commander").map((e) => ({ name: e.name, partners: e.partners })).sort((a, b) => a.partners - b.partners || byteOrder(a.name, b.name));
+        over.push({ role, count, target, trims });
+      } else
+        under.push({ role, count, target });
+    }
+    roles = { source: opts.targets.source, over, under };
+  }
+  return { commanders: g.commanders, colorIdentity: ["W", "U", "B", "R", "G"].filter((x) => ci.has(x)), mechanics, starved, engine, lowPartners, ...roles ? { roles } : {} };
+}
+var HOOK_WORDS = {
+  Dies: "a creature dying",
+  ETB: "something entering the battlefield",
+  LTB: "something leaving the battlefield",
+  SpellCast: "casting a spell",
+  CardDrawn: "drawing a card",
+  TokenCreated: "making a token",
+  LifeGain: "gaining life",
+  LifeLoss: "losing life",
+  Sacrifice: "sacrificing a permanent",
+  Discard: "discarding a card",
+  PutIntoGraveyard: "a card going to the graveyard",
+  Mill: "milling",
+  SpellCountered: "countering a spell",
+  Untap: "untapping",
+  Tap: "tapping",
+  CounterPlaced: "putting a counter on something",
+  "CounterPlaced:P1P1": "putting a +1/+1 counter on something",
+  CounterRemoved: "removing a counter",
+  Exile: "exiling something",
+  Bounce: "returning a permanent to hand",
+  Scry: "scrying",
+  Surveil: "surveilling",
+  GainControl: "taking control of something",
+  Destroy: "destroying something",
+  Regrowth: "returning a card from the graveyard to hand"
+};
+var COUNTER_WORDS = { P1P1: "+1/+1", M1M1: "-1/-1" };
+var hookPhrase = (hook) => {
+  if (HOOK_WORDS[hook])
+    return HOOK_WORDS[hook];
+  const [base, sub] = hook.split(":");
+  const kind = sub ? COUNTER_WORDS[sub] ?? sub.toLowerCase() : "";
+  if (sub && base === "CounterPlaced")
+    return `putting a ${kind} counter on something`;
+  if (sub && base === "CounterRemoved")
+    return `removing a ${kind} counter`;
+  const words2 = base.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  return sub ? `${words2} (${kind})` : words2;
+};
 
 // server/swap-tools.ts
-import { appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "fs";
-import { dirname as dirname2 } from "path";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync as readFileSync2, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { dirname } from "path";
+
+// server/deck-swaps.ts
+var SWAP_DEFAULTS = { method: "leidenHi", maxCmcUp: 1, perCard: 3, sameRegion: true, minGain: 0.000000001, tieFloor: 0, cmcPenalty: 0, reverse: true };
+var REV = new WeakMap;
+function reverseOf(space) {
+  let m = REV.get(space);
+  if (m)
+    return m;
+  m = new Map;
+  for (const id of space.order) {
+    const c = space.cards.get(id);
+    c.nb.forEach((v, x) => {
+      const l = m.get(v) ?? [];
+      l.push([id, c.ns[x]]);
+      m.set(v, l);
+    });
+  }
+  REV.set(space, m);
+  return m;
+}
+function swapsFor(space, card, deck, fit, opts = {}) {
+  const o = { ...SWAP_DEFAULTS, ...opts };
+  const me = space.cards.get(card.id), mine = fit(me), reg = me.r[o.method] ?? -1;
+  const out = [];
+  const cand = new Map(me.nb.map((id, x) => [id, me.ns[x]]));
+  if (o.reverse) {
+    for (const [id, v] of reverseOf(space).get(me.id) ?? [])
+      if (!cand.has(id))
+        cand.set(id, v);
+  }
+  for (const [id, sim] of cand) {
+    const c = space.cards.get(id);
+    if (!c?.meta || deck.has(id) || !c.inSpace || !c.legal || c.land)
+      continue;
+    if (o.colorIdentity && !fitsIdentity(c, o.colorIdentity))
+      continue;
+    if (o.sameRegion && (reg < 0 || (c.r[o.method] ?? -1) !== reg))
+      continue;
+    const gain = fit(c) - mine;
+    if (gain < o.minGain || c.meta.cmc > me.meta.cmc + o.maxCmcUp)
+      continue;
+    const rank2 = (gain + o.tieFloor) * sim - o.cmcPenalty * Math.max(0, c.meta.cmc - me.meta.cmc);
+    out.push({ out: me, in: c, sim, gain, rank: rank2 });
+  }
+  return out.sort((a, b) => b.rank - a.rank || b.sim - a.sim || (a.in.name < b.in.name ? -1 : 1)).slice(0, o.perCard);
+}
+// server/swap-tools.ts
 var IN_COLOR_K = 30;
 var IN_COLOR = new WeakMap;
 function inColor(store, mask) {
@@ -35633,11 +40845,11 @@ function storeId(store, oracleId) {
     throw new Error(`card store is inconsistent: oracle id ${oracleId} has no store id`);
   return id;
 }
-var TAGS = new WeakMap;
+var TAGS2 = new WeakMap;
 function directTags(store, oracleId) {
-  let m = TAGS.get(store);
+  let m = TAGS2.get(store);
   if (!m)
-    TAGS.set(store, m = new Map);
+    TAGS2.set(store, m = new Map);
   let tags = m.get(oracleId);
   if (!tags) {
     tags = store.db.query("SELECT t.label FROM card_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.card_id = ? ORDER BY t.label").all(storeId(store, oracleId)).map((r) => r.label);
@@ -35648,7 +40860,7 @@ function directTags(store, oracleId) {
 var countedRoles = (store, c) => rolesOf(store.roles, c.id).roles;
 var TARGETS_PATH = new URL("./role-targets.json", import.meta.url).pathname;
 function loadTargets(roleNames, path = TARGETS_PATH) {
-  const file2 = JSON.parse(readFileSync3(path, "utf8"));
+  const file2 = JSON.parse(readFileSync2(path, "utf8"));
   const t = file2.targets;
   if (!t || typeof t !== "object")
     throw new Error(`${path}: no "targets" table`);
@@ -35680,8 +40892,8 @@ var swapStats = (n) => ({
   curve: n.curve,
   roleCounts: n.roleCounts,
   pipLoad: n.pipLoad,
-  onPlan: n.planFit.onPlan,
-  planOf: n.planFit.of
+  onPlan: n.planFit?.onPlan ?? null,
+  planOf: n.planFit?.of ?? null
 });
 function changed(a, b) {
   const out = {};
@@ -35694,7 +40906,7 @@ var round3 = (x) => Math.round(x * 1000) / 1000;
 var statsDelta = (a, b) => ({
   cards: b.cards - a.cards,
   averageManaValue: round3(b.averageManaValue - a.averageManaValue),
-  onPlan: b.onPlan - a.onPlan,
+  onPlan: a.onPlan === null || b.onPlan === null ? null : b.onPlan - a.onPlan,
   curve: changed(a.curve, b.curve),
   roleCounts: changed(a.roleCounts, b.roleCounts),
   pipLoad: changed(a.pipLoad, b.pipLoad)
@@ -35722,12 +40934,15 @@ var swapCandidatesShape = {
   commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
   deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory"),
   decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
-  lever: exports_external.enum(LEVERS).describe("plan: in-color Card Space neighbors in the same Region that score higher on the commander's plan, at most 1 mana value more; " + "cheaper: lower mana value; budget: lower Scryfall USD price; " + "roles: per-role counts against targets, and cards that fill roles under target; " + "redundancy: roles over target, and deck cards that could be cut"),
+  lever: exports_external.enum(LEVERS).describe("plan: in-color Card Space neighbors in the same Region that fit the player's plan better (needs `plan`), at most 1 mana value more; " + "cheaper: lower mana value; budget: lower Scryfall USD price; " + "roles: per-role counts against targets, and cards that fill roles under target; " + "redundancy: roles over target, and deck cards that could be cut"),
   card: exports_external.string().min(1).optional().describe("One card in the deck to replace (plan, cheaper and budget levers); omit for the whole deck"),
   limit: exports_external.number().int().min(1).max(50).optional().describe("Most candidates to return (default 5 for one card, 15 for the whole deck)"),
-  targets: exports_external.record(exports_external.string(), exports_external.number().int().min(0)).optional().describe('Role target counts, replacing the defaults for the roles named (e.g. {"ramp": 9}): the roles and redundancy levers ' + "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)")
+  targets: exports_external.record(exports_external.string(), exports_external.number().int().min(0)).optional().describe('Role target counts, replacing the defaults for the roles named (e.g. {"ramp": 9}): the roles and redundancy levers ' + "measure the deck against them, and every lever's belowTarget flag reads them; the defaults are a proposal (role-targets.json)"),
+  plan: planShape.optional().describe("The player's confirmed plan (themes, priority cards, themes to avoid). The plan lever needs it; with it, " + "every lever reports plan fit before and after, ties among cuts and fills go to the card that fits the plan, and its priority cards " + "are never offered as the card to cut")
 };
 var swapCandidatesInput = exports_external.object(swapCandidatesShape).strict();
+var fitOf = (ctx, c) => ctx.plan?.fit(c.id).score ?? 0;
+var isPriority = (ctx, c) => ctx.plan?.fit(c.id).priority === true;
 var swapCard = (store, c) => ({ name: c.name, manaValue: c.meta.cmc, usd: c.meta.usd, roles: countedRoles(store, c).map((r) => r.role) });
 var money = (x) => `$${x.toFixed(2)}`;
 var signed = (x, f = String) => x > 0 ? `+${f(x)}` : x < 0 ? `-${f(-x)}` : f(0);
@@ -35744,7 +40959,7 @@ var tagList = (tags) => `${tags.slice(0, 6).join(", ")}${tags.length > 6 ? ` (+$
 function candidate(ctx, out, inCard, why, roleTags = []) {
   if (!out && !inCard)
     throw new Error("candidate: needs an outgoing card, an incoming card, or both");
-  const { store, plan } = ctx;
+  const { store } = ctx;
   const l = out && inCard ? links(ctx, out, inCard) : { neighborRank: null, reverseRank: null, similarity: null };
   const outTags = new Set(out ? directTags(store, out.id) : []);
   const sharedTags = inCard ? directTags(store, inCard.id).filter((t) => outTags.has(t)) : [];
@@ -35753,9 +40968,10 @@ function candidate(ctx, out, inCard, why, roleTags = []) {
   const mvDelta = mv(inCard) - mv(out);
   const inUsd = usd(inCard), outUsd = usd(out);
   const priceDelta = inUsd !== null && outUsd !== null ? round3(inUsd - outUsd) : null;
-  const score = (c) => c ? planScore(c, plan).score : 0;
-  const evidence = { ...l, sharedTags, roleTags, planGain: score(inCard) - score(out), manaValueDelta: mvDelta, priceDelta };
-  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard)));
+  const score = (c) => c ? fitOf(ctx, c) : 0;
+  const planGain = ctx.plan ? Math.round((score(inCard) - score(out)) * 1000) / 1000 : null;
+  const evidence = { ...l, sharedTags, roleTags, planGain, manaValueDelta: mvDelta, priceDelta };
+  const after = swapStats(deckNumbers(store, ctx.commander, applySwap(ctx.entries, out, inCard), ctx.plan));
   const roleDrops = ctx.store.roles.roleNames.filter((r) => after.roleCounts[r] < ctx.before.roleCounts[r]).map((r) => ({ role: r, before: ctx.before.roleCounts[r], after: after.roleCounts[r] }));
   const rolesBelowTarget = roleDrops.filter((d) => d.after < ctx.targets[d.role]).map((d) => ({ role: d.role, after: d.after, target: ctx.targets[d.role] }));
   const dropText = (d) => `${d.role} ${d.before} \u2192 ${d.after}, ` + (d.after < ctx.targets[d.role] ? `under its target ${ctx.targets[d.role]}` : `still at or above its target ${ctx.targets[d.role]}`);
@@ -35828,13 +41044,21 @@ function leverPicks(ctx, out, lever) {
   return [...pool.values()].filter((c) => !c.land && c.inSpace && fitsIdentity(c, ctx.commander.ci) && !ctx.inDeck.has(c.id) && c.id !== ctx.commander.id && passes(c)).map((c) => pick2(ctx, out, c, [], lever === "cheaper" ? out.meta.cmc - c.meta.cmc : out.meta.usd - c.meta.usd)).sort(LEVER_ORDER);
 }
 function planPicks(ctx, out, limit) {
+  const plan = ctx.plan;
+  if (!plan)
+    throw new Error("planPicks: the plan lever runs only with a plan (swapCandidates checks)");
   const deck = new Set([...ctx.inDeck, ctx.commander.id]);
-  return swapsFor(ctx.graph.space, out, deck, ctx.plan, { colorIdentity: ctx.commander.ci, perCard: limit }).map((s) => pick2(ctx, out, ctx.store.space.cards.get(s.in.id), [`plan: ${s.why.join(", ")} (plan score ${signed(s.gain)})`], 0, s.rank));
+  return swapsFor(ctx.graph.space, out, deck, (c) => plan.fit(c.id).score, { colorIdentity: ctx.commander.ci, perCard: limit }).map((s) => pick2(ctx, out, ctx.store.space.cards.get(s.in.id), [planWhy(plan, s.in, out, s.gain)], 0, s.rank));
+}
+function planWhy(plan, inCard, out, gain) {
+  const f = plan.fit(inCard.id);
+  const parts = [f.hooks.length > 0 && `works on ${f.hooks.slice(0, 4).join(", ")}`, f.tags.length > 0 && `plan tags: ${tagList(f.tags)}`].filter(Boolean);
+  return `plan: ${parts.join("; ")} (plan fit ${f.score} vs ${plan.fit(out.id).score}, ${signed(Math.round(gain * 1000) / 1000)})`;
 }
 var picksFor = (ctx, out, lever, limit) => lever === "plan" ? planPicks(ctx, out, limit) : leverPicks(ctx, out, lever).slice(0, limit);
 var PER_CARD_IN_DECK = 3;
 function deckPicks(ctx, lever, limit) {
-  const outs = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id ? [[e.card.id, e.card]] : [])).values()].sort((a, b) => byName(a.name, b.name));
+  const outs = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.inSpace && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card]] : [])).values()].sort((a, b) => byName(a.name, b.name));
   const all = outs.flatMap((c) => picksFor(ctx, c, lever, PER_CARD_IN_DECK)).sort(lever === "plan" ? PLAN_ORDER : LEVER_ORDER);
   const usedOut = new Set, usedIn = new Set, top = [];
   for (const p of all) {
@@ -35853,7 +41077,7 @@ function cuts(ctx, status) {
   const seen = new Set, out = [];
   for (const e of ctx.entries) {
     const c = e.card;
-    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id))
+    if (!c || c.land || c.id === ctx.commander.id || seen.has(c.id) || isPriority(ctx, c))
       continue;
     seen.add(c.id);
     const roles = countedRoles(ctx.store, c);
@@ -35861,15 +41085,15 @@ function cuts(ctx, status) {
     if (!relieves.length || roles.some((r) => by.get(r.role).count - 1 < by.get(r.role).target))
       continue;
     const tags = [...new Set(roles.filter((r) => relieves.some((s) => s.role === r.role)).flatMap((r) => r.tags))].sort();
-    out.push({ card: c, relieves, tags, planScore: planScore(c, ctx.plan).score });
+    out.push({ card: c, relieves, tags, planScore: fitOf(ctx, c) });
   }
   return out.sort((a, b) => b.relieves.length - a.relieves.length || a.planScore - b.planScore || b.card.meta.cmc - a.card.meta.cmc || byName(a.card.name, b.card.name));
 }
-var cutWhy = (cut) => [
+var cutWhy = (ctx, cut) => [
   ...cut.relieves.map((s) => `${s.role} ${s.count} over target ${s.target}`),
   `gives it through Tagger tags: ${tagList(cut.tags)}`,
   "removing it keeps every role at or above target",
-  cut.planScore === 0 ? "off the commander's plan" : `plan score ${cut.planScore}`
+  ...ctx.plan ? [cut.planScore === 0 ? "off the player's plan" : `plan fit ${cut.planScore}`] : []
 ];
 var PER_ROLE = 3;
 function fills(ctx, status) {
@@ -35892,7 +41116,7 @@ function fills(ctx, status) {
   const gaps = status.filter((s) => s.status === "under").sort((a, b) => b.target - b.count - (a.target - a.count));
   const perRole = gaps.map((s) => pool.flatMap(({ c, roles }) => {
     const hit = roles.find((r) => r.role === s.role);
-    return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: planScore(c, ctx.plan).score }] : [];
+    return hit ? [{ card: c, status: s, tags: hit.tags, affinity: near.get(c.id)?.n ?? 0, nearest: near.get(c.id)?.best ?? null, planScore: fitOf(ctx, c) }] : [];
   }).sort((a, b) => b.affinity - a.affinity || (b.nearest?.sim ?? -1) - (a.nearest?.sim ?? -1) || b.planScore - a.planScore || a.card.meta.cmc - b.card.meta.cmc || byName(a.card.name, b.card.name)).slice(0, PER_ROLE * 4));
   const used = new Set, out = [];
   for (let turn = 0;turn < PER_ROLE; turn++)
@@ -35908,7 +41132,7 @@ function fills(ctx, status) {
 function pairCuts(ctx, list, status) {
   const by = new Map(status.map((s) => [s.role, s]));
   const left = new Map(status.map((s) => [s.role, s.count]));
-  const deck = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== ctx.commander.id ? [[e.card.id, e.card]] : [])).values()].map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: planScore(card, ctx.plan).score }));
+  const deck = [...new Map(ctx.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== ctx.commander.id && !isPriority(ctx, e.card) ? [[e.card.id, e.card]] : [])).values()].map((card) => ({ card, roles: countedRoles(ctx.store, card).map((r) => r.role), planScore: fitOf(ctx, card) }));
   const used = new Set;
   return list.map((f) => {
     const fillRoles = new Set(countedRoles(ctx.store, f.card).map((r) => r.role));
@@ -35937,19 +41161,23 @@ var fillWhy = (f, cut) => [
   f.nearest ? `in-color neighbor of ${f.affinity} deck card${f.affinity > 1 ? "s" : ""} (nearest: #${f.nearest.rank} of ${f.nearest.from.name}, similarity ${f.nearest.sim.toFixed(3)})` : "not a Card Space neighbor of any deck card",
   ...cut ? [cutText(cut)] : []
 ];
-function swapCandidates(store, input2) {
-  const f = swapCandidatesInput.parse(input2);
+function swapCandidates(store, input3) {
+  const f = swapCandidatesInput.parse(input3);
   const text = readDeck(f);
   const { card: commander } = resolveCommander(store, f.commander);
   const deck = parseDecklist(store.space, text);
   const mask = ciMask(commander.ci);
-  const before = swapStats(deckNumbers(store, commander, deck.entries));
+  if (f.lever === "plan" && f.plan === undefined) {
+    throw new ToolInputError("the plan lever scores cards against the player's plan; pass plan (the confirmed themes or priority cards)");
+  }
+  const plan = planContext(store, commander.name, f.plan);
+  const before = swapStats(deckNumbers(store, commander, deck.entries, plan));
   const targets = targetsFor(store, f.targets);
   const ctx = {
     store,
     commander,
     mask,
-    plan: readPlan(commander),
+    plan,
     graph: inColor(store, mask),
     entries: deck.entries,
     inDeck: new Set(deck.entries.flatMap((e) => e.card ? [e.card.id] : [])),
@@ -35970,6 +41198,9 @@ function swapCandidates(store, input2) {
       throw new ToolInputError(`${card.name} is a land; swap candidates cover nonland cards`);
     if (card.id === commander.id)
       throw new ToolInputError(`${card.name} is the commander`);
+    if (isPriority(ctx, card)) {
+      throw new ToolInputError(`${card.name} is one of the plan's priority cards, so it is never offered as a cut; if the player wants it replaced, take it out of the plan's priorities first`);
+    }
     if (f.lever === "budget" && card.meta.usd === null)
       notes.push(`${card.name} has no Scryfall price, so no card is cheaper in dollars`);
     picks = picksFor(ctx, card, f.lever, f.limit ?? 5);
@@ -35982,9 +41213,10 @@ function swapCandidates(store, input2) {
     const list = cuts(ctx, roles);
     for (const s of roles)
       if (s.status === "over" && !list.some((c) => c.relieves.includes(s))) {
-        notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it also gives a role that would fall below target`);
+        const kept = [...new Map(deck.entries.flatMap((e) => e.card && !e.card.land && e.card.id !== commander.id && isPriority(ctx, e.card) && countedRoles(store, e.card).some((r) => r.role === s.role) ? [[e.card.id, e.card.name]] : [])).values()].sort(byName);
+        notes.push(`${s.role} is over target (${s.count} vs ${s.target}), but every card giving it ${kept.length ? `is a priority card of the plan (${kept.join(", ")}) or ` : ""}also gives a role that would fall below target`);
       }
-    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(c), c.tags));
+    candidates = list.slice(0, f.limit ?? 15).map((c) => candidate(ctx, c.card, null, cutWhy(ctx, c), c.tags));
   }
   if (f.lever === "roles") {
     const list = fills(ctx, roles).slice(0, f.limit ?? 15);
@@ -36000,7 +41232,7 @@ function swapCandidates(store, input2) {
     commander: { name: commander.name, colorIdentity: commander.ci.join("") },
     lever: f.lever,
     card: card?.name ?? null,
-    plan: ctx.plan,
+    plan: plan?.plan ?? null,
     before,
     roles,
     candidates,
@@ -36017,7 +41249,8 @@ var verdictFields = {
 };
 var acceptSwapShape = {
   ...verdictFields,
-  deckFile: exports_external.string().min(1).describe("Path to the `1 Card Name` deck file to rewrite, absolute or relative to the project directory")
+  deckFile: exports_external.string().min(1).describe("Path to the `1 Card Name` deck file to rewrite, absolute or relative to the project directory"),
+  changeCommander: exports_external.boolean().optional().describe("true = this swap replaces the commander: `out` is the current commander and `in` a card that can be a commander. Without it the commander cannot leave the deck")
 };
 var rejectSwapShape = {
   ...verdictFields,
@@ -36040,24 +41273,63 @@ function pairOf(store, f) {
   return { out: f.out !== undefined ? exactCard(store, f.out) : null, inCard: f.in !== undefined ? exactCard(store, f.in) : null };
 }
 function appendLabel(label, path) {
-  mkdirSync2(dirname2(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify(label)}
 `);
 }
-function acceptSwap(store, input2, opts = {}) {
-  const f = acceptSwapInput.parse(input2);
+var canBeCommander = (c) => /\bLegendary\b.*\bCreature\b/.test(c.meta.type) || /can be your commander/i.test(c.meta.text);
+function checkCommanderChange(f, commander, out, inCard) {
+  const leaving = out?.id === commander.id;
+  if (!f.changeCommander) {
+    if (leaving)
+      throw new ToolInputError(`${commander.name} is the commander. It cannot be cut; to replace it, name a new commander as in and pass changeCommander: true`);
+    return;
+  }
+  if (!leaving)
+    throw new ToolInputError(`changeCommander: out must be the commander, ${commander.name}`);
+  if (!inCard)
+    throw new ToolInputError("changeCommander needs the new commander as in; a commander cannot be cut");
+  if (inCard.id === commander.id)
+    throw new ToolInputError(`${inCard.name} is already the commander`);
+  if (!canBeCommander(inCard))
+    throw new ToolInputError(`${inCard.name} cannot be a commander`);
+}
+function saveDeck(path, shownAs, next, record3) {
+  const target = realpathSync(path);
+  const mode = statSync(target).mode & 4095;
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, next, { mode });
+    chmodSync(tmp, mode);
+    try {
+      record3();
+    } catch (e) {
+      throw new Error(`the swap could not be recorded (${e instanceof Error ? e.message : String(e)}), so ${shownAs} was left as it was`);
+    }
+    renameSync(tmp, target);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+function acceptSwap(store, input3, opts = {}) {
+  const f = acceptSwapInput.parse(input3);
   const { card: commander } = resolveCommander(store, f.commander);
   const { out, inCard } = pairOf(store, f);
   const path = deckPath(f.deckFile);
   const text = readDeck({ deckFile: path });
+  if (!readsAsDeck(store.space, text))
+    throw new ToolInputError(`${f.deckFile} does not read as a deck list, so it was left as it was`);
   const deck = parseDecklist(store.space, text);
+  checkCommanderChange(f, commander, out, inCard);
   const outEntry = out ? deck.entries.find((e) => e.card?.id === out.id) : undefined;
   if (out && !outEntry)
     throw new ToolInputError(`${out.name} is not in the deck`);
+  const promoted = f.changeCommander ? deck.entries.filter((e) => e.card?.id === inCard.id) : [];
+  const oldStays = promoted.length > 0 && fitsIdentity(commander, inCard.ci);
   if (inCard) {
-    if (!fitsIdentity(inCard, commander.ci))
+    if (!f.changeCommander && !fitsIdentity(inCard, commander.ci))
       throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
-    if (deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta.type))
+    if (!promoted.length && deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta.type))
       throw new ToolInputError(`${inCard.name} is already in the deck`);
   }
   const hadFinalNewline = text.endsWith(`
@@ -36069,35 +41341,54 @@ function acceptSwap(store, input2, opts = {}) {
   const cr = text.includes(`\r
 `) ? "\r" : "";
   const inLine = inCard ? `1 ${inCard.name}${cr}` : null;
-  if (outEntry) {
+  if (promoted.length) {
+    lines[outEntry.line - 1] = inLine;
+    if (oldStays)
+      lines[promoted[0].line - 1] = `${outEntry.qty} ${commander.name}${cr}`;
+    for (const e of (oldStays ? promoted.slice(1) : promoted).reverse())
+      lines.splice(e.line - 1, 1);
+  } else if (outEntry) {
     const i = outEntry.line - 1;
     const rest = outEntry.qty > 1 ? [lines[i].replace(/^(\s*)(\d+)/, (_, sp, q) => `${sp}${+q - 1}`)] : [];
     lines.splice(i, 1, ...rest, ...inLine ? [inLine] : []);
   } else {
-    const last = Math.max(0, ...deck.entries.map((e) => e.line));
+    const main = deck.entries.filter((e) => !/^(commander|companion)/.test(e.section ?? ""));
+    const last = Math.max(0, ...(main.length ? main : deck.entries).map((e) => e.line));
     lines.splice(last, 0, inLine);
   }
   const date6 = opts.today ?? localDate();
-  const changeLog = `# ${date6} accepted swap${f.lever ? ` (${f.lever})` : ""}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
+  const what = f.changeCommander ? "changed commander" : `accepted swap${f.lever ? ` (${f.lever})` : ""}`;
+  const changeLog = promoted.length ? `# ${date6} commander promoted: ${inCard.name}; ${commander.name} ${oldStays ? "stays" : "left"}` : `# ${date6} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
   lines.push(`${changeLog}${cr}`);
   const next = lines.join(`
 `) + (hadFinalNewline ? `
 ` : "");
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync2(tmp, next);
-  renameSync2(tmp, path);
-  const label = { date: date6, verdict: "accept", commander: commander.name, out: out?.name ?? null, in: inCard?.name ?? null, lever: f.lever ?? null, deckFile: f.deckFile, note: f.note ?? null };
-  appendLabel(label, opts.labelsPath ?? LABELS_PATH);
+  const label = {
+    date: date6,
+    verdict: "accept",
+    commander: commander.name,
+    out: out?.name ?? null,
+    in: inCard?.name ?? null,
+    lever: f.lever ?? null,
+    deckFile: f.deckFile,
+    note: f.note ?? null,
+    ...f.changeCommander && { changedCommander: true },
+    ...promoted.length > 0 && { promoted: true }
+  };
+  saveDeck(path, f.deckFile, next, () => appendLabel(label, opts.labelsPath ?? LABELS_PATH));
+  const nextEntries = parseDecklist(store.space, next).entries;
   return {
     deckFile: path,
     changeLog,
     label,
     before: swapStats(deckNumbers(store, commander, deck.entries)),
-    after: swapStats(deckNumbers(store, commander, parseDecklist(store.space, next).entries))
+    after: swapStats(deckNumbers(store, commander, nextEntries)),
+    ...f.changeCommander && { offColor: deckNumbers(store, inCard, nextEntries).offIdentity },
+    ...promoted.length > 0 && { oldCommander: oldStays ? "stays" : "left" }
   };
 }
-function rejectSwap(store, input2, opts = {}) {
-  const f = rejectSwapInput.parse(input2);
+function rejectSwap(store, input3, opts = {}) {
+  const f = rejectSwapInput.parse(input3);
   const { card: commander } = resolveCommander(store, f.commander);
   const { out, inCard } = pairOf(store, f);
   const label = {
@@ -36113,6 +41404,659 @@ function rejectSwap(store, input2, opts = {}) {
   appendLabel(label, opts.labelsPath ?? LABELS_PATH);
   return { label };
 }
+
+// server/diagnose.ts
+var diagnoseShape = {
+  commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
+  deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.describe("The player's confirmed plan (themes, priority cards, themes to avoid): the diagnosis is measured against it")
+};
+var diagnoseInput = exports_external.object(diagnoseShape).strict();
+function deckOnGraph(store, commander, text) {
+  const { index: idx, positionOf } = graphOf(store.db);
+  const deck = parseDecklist(store.space, text);
+  const idOf = new Map(store.names.map((n) => [n.oracleId, n.id]));
+  const counts = new Map;
+  const noGraphData = new Set;
+  for (const e of deck.entries) {
+    if (!e.card)
+      continue;
+    const pos = positionOf.get(idOf.get(e.card.id));
+    if (pos !== undefined)
+      counts.set(pos, (counts.get(pos) ?? 0) + e.qty);
+    else
+      noGraphData.add(e.card.name);
+  }
+  const commanderPos = positionOf.get(idOf.get(commander.id));
+  if (commanderPos === undefined)
+    throw new ToolInputError(`${commander.name} has no card graph data (its card script could not be read), so the deck's engine cannot be read around it`);
+  if (!counts.has(commanderPos))
+    counts.set(commanderPos, 1);
+  const entries = [...counts].map(([pos, count]) => ({ name: idx.cards[pos].name, count }));
+  const g = deckGraph(idx, entries, [idx.cards[commanderPos].name], store.roles);
+  return { deck, idOf, g, ctx: deckContext(idx, g), commanderPos, noGraphData };
+}
+function deckLinks(ctx, name, links2) {
+  const seen = new Set;
+  return links2.filter((l) => l.from === name || l.to === name).map((l) => ({
+    card: l.from === name ? l.to : l.from,
+    direction: l.from === name ? "feeds" : "fed by",
+    on: hookPhrase(l.hook),
+    generic: ctx.generic(l)
+  })).filter((l) => {
+    const k = `${l.card}|${l.direction}|${l.on}|${l.generic}`;
+    return !seen.has(k) && !!seen.add(k);
+  }).sort((a, b) => byteOrder(a.card, b.card) || byteOrder(a.direction, b.direction) || byteOrder(a.on, b.on));
+}
+function diagnose2(store, input3) {
+  const f = diagnoseInput.parse(input3);
+  const text = readDeck(f);
+  const { card: commander } = resolveCommander(store, f.commander);
+  const plan = resolvePlan(store, { commander: commander.name, plan: f.plan });
+  const idx = graphOf(store.db).index;
+  const { deck, idOf, g, ctx, noGraphData } = deckOnGraph(store, commander, text);
+  const sheet = roleSheet(store.roles, deck.entries.map((e) => ({ ...e, card: e.card && { id: e.card.id, name: e.card.name, land: e.card.land } })));
+  g.roles = { counts: sheet.counts, unroled: sheet.unroled };
+  const nonland = sheet.cards.reduce((n, c) => n + c.qty, 0);
+  const targets = roleTargets(store, plan, commander.ci, nonland);
+  const d = diagnose(idx, g, { targets: { targets: Object.fromEntries(targets.map((t) => [t.role, t.target])), source: "plan" } }, ctx);
+  const roles = targets.map((t) => ({ role: t.role, count: sheet.counts[t.role] ?? 0, target: t.target, source: t.source, basis: t.basis, ...t.expected !== undefined ? { expected: t.expected } : {} }));
+  const read = new Map(roles.map((r) => [r.role, r]));
+  const isStatic = (name) => worksThroughStatic(idx, idx.indexOf(name));
+  const linksOf = (name) => deckLinks(ctx, name, g.links);
+  const nonlandCards = [...new Map(deck.entries.filter((e) => e.card && !e.card.land).map((e) => [e.card.id, { id: idOf.get(e.card.id), oracleId: e.card.id, name: e.card.name }])).values()];
+  const gapOf = new Map;
+  for (const s of d.starved)
+    for (const name of s.payoffs)
+      if (!gapOf.has(name))
+        gapOf.set(name, s.hook);
+  const leansOn = mainParts([...plan.themes, ...plan.cards ? [plan.cards] : []]);
+  const priority = new Set(plan.priorities);
+  return {
+    commander: { name: commander.name, colorIdentity: commander.ci.join("") },
+    plan: { ...planEcho(plan), leansOn },
+    engineGaps: d.starved.map((s) => ({
+      mechanic: hookPhrase(s.hook),
+      payoffCount: s.payoffs.length,
+      enablerCount: s.enablers.length,
+      payoffs: s.payoffs,
+      enablers: s.enablers,
+      toTry: s.candidates.map((c) => ({ name: c.name, feeds: c.feeds, everyTurn: c.repeatable })),
+      waitingOnIt: d.engine.filter((e) => e.bucket === "starved" && gapOf.get(e.name) === s.hook).map((e) => e.name)
+    })),
+    roles,
+    over: (d.roles?.over ?? []).map((o) => ({ ...read.get(o.role), trims: (o.trims ?? []).filter((t) => !priority.has(t.name)).map((t) => isStatic(t.name) ? { ...t, unread: true } : t) })),
+    under: (d.roles?.under ?? []).map((u) => read.get(u.role)),
+    offPlan: offPlanCards(store, plan, nonlandCards.filter((c) => c.id !== plan.commander.id), leansOn),
+    doingLeast: d.engine.filter((e) => e.bucket === "cut" && !priority.has(e.name)).map((e) => ({ name: e.name, partners: e.partners, links: linksOf(e.name), reason: e.reason })),
+    unread: d.engine.filter((e) => isStatic(e.name)).map((e) => ({
+      name: e.name,
+      reason: "works through a static effect (a lord, an anthem, a keyword grant, a cost or trigger change) the graph does not link yet, so its links undercount it" + (e.bucket === "unread" ? "" : `; it still reads as ${e.bucket} from the links it does have`)
+    })),
+    cards: d.engine.map(({ degree: _d, ...e }) => e),
+    lowPartners: d.lowPartners,
+    noGraphData: [...noGraphData].sort(),
+    cardFacts: cardFacts2(store, commander, deck.entries),
+    unresolved: unresolvedLines(store, deck.unresolved)
+  };
+}
+var THEME_ROLES = new WeakMap;
+function themeRoles(store, theme) {
+  const per = THEME_ROLES.get(store) ?? THEME_ROLES.set(store, new Map).get(store);
+  const { name, chosen } = themeCommanders(store.db, theme);
+  const hit = per.get(name);
+  if (hit)
+    return hit;
+  const rows = store.db.query("SELECT cc.card_id, cc.decks FROM commander_cards cc JOIN cards c ON c.id = cc.card_id WHERE cc.commander_id = ? AND c.is_land = 0 ORDER BY cc.card_id");
+  const commanders = chosen.map(({ page, share: share2 }) => {
+    const cmd = store.space.cards.get(store.names[page.cardId - 1].oracleId);
+    let total = 0;
+    const mass = new Map;
+    for (const r of rows.all(page.cardId)) {
+      total += r.decks;
+      for (const h of rolesOf(store.roles, store.names[r.card_id - 1].oracleId).roles)
+        mass.set(h.role, (mass.get(h.role) ?? 0) + r.decks);
+    }
+    return { ci: cmd.ci, weight: share2, shares: new Map([...mass].map(([role, m]) => [role, total ? m / total : 0])) };
+  });
+  const out = { name, commanders };
+  per.set(name, out);
+  return out;
+}
+function colorOverlap(a, b) {
+  const all = new Set([...a, ...b]);
+  if (!all.size)
+    return 1;
+  return a.filter((c) => b.includes(c)).length / all.size;
+}
+function roleTargets(store, plan, deckCi, nonland) {
+  const defaults = loadTargets(store.roles.roleNames);
+  const covered = [];
+  const thin = [];
+  for (const theme of plan.themes) {
+    if (theme.source.kind !== "strategy")
+      continue;
+    const t = themeRoles(store, theme.source.theme);
+    const weighted = t.commanders.map((c) => ({ ...c, w: c.weight * colorOverlap(c.ci, deckCi) })).filter((c) => c.w > 0);
+    if (weighted.length < STRATEGY_DEFAULTS.minCommanders) {
+      thin.push(`only ${weighted.length} of ${t.name}'s ${t.commanders.length} commanders share a color with this deck (${STRATEGY_DEFAULTS.minCommanders} needed)`);
+      continue;
+    }
+    const sum = weighted.reduce((s, c) => s + c.w, 0);
+    const expected = new Map(store.roles.roleNames.map((role) => [role, nonland * weighted.reduce((s, c) => s + c.w * (c.shares.get(role) ?? 0), 0) / sum]));
+    covered.push({ name: t.name, sharing: weighted.length, of: t.commanders.length, expected });
+  }
+  return store.roles.roleNames.map((role) => {
+    if (covered.length) {
+      const expected = Math.round(covered.reduce((s, c) => s + c.expected.get(role), 0) / covered.length * 10) / 10;
+      const inferred = plan.inference?.theme ? ", the theme inferred from the priority cards" : "";
+      const basis = covered.map((c) => `${c.name} decks${inferred} (${c.sharing} of its ${c.of} commanders share a color with this deck)`).join("; ");
+      return { role, target: Math.round(expected), source: "plan", basis, expected };
+    }
+    const why = thin.length ? thin.join("; ") : "the plan names no theme";
+    return { role, target: defaults[role], source: "default", basis: `default table: ${why}` };
+  });
+}
+var hookWordsOf = (key) => {
+  const { hook, token } = parseProfileHook(key);
+  return token === null ? hookPhrase(hook) : `${hookPhrase(hook)} (${token ? "tokens" : "nontokens"})`;
+};
+function mainParts(profiles) {
+  const hooks = profiles.flatMap((p) => p.hooks.filter(isMainHook).map((h) => hookWordsOf(h.hook)));
+  const tags = profiles.flatMap((p) => p.tags.filter((t) => t.weight > 0.5).map((t) => t.tag));
+  return { hooks: [...new Set(hooks)], tags: [...new Set(tags)] };
+}
+var TAGS_SHOWN = 5;
+function offPlanCards(store, plan, cards, leansOn) {
+  const fit = planScorer(store, plan);
+  const avoid = plan.avoid.map((p) => ({ name: p.source.kind === "strategy" ? p.source.theme : p.source.commander, fit: planScorer(store, { ...plan, themes: [p], cards: null }) }));
+  const graph = graphOf(store.db);
+  const name = planEcho(plan);
+  const planName = [...name.themes, ...name.priorities.length ? [`${plan.commander.name} with ${name.priorities.join(", ")}`] : []].join(" and ") + (name.inferred?.theme ? ` read under ${name.inferred.theme}, the theme those cards fit best` : "");
+  const leaning = [...leansOn.hooks, ...leansOn.tags].slice(0, 6).join(", ");
+  return cards.filter((c) => fit(c.oracleId).score === 0).map((c) => {
+    const does = strategyFacts(graph, c.id).map((k) => {
+      const [side, hook] = k.split("|");
+      return `${side === "makes" ? "makes happen" : "waits on"}: ${hookPhrase(hook)}`;
+    });
+    const fitsAvoided = avoid.filter((a) => a.fit(c.oracleId).score > 0).map((a) => a.name);
+    const reason = `nothing it does is something the ${planName} plan leans on (${leaning})` + (fitsAvoided.length ? `, and it fits ${fitsAvoided.join(" and ")}, which the plan avoids` : "");
+    return { name: c.name, reason, does, tags: strongestTags(store, c.id, TAGS_SHOWN), roles: rolesOf(store.roles, c.oracleId).roles.map((r) => r.role), fitsAvoided };
+  }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
+// server/cost-reduction.ts
+var COLORS2 = new Set(["white", "blue", "black", "red", "green"]);
+var TYPES = new Set(["artifact", "battle", "creature", "enchantment", "instant", "kindred", "land", "planeswalker", "sorcery", "tribal"]);
+var SUPERTYPES2 = new Set(["legendary", "snow", "basic"]);
+var PERMANENT = ["artifact", "battle", "creature", "enchantment", "land", "planeswalker"];
+var FILLER = new Set(["the", "first", "each", "a", "an", "other", "you", "cast"]);
+var CLAUSE = /^(.*?\bspells?\b.*?)\bcosts?\s+(?:\{[^}]*\})+\s+less\b/i;
+function spellDiscounts(text, subtypes) {
+  const out = [];
+  for (const sentence of text.split(/[.\n]/)) {
+    const m = CLAUSE.exec(sentence);
+    if (!m)
+      continue;
+    const subject = m[1].split(/,|\u2014/).pop().trim();
+    const lower = subject.toLowerCase();
+    if (/^(this|those|that|these)\b/.test(lower) || /\bopponents?\b/.test(lower))
+      continue;
+    const pieces = lower.split(/\bspells?\b/);
+    pieces.pop();
+    const alternatives = [];
+    let judged = true;
+    for (const piece of pieces) {
+      const group = piece.replace(/^\s*(and|or|,)\s+/, "").trim();
+      for (const alt of group.split(/\s*(?:,|\band\b|\bor\b)\s*/)) {
+        const words2 = alt.split(/\s+/).filter((w) => w && !FILLER.has(w));
+        if (!words2.length || !words2.every((w) => known2(w, subtypes)))
+          judged = false;
+        else
+          alternatives.push(words2);
+      }
+    }
+    out.push(judged && alternatives.length ? alternatives : null);
+  }
+  return out;
+}
+function known2(word, subtypes) {
+  const w = word.startsWith("non") && word.length > 3 ? word.slice(3).replace(/^-/, "") : word;
+  return COLORS2.has(w) || w === "colorless" || w === "multicolored" || w === "monocolored" || TYPES.has(w) || SUPERTYPES2.has(w) || w === "historic" || w === "permanent" || subtypes.has(w);
+}
+function holds(word, c) {
+  if (word.startsWith("non") && word.length > 3)
+    return !holds(word.slice(3).replace(/^-/, ""), c);
+  if (COLORS2.has(word))
+    return c.colors.has(word);
+  if (word === "colorless")
+    return c.colors.size === 0;
+  if (word === "multicolored")
+    return c.colors.size > 1;
+  if (word === "monocolored")
+    return c.colors.size === 1;
+  if (word === "kindred" || word === "tribal")
+    return c.types.has("kindred") || c.types.has("tribal");
+  if (TYPES.has(word))
+    return c.types.has(word);
+  if (SUPERTYPES2.has(word))
+    return c.supertypes.has(word);
+  if (word === "historic")
+    return c.types.has("artifact") || c.supertypes.has("legendary") || c.subtypes.has("saga");
+  if (word === "permanent")
+    return PERMANENT.some((t) => c.types.has(t));
+  return c.subtypes.has(word);
+}
+function discountUsable(clauses, deck) {
+  if (!clauses.length)
+    return true;
+  return clauses.some((clause) => clause === null || clause.some((words2) => deck.some((c) => words2.every((w) => holds(w, c)))));
+}
+
+// server/shortlist.ts
+var SHORTLIST_LABELS = ["named by the player", "fits this commander", "deeper cut", "widely played", "fits the named theme", "engine partner"];
+var PER_SOURCE = 10;
+var SHORTLIST_MAX = 30;
+var POPULAR_ONLY = 5;
+var THEME_SLOTS = 3;
+var problemShape = exports_external.union([
+  exports_external.object({ role: exports_external.string().min(1).describe("A deck role, as diagnose and deck_stats name it (ramp, card draw, card selection, removal, board wipe, counterspell, protection, tutor, recursion, cost reducer): cards that hold it") }).strict(),
+  exports_external.object({ engineGap: exports_external.string().min(1).describe("What an engine's payoffs wait on, in the words diagnose gives an engine gap's `mechanic` (e.g. \"a creature dying\"): cards that make it happen for the deck's payoffs") }).strict(),
+  exports_external.object({ offPlan: exports_external.literal(true).describe("Cards that fit the plan, to replace cards off the plan or doing the least") }).strict()
+]).describe("The one diagnosed problem the shortlist answers: { role }, { engineGap } or { offPlan: true }");
+var shortlistShape = {
+  commander: exports_external.string().min(1).describe("The commander's exact name or front-face name (case and punctuation ignored)"),
+  deckFile: exports_external.string().min(1).optional().describe("Path to a `1 Card Name` decklist file, absolute or relative to the project directory (e.g. decks/namor.txt)"),
+  decklist: exports_external.string().min(1).optional().describe("The decklist text itself, `1 Card Name` per line; give this or deckFile"),
+  plan: planShape.describe("The player's confirmed plan (themes, priority cards, themes to avoid): the engine partners lean on it, and every card's plan fit is read against it"),
+  problem: problemShape,
+  maxManaValue: exports_external.number().min(0).optional().describe("Only cards with mana value at most this"),
+  maxPrice: exports_external.number().min(0).optional().describe("Only cards with a Scryfall USD price at most this (an unpriced card is left out)"),
+  out: exports_external.string().min(1).optional().describe("A card in the deck to swap out, exact name: each shortlist card then carries the swap, the deck numbers after swapping it in for this one (`after`) and what changed, instead of what adding it changes")
+};
+var shortlistInput = exports_external.object(shortlistShape).strict();
+var FACTS2 = new WeakMap;
+function storeFacts(store) {
+  const hit = FACTS2.get(store);
+  if (hit)
+    return hit;
+  const edhrecRank = new Map(store.db.query("SELECT card_id, edhrec_rank FROM card_scryfall WHERE edhrec_rank IS NOT NULL").all().map((r) => [r.card_id, r.edhrec_rank]));
+  const off = store.db.query("SELECT value FROM meta WHERE key = 'tagger_deck_synergy_offset'").get();
+  const synergyOffset = off ? Number(off.value) : NaN;
+  if (!Number.isFinite(synergyOffset))
+    throw new Error("the card store records no tagger_deck_synergy_offset in meta");
+  const out = { edhrecRank, synergyOffset, vectors: new Map };
+  FACTS2.set(store, out);
+  return out;
+}
+function unpackVector2(blob) {
+  if (blob.byteLength % 6 !== 0)
+    throw new Error(`Tagger vector of ${blob.byteLength} bytes is not n float32 + n uint16`);
+  const n = blob.byteLength / 6;
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const out = new Map;
+  for (let i = 0;i < n; i++)
+    out.set(view.getUint16(n * 4 + i * 2, true), view.getFloat32(i * 4, true));
+  return out;
+}
+function cardVector(store, cardId) {
+  const f = storeFacts(store);
+  if (f.vectors.has(cardId))
+    return f.vectors.get(cardId);
+  const row = store.db.query("SELECT vector FROM card_tagger WHERE card_id = ?").get(cardId);
+  const v = row ? unpackVector2(row.vector) : null;
+  f.vectors.set(cardId, v);
+  return v;
+}
+function commanderSignals(store, commanderId) {
+  const { synergyOffset } = storeFacts(store);
+  const page = store.db.query("SELECT tagger_deck, tagger_deck_fallback FROM commanders WHERE card_id = ?").get(commanderId);
+  const notes = [];
+  if (!page) {
+    notes.push("the commander has no EDHREC page: no card fits this commander by synergy, and the deeper cuts are fit to the commander's own card tags");
+    return { synergy: new Map, deckVector: cardVector(store, commanderId), notes };
+  }
+  if (page.tagger_deck_fallback)
+    notes.push(`the commander's page is ${page.tagger_deck_fallback === "thin" ? "thin (under 20 decks)" : "without kept tags"}: the deeper cuts are fit to the commander's own card tags`);
+  const rows = store.db.query("SELECT card_id, decks, potential_decks, synergy FROM commander_cards WHERE commander_id = ? ORDER BY card_id").all(commanderId);
+  const synergy = new Map;
+  for (const r of rows) {
+    const w = (r.potential_decks ? r.decks / r.potential_decks : 0) * Math.max(0, r.synergy + synergyOffset);
+    if (w > 0)
+      synergy.set(r.card_id, w);
+  }
+  return { synergy, deckVector: unpackVector2(page.tagger_deck), notes };
+}
+function taggerFit(store, deckVector, cardId) {
+  if (!deckVector)
+    return 0;
+  let s = 0;
+  for (const [t, w] of cardVector(store, cardId) ?? [])
+    s += w * (deckVector.get(t) ?? 0);
+  return s;
+}
+var RECENT_DECKS = 4;
+var LINKS = new WeakMap;
+function linksIntoDeck(store, members2) {
+  let byDeck = LINKS.get(store);
+  if (!byDeck)
+    LINKS.set(store, byDeck = new Map);
+  const key = [...members2].sort((a, b) => a - b).join(",");
+  let memo2 = byDeck.get(key);
+  if (memo2)
+    byDeck.delete(key);
+  else
+    memo2 = { linker: graphOf(store.db).index.linkerFor(members2), links: new Map };
+  byDeck.set(key, memo2);
+  while (byDeck.size > RECENT_DECKS)
+    byDeck.delete(byDeck.keys().next().value);
+  const { linker, links: links2 } = memo2;
+  return (pos) => {
+    let ls = links2.get(pos);
+    if (!ls)
+      links2.set(pos, ls = linker(pos));
+    return ls;
+  };
+}
+function shortlist(store, input3) {
+  const f = shortlistInput.parse(input3);
+  const text = readDeck(f);
+  const { card: commander } = resolveCommander(store, f.commander);
+  const resolved = resolvePlan(store, { commander: commander.name, plan: f.plan });
+  const fit = planScorer(store, resolved);
+  const planCtx = { plan: planEcho(resolved), fit };
+  const graph = graphOf(store.db);
+  const idx = graph.index;
+  const d = deckOnGraph(store, commander, text);
+  const { deck, idOf, ctx } = d;
+  const commanderId = idOf.get(commander.id);
+  const inDeck = new Set(deck.entries.filter((e) => e.card).map((e) => e.card.id));
+  const entries = deck.entries;
+  const out = f.out === undefined ? null : outCard(store, f.out, entries);
+  const named = resolved.priorities.map((n) => store.space.cards.get(store.names.find((x) => x.name === n).oracleId));
+  const absentNamed = named.filter((c) => !inDeck.has(c.id) && c.id !== commander.id);
+  const notes = [];
+  const eligible = (c, allowLand) => (allowLand || !c.land) && c.id !== commander.id && !inDeck.has(c.id) && fitsIdentity(c, commander.ci) && (f.maxManaValue === undefined || c.meta.cmc <= f.maxManaValue) && (f.maxPrice === undefined || c.meta.usd !== null && c.meta.usd <= f.maxPrice);
+  const avoid = resolved.avoid.map((p) => planScorer(store, { ...resolved, themes: [p], cards: null, inference: null }));
+  let avoided = 0, idleDiscounts = 0;
+  const casts = castFacts(store, [commander, ...entries.filter((e) => e.card && !e.card.land).map((e) => e.card)]);
+  const subtypes = new Set(store.vocab.subtypes.keys());
+  const keep = (c) => {
+    if (/\bless\b/i.test(c.meta.text) && !discountUsable(spellDiscounts(c.meta.text, subtypes), casts)) {
+      idleDiscounts++;
+      return false;
+    }
+    if (!avoid.length || fit(c.id).score > 0 || !avoid.some((a) => a(c.id).score > 0))
+      return true;
+    avoided++;
+    return false;
+  };
+  const candidate2 = (c) => {
+    const id = idOf.get(c.id);
+    return { card: c, id, pos: graph.positionOf.get(id), fit: fit(c.id) };
+  };
+  let problem;
+  let pool;
+  const all = () => store.names.map((n) => store.space.cards.get(n.oracleId));
+  if ("role" in f.problem) {
+    const role = store.roles.roleNames.find((r) => r.toLowerCase() === f.problem.role.trim().toLowerCase());
+    if (role === undefined)
+      throw new ToolInputError(`unknown role "${f.problem.role}"; roles: ${store.roles.roleNames.join(", ")}`);
+    problem = { kind: "role", role };
+    pool = all().filter((c) => eligible(c, false) && rolesOf(store.roles, c.id).roles.some((r) => r.role === role) && keep(c)).map(candidate2);
+  } else if ("engineGap" in f.problem) {
+    const nonland = d.g.cards.filter((c) => !c.isLand).map((c) => ctx.nameIdx.get(c.name));
+    const payoffs = payoffsOf(idx, nonland);
+    const want = f.problem.engineGap.trim().toLowerCase();
+    const hooks = [...payoffs.keys()].sort(byteOrder);
+    const hook = hooks.find((h) => hookPhrase(h).toLowerCase() === want);
+    if (hook === undefined) {
+      const known3 = hooks.map((h) => ({ words: hookPhrase(h), n: payoffs.get(h).size })).sort((a, b) => b.n - a.n || byteOrder(a.words, b.words));
+      throw new ToolInputError(`no deck card pays off on "${f.problem.engineGap}"; what this deck's payoffs wait on: ${known3.map((k) => `${k.words} (${k.n})`).join("; ") || "nothing"}`);
+    }
+    const feeders = outsideFeeders(idx, ctx, hook, payoffs.get(hook), (i) => {
+      const c = store.space.cards.get(idx.cards[i].oracleId);
+      return !!c && eligible(c, true);
+    });
+    problem = { kind: "engine gap", mechanic: hookPhrase(hook), payoffs: [...payoffs.get(hook)].map((i) => idx.cards[i].name).sort(byteOrder) };
+    pool = [...feeders].map(([i, fd]) => ({ c: store.space.cards.get(idx.cards[i].oracleId), fd })).sort((a, b) => byteOrder(a.c.name, b.c.name)).filter(({ c }) => keep(c)).map(({ c, fd }) => ({ ...candidate2(c), feeds: fd }));
+  } else {
+    problem = { kind: "off plan" };
+    pool = all().filter((c) => eligible(c, false) && fit(c.id).score > 0 && keep(c)).map(candidate2);
+  }
+  if (idleDiscounts)
+    notes.push(`${idleDiscounts} cost reducer${idleDiscounts === 1 ? "" : "s"} left out: ${idleDiscounts === 1 ? "it only discounts" : "they only discount"} spells of a color or type the deck does not cast`);
+  if (avoided)
+    notes.push(`${avoided} card${avoided === 1 ? "" : "s"} left out: ${avoided === 1 ? "it fits" : "they fit"} a theme the plan avoids and not the plan`);
+  const absentPos = absentNamed.map((c) => graph.positionOf.get(idOf.get(c.id))).filter((p) => p !== undefined);
+  const into = linksIntoDeck(store, new Set([...ctx.members, ...absentPos]));
+  const linksOf = (c) => c.pos === undefined ? [] : into(c.pos);
+  const absentGraphNames = absentPos.map((p) => idx.cards[p].name);
+  const onPlanDeck = new Set([...d.g.cards.filter((c) => c.name === idx.cards[d.commanderPos].name || fit(c.oracleId).score > 0).map((c) => c.name), ...absentGraphNames]);
+  const priorityDeck = new Set([...resolved.priorities.map((n) => graph.positionOf.get(store.names.find((x) => x.name === n).id)).filter((p) => p !== undefined && ctx.members.has(p)).map((p) => idx.cards[p].name), ...absentGraphNames]);
+  const partners = new Map;
+  const partnersOf = (c) => {
+    let p = partners.get(c.id);
+    if (!p) {
+      const name = c.pos === undefined ? "" : idx.cards[c.pos].name;
+      const others = new Set(linksOf(c).filter(ctx.counts).map((l) => l.from === name ? l.to : l.from));
+      p = { all: others.size, plan: [...others].filter((n) => onPlanDeck.has(n)).length, priority: [...others].filter((n) => priorityDeck.has(n)).sort(byteOrder) };
+      partners.set(c.id, p);
+    }
+    return p;
+  };
+  const { synergy, deckVector, notes: pageNotes } = commanderSignals(store, commanderId);
+  notes.push(...pageNotes);
+  const { edhrecRank } = storeFacts(store);
+  const tagger = new Map(pool.map((c) => [c.id, taggerFit(store, deckVector, c.id)]));
+  const byName2 = (a, b) => byteOrder(a.card.name, b.card.name);
+  const bySynergy = pool.filter((c) => synergy.has(c.id)).sort((a, b) => synergy.get(b.id) - synergy.get(a.id) || byName2(a, b));
+  const byTagger = pool.filter((c) => tagger.get(c.id) > 0).sort((a, b) => tagger.get(b.id) - tagger.get(a.id) || byName2(a, b));
+  const byRank = pool.filter((c) => edhrecRank.has(c.id)).sort((a, b) => edhrecRank.get(a.id) - edhrecRank.get(b.id) || byName2(a, b));
+  const again = (c) => c.feeds?.repeatable ? 0 : 1;
+  const byEngine = pool.filter((c) => partnersOf(c).all > 0).sort((a, b) => (b.feeds?.feeds.size ?? 0) - (a.feeds?.feeds.size ?? 0) || again(a) - again(b) || partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName2(a, b));
+  const byPriority = priorityDeck.size ? pool.filter((c) => partnersOf(c).priority.length > 0).sort((a, b) => partnersOf(b).priority.length - partnersOf(a).priority.length || partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || b.fit.score - a.fit.score || byName2(a, b)) : [];
+  const themeOwn = resolved.inference === null && resolved.themes.length > 0 && resolved.priorities.length > 0 ? planScorer(store, { ...resolved, cards: null, inference: null }) : null;
+  const byTheme = themeOwn ? pool.filter((c) => themeOwn(c.card.id).score > 0).sort((a, b) => themeOwn(b.card.id).score - themeOwn(a.card.id).score || partnersOf(b).plan - partnersOf(a).plan || partnersOf(b).all - partnersOf(a).all || byName2(a, b)) : [];
+  const chosen = new Map;
+  const add = (c) => {
+    if (chosen.size < SHORTLIST_MAX && !chosen.has(c.id)) {
+      chosen.set(c.id, c);
+      return true;
+    }
+    return false;
+  };
+  const viaNamed = new Set;
+  for (const c of absentNamed) {
+    const over = f.maxManaValue !== undefined && c.meta.cmc > f.maxManaValue ? "mana value" : f.maxPrice !== undefined && !(c.meta.usd !== null && c.meta.usd <= f.maxPrice) ? "price" : null;
+    if (over) {
+      notes.push(`${c.name}, named in the plan and not in the deck, is over the ${over} ceiling, so it is left out`);
+      continue;
+    }
+    const cand = pool.find((x) => x.card.id === c.id) ?? candidate2(c);
+    if (add(cand))
+      viaNamed.add(cand.id);
+  }
+  for (const list of [bySynergy, byTagger])
+    for (const c of list.slice(0, PER_SOURCE))
+      add(c);
+  const viaTheme = new Set;
+  let themeTaken = 0;
+  for (const c of byTheme) {
+    if (themeTaken >= THEME_SLOTS || chosen.size >= SHORTLIST_MAX)
+      break;
+    viaTheme.add(c.id);
+    if (add(c))
+      themeTaken++;
+  }
+  let popularOnly = 0;
+  for (const c of byRank.slice(0, PER_SOURCE))
+    if (!chosen.has(c.id) && popularOnly < POPULAR_ONLY && add(c))
+      popularOnly++;
+  const viaEngine = new Set(byEngine.slice(0, PER_SOURCE).map((c) => c.id));
+  for (const list of [byPriority, byEngine])
+    for (const c of list)
+      if (add(c))
+        viaEngine.add(c.id);
+  const taken = {
+    "named by the player": viaNamed,
+    "fits this commander": new Set(bySynergy.slice(0, PER_SOURCE).map((c) => c.id)),
+    "deeper cut": new Set(byTagger.slice(0, PER_SOURCE).map((c) => c.id)),
+    "widely played": new Set(byRank.slice(0, PER_SOURCE).map((c) => c.id)),
+    "fits the named theme": viaTheme,
+    "engine partner": viaEngine
+  };
+  if (bySynergy.length < PER_SOURCE && synergy.size)
+    notes.push(`the commander's page lists ${bySynergy.length} card${bySynergy.length === 1 ? "" : "s"} for this problem`);
+  const before = swapStats(deckNumbers(store, commander, entries, planCtx));
+  const outFit = out ? fit(out.card.id).score : 0;
+  const round2 = (x) => Math.round(x * 1e4) / 1e4;
+  const cards = [...chosen.values()].map((c) => {
+    const labels = SHORTLIST_LABELS.filter((l) => taken[l].has(c.id));
+    const name = c.pos === undefined ? c.card.name : idx.cards[c.pos].name;
+    const all2 = deckLinks(ctx, name, linksOf(c).filter((l) => !offProfile(l.hook)));
+    const genericLinks = all2.filter((l) => l.generic).length;
+    const byEvent = new Map;
+    for (const l of all2) {
+      if (l.generic)
+        continue;
+      const row = byEvent.get(l.on) ?? byEvent.set(l.on, { on: l.on, feeds: [], fedBy: [] }).get(l.on);
+      (l.direction === "feeds" ? row.feeds : row.fedBy).push(l.card);
+    }
+    const links2 = [...byEvent.values()].sort((a, b) => byteOrder(a.on, b.on));
+    const after = swapStats(deckNumbers(store, commander, applySwap(entries, out?.card ?? null, c.card), planCtx));
+    const p = partnersOf(c);
+    return {
+      name: c.card.name,
+      manaValue: c.card.meta.cmc,
+      usd: c.card.meta.usd,
+      typeLine: c.card.meta.type,
+      roles: rolesOf(store.roles, c.card.id).roles.map((r) => r.role),
+      labels,
+      evidence: {
+        commanderSynergy: synergy.has(c.id) ? round2(synergy.get(c.id)) : null,
+        taggerFit: tagger.get(c.id) > 0 ? round2(tagger.get(c.id)) : null,
+        edhrecRank: edhrecRank.get(c.id) ?? null,
+        partners: p.all,
+        planPartners: p.plan,
+        priorityLinks: p.priority,
+        planFit: c.fit,
+        ...c.feeds ? { feeds: [...c.feeds.feeds].sort(byteOrder) } : {}
+      },
+      links: links2,
+      genericLinks,
+      ...links2.length ? {} : {
+        noLinks: c.pos === undefined ? "the card graph cannot read this card, so its links are unknown" : genericLinks ? "only generic links: it is cast or enters into deck cards that any card would feed" : "links to no card in the deck"
+      },
+      ...out ? { after } : {},
+      delta: statsDelta(before, after),
+      planGain: Math.round((c.fit.score - outFit) * 1000) / 1000
+    };
+  }).sort((a, b) => b.labels.length - a.labels.length || b.evidence.planFit.score - a.evidence.planFit.score || byteOrder(a.name, b.name));
+  return {
+    commander: { name: commander.name, colorIdentity: commander.ci.join("") },
+    plan: planEcho(resolved),
+    problem,
+    ceilings: { maxManaValue: f.maxManaValue ?? null, maxPrice: f.maxPrice ?? null },
+    out: out && { name: out.card.name, manaValue: out.card.meta.cmc, usd: out.card.meta.usd, planFit: outFit },
+    pool: pool.length,
+    before,
+    cards,
+    notes,
+    unresolved: unresolvedLines(store, deck.unresolved)
+  };
+}
+function castFacts(store, cards) {
+  const q = store.db.query("SELECT c.types, c.subtypes, c.supertypes, c.mana_cost, s.colors FROM cards c LEFT JOIN card_scryfall s ON s.card_id = c.id WHERE c.oracle_id = ?");
+  const words2 = (x) => new Set(x.toLowerCase().split(/\s+/).filter(Boolean));
+  const COLOR2 = { W: "white", U: "blue", B: "black", R: "red", G: "green" };
+  return [...new Map(cards.map((c) => [c.id, c])).values()].map((c) => {
+    const r = q.get(c.id);
+    const letters = r.colors !== null ? JSON.parse(r.colors) : [...new Set(r.mana_cost.match(/[WUBRG]/g) ?? [])];
+    return { types: words2(r.types), subtypes: words2(r.subtypes), supertypes: words2(r.supertypes), colors: new Set(letters.map((l) => COLOR2[l])) };
+  });
+}
+function outCard(store, name, entries) {
+  const r = resolveCard(store, name);
+  const hit = store.space.cards.get(store.names[r.id - 1].oracleId);
+  if (r.matchedBy !== "exact" && r.matchedBy !== "face")
+    throw new ToolInputError(`out card "${name}" is not an exact card name; candidates: ${[hit.name, ...r.alternatives].join("; ")}`);
+  if (!entries.some((e) => e.card?.id === hit.id))
+    throw new ToolInputError(`${hit.name} is not in the deck, so it cannot be swapped out`);
+  return { card: hit };
+}
+
+// server/store.ts
+import { Database as Database2 } from "bun:sqlite";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { dirname as dirname2 } from "path";
+var STORE_SCHEMA = 2;
+var MANIFEST_PATH = process.env.MTG_DECK_STORE_MANIFEST ?? new URL("./store.json", import.meta.url).pathname;
+var sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+var stampPath = (dbPath) => `${dbPath}.sha256`;
+function readManifest(path = MANIFEST_PATH) {
+  const m = JSON.parse(readFileSync3(path, "utf8"));
+  for (const k of ["version", "url", "gzSha256", "dbSha256"]) {
+    if (typeof m[k] !== "string" || !m[k])
+      throw new Error(`${path}: missing "${k}"`);
+  }
+  return m;
+}
+function checkStoreSchema(dbPath) {
+  const db = new Database2(dbPath, { readonly: true });
+  let found2;
+  try {
+    const hasMeta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get();
+    found2 = hasMeta ? db.query("SELECT value FROM meta WHERE key = 'schema'").get()?.value ?? null : null;
+  } finally {
+    db.close();
+  }
+  if (found2 !== String(STORE_SCHEMA)) {
+    throw new Error(`card data at ${dbPath} is ${found2 === null ? "a store with no schema" : `store schema ${found2}`}; this server needs schema ${STORE_SCHEMA}` + (IN_PLUGIN ? "" : " (rebuild it with mtg-vector's app/build-db.ts)"));
+  }
+}
+function storeIsCurrent(manifest, dbPath = DB_PATH) {
+  return existsSync(dbPath) && existsSync(stampPath(dbPath)) && readFileSync3(stampPath(dbPath), "utf8").trim() === manifest.dbSha256;
+}
+async function installStore(manifest, dbPath = DB_PATH, fetchImpl = fetch) {
+  const res = await fetchImpl(manifest.url, { redirect: "follow" });
+  if (!res.ok)
+    throw new Error(`card data download failed: HTTP ${res.status} from ${manifest.url}`);
+  const gz = new Uint8Array(await res.arrayBuffer());
+  if (sha256(gz) !== manifest.gzSha256)
+    throw new Error(`card data download failed its checksum (${manifest.url})`);
+  const db = Bun.gunzipSync(gz);
+  if (sha256(db) !== manifest.dbSha256)
+    throw new Error("card data unpacked to the wrong checksum");
+  mkdirSync2(dirname2(dbPath), { recursive: true });
+  const tmp = `${dbPath}.download`;
+  writeFileSync2(tmp, db);
+  try {
+    checkStoreSchema(tmp);
+  } catch (e) {
+    rmSync2(tmp, { force: true });
+    throw e;
+  }
+  renameSync2(tmp, dbPath);
+  writeFileSync2(stampPath(dbPath), `${manifest.dbSha256}
+`);
+}
+async function ensureStore(dbPath = DB_PATH) {
+  if (!IN_PLUGIN || process.env.MTG_DECK_DB) {
+    if (!existsSync(dbPath))
+      throw new Error(`no card store at ${dbPath}`);
+    checkStoreSchema(dbPath);
+    return;
+  }
+  const manifest = readManifest();
+  if (storeIsCurrent(manifest, dbPath))
+    return checkStoreSchema(dbPath);
+  rmSync2(stampPath(dbPath), { force: true });
+  await installStore(manifest, dbPath);
+}
+if (false) {}
 
 // server/mcp.ts
 function toolResult(run) {
@@ -36132,13 +42076,16 @@ async function withStore(store, run) {
   }
   return toolResult(() => run(s));
 }
-function createDeckServer(store) {
-  const server = new McpServer({ name: "mtg-deck", version: "0.1.0" });
+var DETAIL = "Pass `detail: true` for the full result";
+var CARD_FACTS = "Pass `cardFacts: true` for every deck card's mana value, type line, power and toughness (null when it has none) and rules text too (`cardFacts`, a table: " + "`columns` named once, one row per card, lands and the commander included) and quote card facts from there; ask once per " + "deck, on deck_stats or diagnose, whichever comes first.";
+var cardFactsFlag = exports_external.boolean().optional().describe("true = also every deck card's mana value, type line, power and toughness, and rules text (default false)");
+function createDeckServer(store, verdicts = {}) {
+  const server = new McpServer({ name: "mtg-deck", version: "0.2.0" });
   server.registerTool("find_cards", {
     title: "Find cards",
-    description: "Find commander-legal cards in the card store (Scryfall, Tagger tags). Every filter given must hold. " + "Find tag labels with the tags tool. Returns the total match count and one page of cards (default 25, at most 100) in a stable order.",
-    inputSchema: findCardsShape
-  }, async (args) => withStore(store, (s) => findCards(s, args)));
+    description: "Find commander-legal cards in the card store (Scryfall, Tagger tags). Every filter given must hold. " + "Find tag labels with the tags tool. Returns the total match count and one page of cards (default 25, at most 100) in a stable order. " + "Two filters let you search for what a commander or the player's plan rewards: `manaSymbols` asks for a minimum count of one color's " + 'mana symbols in the cost (two or more blue symbols = [{color: "U", min: 2}]; a hybrid or Phyrexian symbol counts once for each color ' + 'it can be paid with), and `rulesText` asks for words or phrases in the card\'s rules text ("noncreature spell", "whenever you cast"; ' + "capitals ignored, part of a word matches). Both combine with every other filter. When a search misses (no cards, too few, or too many), " + "change it and search again: loosen a count, use a shorter or longer phrase, or drop a filter. `types` must all hold, so there is no " + '"not a creature" filter: for noncreature spells search Instant, Sorcery, Artifact and Enchantment (and others) in turn. ' + "The cards come as a table: `columns` named once, then one row per card (`detail: true` returns one object per card).",
+    inputSchema: { ...findCardsShape, detail: detailFlag }
+  }, async ({ detail, ...args }) => withStore(store, (s) => detail ? findCards(s, args) : compactFindCards(findCards(s, args))));
   server.registerTool("tags", {
     title: "Find Tagger tags",
     description: "Look up Scryfall Tagger tags by words in their label or description, to use in find_cards `tags`. " + "The store has ~4,600 tags covering far more than the deck roles and levers (anthems, evasion, sacrifice outlets, " + "tribal payoffs, ...). Each tag comes with its description, its parent tags and how many cards carry it or a " + "child tag (inside colorIdentity when given, the count find_cards would return).",
@@ -36146,14 +42093,50 @@ function createDeckServer(store) {
   }, async (args) => withStore(store, (s) => findTags(s, args)));
   server.registerTool("card", {
     title: "Card details",
-    description: "Full details for one card: cost, types, oracle text, power/toughness, keywords, color identity, price, " + "its Scryfall Tagger tags and its deck roles. The name resolves fuzzily; `matchedBy` and `alternatives` show how.",
-    inputSchema: cardShape
-  }, async (args) => withStore(store, (s) => cardDetails(s, args)));
+    description: "Details for one card: cost, mana value, type line, rules text, power/toughness, keywords, color identity, price, " + "its Scryfall Tagger tag labels and its deck role names. The name resolves fuzzily; `matchedBy` and `alternatives` show how. " + `${DETAIL}: the store ids, the type line in parts, each tag's weight and the tags that give each role. ` + `To read several cards (a shortlist's candidates before judging them, say), pass \`names\`, up to ${LOOKUP_MAX}, instead of one lookup per card: ` + "one table (`columns` named once) with a row per name in the order asked, holding name, cost, mana value, type line, power, toughness, keywords and rules text. " + "A `names` row has no tags or roles and takes no `detail`. A name nothing matches, or one that fits several cards, gets no card and a `note` saying why, without failing the call; " + "a partial or misspelled name read as one card says so in its `note`. Deck cards are already in `cardFacts` (deck_stats or diagnose): do not look them up again.",
+    inputSchema: { name: cardShape.name.optional(), names: cardLookupNames, detail: detailFlag }
+  }, async ({ name, names, detail }) => withStore(store, (s) => {
+    if (name === undefined === (names === undefined))
+      throw new ToolInputError("give exactly one of name or names");
+    if (names !== undefined) {
+      if (detail)
+        throw new ToolInputError("detail is for one card: look it up by name");
+      return cardLookupTable(lookupCards(s, names));
+    }
+    const input3 = { name };
+    return detail ? cardDetails(s, input3) : compactCard(cardDetails(s, input3));
+  }));
   server.registerTool("deck_stats", {
     title: "Deck stats",
-    description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load and plan fit against the commander's own text, plus unresolved lines and off-identity cards. " + "Give the commander and either a decklist file path or the pasted list.",
-    inputSchema: deckStatsShape
-  }, async (args) => withStore(store, (s) => deckStats(s, args)));
+    description: "Numbers for a Commander deck: average mana value, mana curve, role counts (ramp, card draw, removal, ...), " + "colored pip load, plus unresolved lines and off-identity cards; with the player's confirmed plan (`plan`: themes, " + "priority cards, themes to avoid), plan fit: which cards fit it and which do not. " + CARD_FACTS + " `detail: true` returns them as one object per card. " + "Give the commander and either a decklist file path or the pasted list.",
+    inputSchema: {
+      ...deckStatsShape,
+      cardFacts: cardFactsFlag,
+      detail: detailFlag
+    }
+  }, async ({ cardFacts: cardFacts3, detail, ...args }) => withStore(store, (s) => detail ? deckStats(s, args) : compactDeckStats(deckStats(s, args), { cardFacts: cardFacts3 })));
+  server.registerTool("commander_profile", {
+    title: "Commander profile",
+    description: "How a commander is usually played: its EDHREC themes with deck counts and shares (a share is of the commander's " + "theme tag mentions, not of its decks), the strongest tags of its Tagger Deck profile with weights, and, when given a " + "decklist, how strongly the list matches each of its top themes (0 to 1, with the cards held and the heaviest cards " + "missing). A commander with no EDHREC page, or one with under 20 decks, is profiled from its own card tags, and " + "`fallback` says why.",
+    inputSchema: commanderProfileShape
+  }, async (args) => withStore(store, (s) => commanderProfile(s, args)));
+  server.registerTool("diagnose", {
+    title: "Diagnose a deck against the plan",
+    description: "What a Commander deck lacks and overdoes against the player's confirmed plan (`plan`, required: themes, " + "priority cards, themes to avoid). Returns engine gaps (payoffs waiting on something too few cards make happen, with both " + "counts and in-color cards that would feed them), every role's count against its target (`targetBasis` says where each " + "target comes from: the plan's theme decks, or the default table when the plan's themes do not cover it), the roles over " + "(with the role's cards to trim, fewest links first) and under, cards off the plan with their roles (`offPlan`, grouped " + "under the reason they share), the cards doing the least with their links into the deck, the cards the card graph cannot " + "read (static effects; `unread`, grouped by reason), which are never judged by their links, and every nonland card's count " + "of linked deck cards (`cards`, a table: `columns` named once, one row per card, most linked first). " + CARD_FACTS + " " + `${DETAIL}: the targets' words on every role, what each off-plan card makes happen and its strongest tags, each card's roles ` + "in the links table, and the card facts as one object per card. " + "Give the commander and either a decklist file path or the pasted list. Same deck and plan, same answer.",
+    inputSchema: {
+      ...diagnoseShape,
+      cardFacts: cardFactsFlag,
+      detail: detailFlag
+    }
+  }, async ({ cardFacts: cardFacts3, detail, ...args }) => withStore(store, (s) => {
+    const full = diagnose2(s, args);
+    return detail ? full : compactDiagnosis(full, { cardFacts: cardFacts3 });
+  }));
+  server.registerTool("shortlist", {
+    title: "Shortlist for one problem",
+    description: "About 30 cards to add for one diagnosed problem, under the player's confirmed plan (`plan`, required). `problem` is " + "one of: {role} (cards holding a deck role), {engineGap} (cards that make an event happen for the deck's payoffs, in the words " + `diagnose gives an engine gap's mechanic, e.g. "a creature dying"), or {offPlan: true} (cards that fit the plan, to replace ` + "cards off it or doing the least). Every card is commander-legal, inside the commander's color identity and outside the deck, " + "and at or under `maxManaValue` and `maxPrice` when given. Each card is labeled by where it came from, with the evidence: " + "fits this commander (the commander's EDHREC synergy), deeper cut (fit to the tags of the commander's decks), widely played " + "(global EDHREC rank; at most 5 cards come in on popularity alone), named by the player (a priority card the deck lacks; it also " + "counts as a deck card for links), fits the named theme (3 picks for a theme the player named beside priority cards), " + "engine partner (card graph links into the deck: first to the " + "plan's priority cards, then to its cards that fit the plan). Cost reducers that discount only spells the deck does not cast are " + "left out. The cards come as a table (`columns` named once, one row per card); each row also carries its links into the deck " + "counted by event (how many deck cards it feeds and is fed by on each), " + "the priority cards it links to, its plan fit score, and what adding it changes in the deck's " + "numbers; with `out` (a card in the deck), what swapping it in for that card changes, with the numbers after (`before` is " + "given once). " + `${DETAIL}: the deck cards on each link, what matched the plan, and the curve and pip changes as a full delta. ` + "The list narrows the pool; it does not judge card quality. Same deck, plan and problem, same answer.",
+    inputSchema: { ...shortlistShape, detail: detailFlag }
+  }, async ({ detail, ...args }) => withStore(store, (s) => detail ? shortlist(s, args) : compactShortlist(shortlist(s, args))));
   server.registerTool("neighbors", {
     title: "Card Space neighbors",
     description: "A card's nearest Card Space neighbors that a commander can play, nearest first, each with its similarity " + "score, mana value, type line, color identity, price and deck roles (up to 30). The card must be inside the " + "commander's color identity; lands have no neighbors.",
@@ -36161,19 +42144,19 @@ function createDeckServer(store) {
   }, async (args) => withStore(store, (s) => neighbors(s, args)));
   server.registerTool("swap_candidates", {
     title: "Swap candidates",
-    description: "Swap candidates for one card in a Commander deck, or for the whole deck, under a lever: plan (better on the " + "commander's plan), cheaper (lower mana value), budget (lower USD price), roles (role counts against targets, and cards " + "that fill roles under target) or redundancy (roles over target, and cuts). Every candidate is a commander-legal card " + "inside the commander's color identity, with its reason, its evidence, the deck numbers after the swap (`before` is " + "given once), `dropsRole` when it leaves a role with fewer cards, and `belowTarget` when that leaves a role under its " + "target. Role targets are a proposal; pass `targets` to change them.",
-    inputSchema: swapCandidatesShape
-  }, async (args) => withStore(store, (s) => swapCandidates(s, args)));
+    description: "Swap candidates for one card in a Commander deck, or for the whole deck, under a lever: plan (fits the " + "player's confirmed plan better; needs `plan`), cheaper (lower mana value), budget (lower USD price), roles (role counts against targets, and cards " + "that fill roles under target) or redundancy (roles over target, and cuts). Every candidate is a commander-legal card " + "inside the commander's color identity, with its reason (the evidence in words: plan fit, Card Space neighbor rank, shared " + "tags, mana value and price difference), the average mana value and plan fit after the swap (`after`; `before` is given " + "once), the role counts it changes (`delta`, when it changes some), " + "`roleDrops` when it leaves a role with fewer cards, and `rolesBelowTarget` when that leaves a role under its " + "target. Role targets are a proposal; pass `targets` to change them. A plan that names a theme the data does not know, " + "or one with too little data to profile, comes back as an error saying which. " + `${DETAIL}: the evidence as numbers, and every deck number after each swap (curve and pips too) with the full change.`,
+    inputSchema: { ...swapCandidatesShape, detail: detailFlag }
+  }, async ({ detail, ...args }) => withStore(store, (s) => detail ? swapCandidates(s, args) : compactSwapCandidates(swapCandidates(s, args))));
   server.registerTool("accept_swap", {
     title: "Accept a swap",
-    description: "Record that the player accepted a swap: rewrites the deck file (the outgoing card's line becomes the incoming " + "card's line), appends a dated change-log line, and logs the card pair as a quality label. Exact card names only. " + "Give out alone for a cut, in alone for an add.",
+    description: "Record that the player accepted a swap: rewrites the deck file (the outgoing card's line becomes the incoming " + "card's line), appends a dated change-log line, and logs the card pair as a quality label. Exact card names only. " + "Give out alone for a cut, in alone for an add. Returns a short receipt: the change-log line written, the file's name, and " + "the deck numbers that moved (average mana value and role counts, each [before, after]); run deck_stats for the full numbers. " + "The commander cannot leave the deck unless the player asks to change it: then `out` is the commander, `in` the new one (a card that can be a commander), " + "and `changeCommander: true`. The new commander's colors then judge the deck; no card is removed, and the receipt's `offColor` gives how many cards fall outside " + "those colors and the first of their names (deck_stats with the new commander lists them all as `offIdentity`). " + 'A new commander already in the deck is promoted: one copy of it remains, the old commander takes its place when its colors fit (`oldCommander: "stays"`), and otherwise leaves (`"left"`, with `cards` giving the deck\'s size [before, after]). ' + "A file that does not read as a deck list is refused and left as it was.",
     inputSchema: acceptSwapShape
-  }, async (args) => withStore(store, (s) => acceptSwap(s, args)));
+  }, async (args) => withStore(store, (s) => acceptReceipt(acceptSwap(s, args, verdicts))));
   server.registerTool("reject_swap", {
     title: "Reject a swap",
-    description: "Record that the player rejected a swap: logs the card pair as a quality label. The deck file is never touched.",
+    description: "Record that the player rejected a swap: logs the card pair as a quality label. The deck file is never touched. " + "Returns the verdict and the pair logged.",
     inputSchema: rejectSwapShape
-  }, async (args) => withStore(store, (s) => rejectSwap(s, args)));
+  }, async (args) => withStore(store, (s) => rejectReceipt(rejectSwap(s, args, verdicts))));
   return server;
 }
 if (import.meta.main) {

@@ -7,14 +7,21 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import fc from "fast-check";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSpace, normName as normNameOf, parseDecklist, resolveName } from "./deck-pool";
-import { cardDetails, deckStats, findCards, findTags, neighbors, openStore, type FindCardsInput, type FoundCard, type Store } from "./deck-tools";
+import { cardDetails, deckStats, findCards, findTags, neighbors, openStore, ToolInputError, type FindCardsInput, type FoundCard, type Store } from "./deck-tools";
 import { acceptSwap, LABELS_PATH, rejectSwap, swapCandidates } from "./swap-tools";
+import { diagnose } from "./diagnose";
+import { shortlist } from "./shortlist";
 import { createDeckServer } from "./mcp";
+import { acceptReceipt, compactCard, rejectReceipt } from "./compact";
 import { loadRoleIndex, roleSheet } from "./roles";
+import { readJSONL } from "./scryfall";
+
+// A player's confirmed plan for the Namor fixture (DT-6.3): the plan comes from the player, never from Namor's text.
+const NAMOR_PLAN = { themes: ["Spellslinger"] };
 
 let store: Store;
 let client: Client;
@@ -47,6 +54,25 @@ test("find schema: find_cards takes color identity, card type, mana value range,
   expect(props.tags.type).toBe("array");
   expect(props.keywords.type).toBe("array");
   for (const range of ["manaValue", "power", "toughness"]) expect(Object.keys(props[range].properties ?? {}).sort()).toEqual(["max", "min"]);
+});
+
+test("find schema: the tool and its inputs tell Claude what the mana-symbol and rules-text filters do, and how hybrid and Phyrexian symbols count (ISC-79, ISC-80)", async () => {
+  const { tools } = await client.listTools();
+  const tool = tools.find((t) => t.name === "find_cards")!;
+  const props = (tool.inputSchema as { properties: Record<string, { description?: string; type?: string; items?: { properties?: Record<string, { enum?: string[] }> } }> }).properties;
+  expect(props.manaSymbols.type).toBe("array");
+  expect(props.manaSymbols.items?.properties?.color.enum).toEqual(["W", "U", "B", "R", "G"]);
+  expect(props.rulesText.type).toBe("array");
+  expect(props.manaSymbols.description).toMatch(/hybrid/i);
+  expect(props.manaSymbols.description).toMatch(/phyrexian/i);
+  expect(props.manaSymbols.description).toMatch(/two or more blue/);
+  expect(props.rulesText.description).toMatch(/capitals are ignored/i);
+  expect(props.rulesText.description).toMatch(/part of a word/i);
+  // the tool's own description names both filters and says what to try when a search misses
+  expect(tool.description).toContain("manaSymbols");
+  expect(tool.description).toContain("rulesText");
+  expect(tool.description).toMatch(/noncreature/i);
+  expect(tool.description).toMatch(/misses|too few|too many/i);
 });
 
 // ---------- find filters (ISC-17.2) ----------
@@ -159,6 +185,138 @@ test("find filters: for random filter combinations every result satisfies every 
   expect(nonEmpty / runs).toBeGreaterThan(0.8);
 }, 60_000);
 
+// ---------- mana symbols and rules text (ISC-79, ISC-80, DT-6.11) ----------
+// The oracle here is the raw Scryfall file, read straight (data/scryfall/oracle_cards.jsonl.gz), not the store's
+// mana_cost or oracle_text columns the tool queries. A card's cost is its front face's (or the card's own) mana_cost,
+// its text the card's oracle_text or every face's joined by a line break. Symbols are counted by parsing each `{...}`
+// and splitting it on "/", not by the tool's letter count.
+
+type RawCard = { oracle_id: string; mana_cost?: string; oracle_text?: string; card_faces?: { mana_cost?: string; oracle_text?: string }[] };
+const COLOR_LETTERS = ["W", "U", "B", "R", "G"] as const;
+type Color = (typeof COLOR_LETTERS)[number];
+type Raw = { cost: string; text: string; symbols: Record<Color, number> };
+const factsByName = new Map<string, Raw>();
+const factsById = new Map<number, Raw>(); // keyed like `cards` (store id), joined through oracle_id
+
+beforeAll(async () => {
+  const raw = new Map<string, Raw>();
+  for (const o of (await readJSONL(new URL("../data/scryfall/oracle_cards.jsonl.gz", import.meta.url).pathname)) as RawCard[]) {
+    const cost = o.card_faces?.[0]?.mana_cost ?? o.mana_cost ?? "";
+    const text = o.oracle_text ?? (o.card_faces ?? []).map((f) => f.oracle_text ?? "").join("\n");
+    const symbols = Object.fromEntries(COLOR_LETTERS.map((c) =>
+      [c, (cost.match(/\{[^}]+\}/g) ?? []).filter((s) => s.slice(1, -1).split("/").includes(c)).length])) as Record<Color, number>;
+    raw.set(o.oracle_id, { cost, text, symbols });
+  }
+  for (const r of store.db.query("SELECT id, name, oracle_id FROM cards").all() as { id: number; name: string; oracle_id: string }[]) {
+    const x = raw.get(r.oracle_id);
+    if (!x) throw new Error(`store card ${r.name} is not in the raw Scryfall file`);
+    factsById.set(r.id, x);
+    factsByName.set(r.name, x);
+  }
+});
+
+const factsOf = (name: string) => factsByName.get(name)!;
+// capitals ignored for the letters A to Z only, the way the tool matches
+const asciiLower = (s: string) => s.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
+type SymbolFilter = { color: Color; min: number }[];
+const symbolsHold = (x: Raw, sf: SymbolFilter) => sf.every((s) => x.symbols[s.color] >= s.min);
+const textHolds = (x: Raw, words: string[]) => words.every((w) => asciiLower(x.text).includes(asciiLower(w)));
+
+// the other filters a new filter must combine with, each a fixed example the generator can pick
+const OTHERS: FindCardsInput[] = [
+  {}, {}, { colorIdentity: "U" }, { types: ["Instant"] }, { types: ["Creature"], manaValue: { max: 4 } }, { land: false, manaValue: { min: 3 } },
+  { colorIdentity: "WUB", keywords: ["Flying"] }, { maxPrice: 2 }, { tags: ["ramp"] },
+];
+
+function expectedPage(f: FindCardsInput, holds: (x: Raw) => boolean) {
+  const expected = cards.filter((c) => oracleMatches(c, f) && holds(factsById.get(c.id)!)).sort(ORDER[f.sort!]);
+  return { expected, page: expected.slice(f.offset, f.offset! + f.limit!).map((c) => c.name) };
+}
+
+test("ISC-79: for random colors, symbol counts and other filters, every result's raw cost carries at least that many symbols of that color (hybrid and Phyrexian each count once per color they can be paid with), and the page is exactly the matching cards", () => {
+  let runs = 0, nonEmpty = 0, deep = 0;
+  const arb = fc.record({
+    colors: fc.array(fc.record({ color: fc.constantFrom(...COLOR_LETTERS), min: fc.integer({ min: 1, max: 4 }) }), { minLength: 1, maxLength: 2 }),
+    other: fc.constantFrom(...OTHERS), sort: fc.constantFrom("name", "mana_value", "price") as fc.Arbitrary<"name" | "mana_value" | "price">,
+    limit: fc.integer({ min: 1, max: 100 }), offset: fc.constantFrom(0, 0, 3),
+  });
+  fc.assert(fc.property(arb, (d) => {
+    const f: FindCardsInput = { ...d.other, manaSymbols: d.colors, sort: d.sort, limit: d.limit, offset: d.offset };
+    const { expected, page } = expectedPage(f, (x) => symbolsHold(x, d.colors));
+    const got = findCards(store, f);
+    runs++;
+    if (got.total) nonEmpty++;
+    if (got.total && d.colors.some((s) => s.min >= 3)) deep++;
+    for (const r of got.cards) {
+      expect(symbolsHold(factsOf(r.name), d.colors)).toBe(true);
+      expect(oracleMatches(cards.find((c) => c.name === r.name)!, d.other)).toBe(true);
+    }
+    expect(got.total).toBe(expected.length);
+    expect(got.cards.map((r) => r.name)).toEqual(page);
+  }), { numRuns: 150, seed: 7901 });
+  console.log(`ISC-79: ${runs} runs, ${nonEmpty} non-empty, ${deep} non-empty with a count of 3 or more`);
+  expect(nonEmpty / runs).toBeGreaterThan(0.6);
+  expect(deep).toBeGreaterThan(3);
+}, 120_000);
+
+test("ISC-79: hybrid, generic-hybrid and Phyrexian symbols count once toward each color they can be paid with, on the front face's cost", () => {
+  const holds = (name: string, color: Color, min: number) => findCards(store, { name, manaSymbols: [{ color, min }] }).cards.some((c) => c.name === name);
+  // {U}{U/R}{R}: two blue, two red; {3}{R/P}{R/P}: two red; {1}{G}{G/W/P}{W}: two green, two white; {2/U}x3: three blue;
+  // {U}{U}: two blue; Fire // Ice is {1}{R} on its front face: one red, no blue
+  for (const [name, color, n] of [["Abstract Paintmage", "U", 2], ["Abstract Paintmage", "R", 2], ["Act of Aggression", "R", 2], ["Ajani, Sleeper Agent", "G", 2],
+    ["Ajani, Sleeper Agent", "W", 2], ["Advice from the Fae", "U", 3], ["Counterspell", "U", 2], ["Fire // Ice", "R", 1], ["Fire // Ice", "U", 0]] as const) {
+    if (n > 0) expect(holds(name, color, n)).toBe(true);
+    expect(holds(name, color, n + 1)).toBe(false);
+  }
+  expect(() => findCards(store, { manaSymbols: [{ color: "X" as Color, min: 1 }] })).toThrow();
+  expect(() => findCards(store, { manaSymbols: [{ color: "U", min: 0 }] })).toThrow();
+});
+
+test("ISC-80: for random words, every result's raw oracle text holds each of them (capitals ignored), and the page is exactly the matching cards", () => {
+  const withText = cards.filter((c) => factsById.get(c.id)!.text.length > 0);
+  const FIXED = ["draw a card", "Whenever you cast", "noncreature spell", "COUNTER TARGET", "{U}", "each opponent", "+1/+1 counter", "zzqqxx"];
+  let runs = 0, nonEmpty = 0, multi = 0;
+  const arb = fc.record({
+    seed: fc.nat(), from: fc.nat(), len: fc.integer({ min: 1, max: 4 }), upper: fc.boolean(), fixed: fc.subarray(FIXED, { maxLength: 2 }), useSeed: fc.boolean(),
+    other: fc.constantFrom(...OTHERS), sort: fc.constantFrom("name", "mana_value", "price") as fc.Arbitrary<"name" | "mana_value" | "price">,
+    limit: fc.integer({ min: 1, max: 100 }), offset: fc.constantFrom(0, 0, 3),
+  });
+  fc.assert(fc.property(arb, (d) => {
+    // words from a seed card's own text (so most runs match something), cut inside one line, plus fixed phrases
+    const line = factsById.get(withText[d.seed % withText.length].id)!.text.split("\n").filter(Boolean)[0].split(" ");
+    const start = d.from % line.length;
+    const fromSeed = line.slice(start, start + d.len).join(" ");
+    const words = [...(d.useSeed ? [d.upper ? fromSeed.toUpperCase() : fromSeed] : []), ...d.fixed];
+    if (words.length === 0) words.push("draw");
+    const f: FindCardsInput = { ...d.other, rulesText: words, includeText: true, sort: d.sort, limit: d.limit, offset: d.offset };
+    const { expected, page } = expectedPage(f, (x) => textHolds(x, words));
+    const got = findCards(store, f);
+    runs++;
+    if (got.total) nonEmpty++;
+    if (got.total && words.length > 1) multi++;
+    for (const r of got.cards) {
+      expect(textHolds(factsOf(r.name), words)).toBe(true);
+      for (const w of words) expect(asciiLower(r.oracleText!)).toContain(asciiLower(w)); // the text the tool hands back holds them too
+    }
+    expect(got.total).toBe(expected.length);
+    expect(got.cards.map((r) => r.name)).toEqual(page);
+  }), { numRuns: 150, seed: 8001 });
+  console.log(`ISC-80: ${runs} runs, ${nonEmpty} non-empty, ${multi} non-empty with several words`);
+  expect(nonEmpty / runs).toBeGreaterThan(0.5);
+  expect(multi).toBeGreaterThan(3);
+}, 120_000);
+
+test("ISC-80: a phrase is matched as typed (partial words match, '%' is a plain character), and either face's words of a two-faced card count", () => {
+  const names = (rulesText: string[], extra: FindCardsInput = {}) => findCards(store, { rulesText, limit: 100, ...extra }).cards.map((c) => c.name);
+  expect(names(["Tap target permanent", "draw a card"], { name: "fire // ice" })).toEqual(["Fire // Ice"]); // Ice's text, found through the whole card
+  expect(names(["Fire deals 2 damage divided"], { name: "fire // ice" })).toEqual(["Fire // Ice"]);
+  expect(names(["100%"])).toEqual(cards.filter((c) => factsById.get(c.id)!.text.toLowerCase().includes("100%")).sort(ORDER.name).map((c) => c.name));
+  expect(names(["%"], { name: "Counterspell" })).toEqual([]); // not a wildcard
+  expect(names(["draw"], { name: "Divination" })).toContain("Divination"); // "Draw two cards": a part of a word matches
+  expect(names(["DRAW TWO CARDS"], { name: "Divination" })).toContain("Divination"); // capitals ignored
+  expect(() => findCards(store, { rulesText: [""] })).toThrow();
+});
+
 test("find filters: a parent tag finds cards tagged only with its descendants", () => {
   const ramp = findCards(store, { tags: ["ramp"], colorIdentity: "U", limit: 100 });
   const direct = findCards(store, { tags: ["mana rock"], colorIdentity: "U", limit: 100 });
@@ -258,13 +416,15 @@ test("deck stats: Namor returns average mana value, curve, role counts, pip load
   expect(s.roleCounts).toEqual(sheet.counts);
   expect(s.unroled).toEqual(sheet.unroled);
 
-  // plan read from Namor's text: noncreature spells with blue pips make tokens; the tribe is Merfolk
-  expect(s.planFit.plan).toEqual({ spellPips: "U", tribe: "Merfolk" });
-  expect(s.planFit.of).toBe(63); // nonland cards other than the commander
-  expect(s.planFit.onPlan + s.planFit.offPlan.length).toBe(63);
-  // off plan: no blue pip on a noncreature spell, not a Merfolk, no payoff text; checked by hand against the list
-  for (const off of ["Sol Ring", "Mind Stone", "Lightning Greaves", "Chasm Skulker"]) expect(s.planFit.offPlan).toContain(off);
-  for (const on of ["Opt", "Merfolk Looter", "Talrand, Sky Summoner", "Curiosity"]) expect(s.planFit.offPlan).not.toContain(on);
+  // plan fit comes from the player's plan only (ISC-48): without one there is none, never a reading of Namor's text
+  expect(s.planFit).toBeNull();
+  const p = deckStats(store, { deckFile: "fixtures/namor.txt", commander: "Namor the Sub-Mariner", plan: NAMOR_PLAN }).planFit!;
+  expect(p.plan).toEqual({ themes: ["Spellslinger"], priorities: [], avoid: [] });
+  expect(p.of).toBe(63); // nonland cards other than the commander
+  expect(p.onPlan + p.offPlan.length).toBe(63);
+  // a spellslinger plan: mana rocks and equipment do nothing for it; spell payoffs and cantrips do (checked by hand)
+  for (const off of ["Sol Ring", "Mind Stone", "Lightning Greaves", "Swiftfoot Boots"]) expect(p.offPlan).toContain(off);
+  for (const on of ["Opt", "Consider", "Talrand, Sky Summoner", "Archmage of Runes"]) expect(p.offPlan).not.toContain(on);
 });
 
 test("deck stats: a pasted list works like a file, misses are flagged by line with close names, off-identity cards are named", () => {
@@ -287,10 +447,36 @@ const DATA_STRINGS: Record<string, string> = {
   "find_cards.tags[]": "a Tagger tag label from the store's vocabulary",
   "find_cards.keywords[]": "a keyword from the store's vocabulary",
   "find_cards.name": "part of a card name, matched with instr() on a bound parameter",
+  "find_cards.rulesText[]": "words or a phrase from a card's rules text, matched with instr() on a bound parameter",
   "card.name": "a card name, resolved in TypeScript",
+  "card.names[]": "a card name, resolved in TypeScript; one that resolves to nothing is reported on its own row",
+  "commander_profile.commander": "a card name, resolved in TypeScript (exact or front face only)",
+  "commander_profile.deckFile": "a file path, read from disk",
+  "commander_profile.decklist": "decklist text, parsed in TypeScript",
   "deck_stats.commander": "a card name, resolved in TypeScript",
   "deck_stats.deckFile": "a file path, read from disk",
   "deck_stats.decklist": "decklist text, parsed in TypeScript",
+  "deck_stats.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "deck_stats.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "deck_stats.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "diagnose.commander": "a card name, resolved in TypeScript (exact or front face only)",
+  "diagnose.deckFile": "a file path, read from disk",
+  "diagnose.decklist": "decklist text, parsed in TypeScript",
+  "diagnose.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "diagnose.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "diagnose.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "shortlist.commander": "a card name, resolved in TypeScript (exact or front face only)",
+  "shortlist.deckFile": "a file path, read from disk",
+  "shortlist.decklist": "decklist text, parsed in TypeScript",
+  "shortlist.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "shortlist.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "shortlist.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "shortlist.problem.role": "a role name from roles.json, checked in TypeScript (unknown names are an error)",
+  "shortlist.problem.engineGap": "an event in words, matched in TypeScript against what the deck's payoffs wait on (unknown words are an error)",
+  "shortlist.out": "a card name, resolved in TypeScript (exact or front face only) and checked to be in the deck",
+  "swap_candidates.plan.themes[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
+  "swap_candidates.plan.priorities[]": "a card name, resolved in TypeScript (exact or front face only)",
+  "swap_candidates.plan.avoid[]": "a theme name, matched against the store's theme list in TypeScript (unknown names are an error)",
   "neighbors.card": "a card name, resolved in TypeScript",
   "tags.text": "words matched against tag labels and descriptions in TypeScript",
   "tags.colorIdentity": "WUBRG letters, checked by a regex and turned into a bitmask",
@@ -313,9 +499,9 @@ const DATA_STRINGS: Record<string, string> = {
 };
 const SQLISH = /sql|query|where|statement|clause|expr|order_?by|raw/i;
 
-test("no raw sql: the MCP has exactly its eight tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
+test("no raw sql: the MCP has exactly its eleven tools, no SQL-like parameter, and every free string is a listed data field (ISC-18)", async () => {
   const { tools } = await client.listTools();
-  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+  expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "shortlist", "swap_candidates", "tags"]);
   const strings: string[] = [];
   const walk = (s: JsonSchema & { enum?: unknown[]; propertyNames?: JsonSchema; additionalProperties?: JsonSchema | boolean }, path: string) => {
     if (s.type === "string" && !s.enum) strings.push(path);
@@ -367,11 +553,13 @@ test("stdio smoke: .mcp.json registers mtg-deck, and the registered command answ
   await stdio.connect(new StdioClientTransport({ command: entry.command, args: entry.args, cwd: root, stderr: "pipe" }));
   try {
     const { tools } = await stdio.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "deck_stats", "find_cards", "neighbors", "reject_swap", "swap_candidates", "tags"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["accept_swap", "card", "commander_profile", "deck_stats", "diagnose", "find_cards", "neighbors", "reject_swap", "shortlist", "swap_candidates", "tags"]);
     const res = await stdio.callTool({ name: "find_cards", arguments: { colorIdentity: "U", types: ["Legendary", "Creature"], subtypes: ["Merfolk"], keywords: ["Flying"], manaValue: { max: 3 } } });
     expect(res.isError).toBeFalsy();
-    const out = res.structuredContent as { cards: { name: string }[] };
-    expect(out.cards.map((c) => c.name)).toContain("Namor the Sub-Mariner");
+    // DT-6.16: the cards come as a table, the name in the first column
+    const out = res.structuredContent as { cards: { columns: string[]; rows: unknown[][] } };
+    expect(out.cards.columns[0]).toBe("name");
+    expect(out.cards.rows.map((r) => r[0])).toContain("Namor the Sub-Mariner");
     expect(JSON.parse((res.content as { text: string }[])[0].text)).toEqual(out);
   } finally {
     await stdio.close();
@@ -433,38 +621,40 @@ test("budget lever: for random priced cards and commanders, every candidate has 
   expect(r.notes.join(" ")).toMatch(/no Scryfall price/);
 }, 120_000);
 
-// Twelve Namor swaps a player rated good on 2026-11-06 (the file-based lever's tests hold the same list). Each must
-// stay offered in the top 3 for its card.
+// Twelve Namor swaps a player rated good on 2026-11-06, under the old plan lever that read Namor's text (blue pips per
+// spell, Merfolk). That reading is retired (ISA ISC-48: the plan comes from the player), so these are no longer a pass
+// bar for the lever; they stay as a measurement. Under a Spellslinger plan the lever keeps 3 of the 12 (measured
+// 2026-11-07: Chasm Skulker → Kaito, The Reality Chip → Counterbalance, Thought Vessel → Ms. Marvel); the old lever's
+// pip count, which made Neutralize beat Censor, is not a hook or a tag. The shortlist (DT-6.5) replaces this lever.
 const RATED_NAMOR: [string, string][] = [
   ["Archmage of Runes", "Spellweaver Volute"], ["Blink of an Eye", "Distorting Wake"], ["Censor", "Neutralize"], ["Chasm Skulker", "Kaito, Cunning Infiltrator"],
   ["Deeproot Pilgrimage", "Daughter of the Deep"], ["Dig Through Time", "Ancestral Memories"], ["Essence Scatter", "Mystic Denial"], ["Evacuation", "Inundate"],
   ["Imprisoned in the Moon", "In Too Deep"], ["Remand", "Archmage's Charm"], ["The Reality Chip", "Counterbalance"], ["Thought Vessel", "Ms. Marvel, Kamala Khan"],
 ];
 
-test("plan lever: all 12 Namor swaps a player rated good are still offered in the top 3 for their card, through swap_candidates", () => {
-  for (const [out, inn] of RATED_NAMOR) {
-    const r = swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", card: out, lever: "plan", limit: 3 });
-    expect(r.candidates.map((c) => c.in!.name)).toContain(inn);
-  }
+test("plan lever: under a Spellslinger plan, at least the 3 of the 12 rated Namor swaps measured on 2026-11-07 stay in the top 3 for their card", () => {
+  const kept = RATED_NAMOR.filter(([out, inn]) => swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", card: out, lever: "plan", limit: 3, plan: NAMOR_PLAN })
+    .candidates.some((c) => c.in!.name === inn));
+  expect(kept.length).toBeGreaterThanOrEqual(3);
 }, 60_000);
 
-test("plan lever: per card, the store port offers the same candidates in the same order as the file-based lever (deck-swaps.ts on MV-10's in-color graph)", async () => {
-  const { spaceFor, resolveName } = await import("./deck-pool");
-  const { deckSwaps, readPlan } = await import("./deck-swaps");
-  const base = await loadSpace();
-  const cmd = resolveName(base, "Namor the Sub-Mariner")!;
-  const space = await spaceFor(base, cmd);
-  const deck = parseDecklist(base, await Bun.file(NAMOR_DECK).text());
-  const ref = deckSwaps(space, cmd, deck.entries.map((e) => e.card!.id), readPlan(cmd), { perCard: 5 });
-  let compared = 0;
-  for (const c of ref.cards) {
-    const want = (ref.perCard.get(c.id) ?? []).map((s) => s.in.name);
-    const got = swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", card: c.name, lever: "plan", limit: 5 });
-    expect({ card: c.name, offered: got.candidates.map((x) => x.in!.name) }).toEqual({ card: c.name, offered: want });
-    compared += want.length;
+test("plan lever: it needs the player's plan, and every candidate fits that plan strictly better than the card it replaces, at most 1 mana value more (ISC-48)", () => {
+  const base = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever: "plan" as const };
+  expect(() => swapCandidates(store, base)).toThrow(/needs|pass plan/);
+  expect(() => swapCandidates(store, base)).toThrow(ToolInputError);
+  const r = swapCandidates(store, { ...base, plan: NAMOR_PLAN });
+  expect(r.plan).toEqual({ themes: ["Spellslinger"], priorities: [], avoid: [] });
+  expect(r.candidates.length).toBeGreaterThan(5);
+  for (const c of r.candidates) {
+    expect(c.evidence.planGain!).toBeGreaterThan(0);
+    expect(c.evidence.manaValueDelta).toBeLessThanOrEqual(1);
+    expect(c.reason).toMatch(/^plan: /);
   }
-  expect(compared).toBeGreaterThan(30);
-}, 120_000);
+  // the same plan named another way reads the same; a plan the data cannot read is a tool error saying which
+  expect(swapCandidates(store, { ...base, plan: { themes: ["spellslinger"] } }).candidates).toEqual(r.candidates);
+  expect(() => swapCandidates(store, { ...base, plan: { themes: ["Stompy"] } })).toThrow(/too little data/);
+  expect(() => swapCandidates(store, { ...base, plan: { themes: ["Spellslingr"] } })).toThrow(/closest known themes: Spellslinger/);
+}, 60_000);
 
 // Commander legality and color identity read from the raw Scryfall dump (deck-pool loadSpace), not from the store. Names
 // repeat in the dump (the token "Storm Crow" is not legal; the card is), so a name passes when a same-named entry does.
@@ -494,10 +684,11 @@ test("swap identity: for random commanders, decks and cards, every candidate und
   fc.assert(fc.property(deckDraw, fc.constantFrom(...LEVER_LIST), ({ commander, seeds, off }, lever) => {
     const decklist = drawDeck(commander, seeds, off);
     const cmd = ciOf(commander);
-    const deckRun = swapCandidates(store, { commander, decklist, lever });
+    const plan = lever === "plan" ? { themes: ["Tokens"] } : undefined; // a theme plan fits any commander
+    const deckRun = swapCandidates(store, { commander, decklist, lever, plan });
     wholeDeck[lever] += deckRun.candidates.length;
     const runs = [deckRun];
-    if (lever !== "roles") runs.push(swapCandidates(store, { commander, decklist, lever, card: decklist.split("\n")[0].slice(2) }));
+    if (lever !== "roles") runs.push(swapCandidates(store, { commander, decklist, lever, plan, card: decklist.split("\n")[0].slice(2) }));
     for (const r of runs) for (const s of r.candidates) {
       if (s.in) { seen++; expect({ card: s.in.name, ok: legalInside(s.in.name, cmd) }).toEqual({ card: s.in.name, ok: true }); }
       if (s.out) expect(decklist).toContain(`1 ${s.out.name}`);
@@ -511,8 +702,8 @@ test("swap identity: for random commanders, decks and cards, every candidate und
 function namorCandidates() {
   const runs = [];
   for (const lever of ["plan", "cheaper", "budget"] as const) {
-    runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever }));
-    for (const card of ["Dig Through Time", "Remand", "Sol Ring"]) runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever, card }));
+    runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever, plan: NAMOR_PLAN }));
+    for (const card of ["Dig Through Time", "Remand", "Sol Ring"]) runs.push(swapCandidates(store, { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever, card, plan: NAMOR_PLAN }));
   }
   return runs;
 }
@@ -554,16 +745,16 @@ function editedList(text: string, out: string, inn: string): string {
 
 test("swap deltas: every Namor candidate carries the deck numbers after the swap, equal to deck_stats on the edited list, and the change from before (ISC-21.2)", async () => {
   const text = await Bun.file(NAMOR_DECK).text();
-  const before = deckStats(store, { deckFile: "fixtures/namor.txt", commander: "Namor the Sub-Mariner" });
+  const before = deckStats(store, { deckFile: "fixtures/namor.txt", commander: "Namor the Sub-Mariner", plan: NAMOR_PLAN });
   let n = 0;
   for (const r of namorCandidates()) {
-    expect(r.before).toMatchObject({ cards: before.cards, averageManaValue: before.averageManaValue, curve: before.curve, roleCounts: before.roleCounts, pipLoad: before.pipLoad, onPlan: before.planFit.onPlan });
+    expect(r.before).toMatchObject({ cards: before.cards, averageManaValue: before.averageManaValue, curve: before.curve, roleCounts: before.roleCounts, pipLoad: before.pipLoad, onPlan: before.planFit!.onPlan });
     for (const c of r.candidates) {
       n++;
-      const after = deckStats(store, { decklist: editedList(text, c.out!.name, c.in!.name), commander: "Namor the Sub-Mariner" });
-      expect(c.after).toEqual({ cards: after.cards, nonland: after.nonland, averageManaValue: after.averageManaValue, curve: after.curve, roleCounts: after.roleCounts, pipLoad: after.pipLoad, onPlan: after.planFit.onPlan, planOf: after.planFit.of });
+      const after = deckStats(store, { decklist: editedList(text, c.out!.name, c.in!.name), commander: "Namor the Sub-Mariner", plan: NAMOR_PLAN });
+      expect(c.after).toEqual({ cards: after.cards, nonland: after.nonland, averageManaValue: after.averageManaValue, curve: after.curve, roleCounts: after.roleCounts, pipLoad: after.pipLoad, onPlan: after.planFit!.onPlan, planOf: after.planFit!.of });
       expect(c.delta.averageManaValue).toBeCloseTo(after.averageManaValue - before.averageManaValue, 3);
-      expect(c.delta.onPlan).toBe(after.planFit.onPlan - before.planFit.onPlan);
+      expect(c.delta.onPlan).toBe(after.planFit!.onPlan - before.planFit!.onPlan);
       for (const [role, k] of Object.entries(after.roleCounts)) expect(c.delta.roleCounts[role] ?? 0).toBe(k - before.roleCounts[role]);
       for (const [b, k] of Object.entries(after.curve)) expect(c.delta.curve[b] ?? 0).toBe(k - before.curve[b as keyof typeof before.curve]);
     }
@@ -575,7 +766,7 @@ test("role drop flag: swapping the deck's only counterspell for a card that is n
   const decklist = "1 Counterspell\n1 Sol Ring\n1 Opt\n1 Merfolk Looter\n30 Island";
   let flagged = 0, kept = 0;
   for (const lever of ["plan", "cheaper", "budget"] as const) {
-    const r = swapCandidates(store, { commander: "Namor the Sub-Mariner", decklist, card: "Counterspell", lever, limit: 50 });
+    const r = swapCandidates(store, { commander: "Namor the Sub-Mariner", decklist, card: "Counterspell", lever, limit: 50, plan: NAMOR_PLAN });
     expect(r.before.roleCounts.counterspell).toBe(1);
     for (const c of r.candidates) {
       const counters = cardDetails(store, { name: c.in!.name }).card.roles.some((x) => x.role === "counterspell");
@@ -819,9 +1010,9 @@ test("neighbors tool: a card outside the commander's identity, a land, and an in
   expect(bad.isError).toBe(true);
 });
 
-test("swap tools over MCP: swap_candidates answers through the client with the same result as the function; mistakes and SQL come back as tool errors", async () => {
-  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever: "plan", card: "Remand", limit: 3 };
-  const res = await client.callTool({ name: "swap_candidates", arguments: args });
+test("swap tools over MCP: swap_candidates answers through the client with the same result as the function (detail: true; compact.test.ts checks the default); mistakes and SQL come back as tool errors", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", lever: "plan", card: "Remand", limit: 3, plan: NAMOR_PLAN };
+  const res = await client.callTool({ name: "swap_candidates", arguments: { ...args, detail: true } });
   expect(res.isError).toBeFalsy();
   expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(swapCandidates(store, args as Parameters<typeof swapCandidates>[1]))));
   const evil = "x' OR '1'='1'; DROP TABLE cards; --";
@@ -912,3 +1103,310 @@ test("verdict labels: every accept and every reject appends one label row with i
     rmSync(dir, { recursive: true });
   }
 });
+
+// ---------- receipts (DT-6.16, ISC-103) ----------
+// accept_swap and reject_swap answer with a receipt of at most 300 characters that still says what changed: the accept
+// receipt carries the change-log line written to the file (the swap itself), the file's name and the deck numbers that
+// moved; the reject receipt carries the verdict and the pair logged. Random swaps on temp deck files with names of any length.
+
+const receiptDraw = fc.record({
+  commander: fc.constantFrom(...SWAP_COMMANDERS), seeds: fc.array(fc.nat(), { minLength: 10, maxLength: 10 }),
+  outAt: fc.option(fc.nat(), { nil: undefined }), inAt: fc.nat(), withIn: fc.boolean(),
+  lever: fc.option(fc.constantFrom("plan", "cheaper", "budget", "roles", "redundancy" as const), { nil: undefined }),
+  file: fc.stringMatching(/^[a-z0-9 _-]{1,150}$/), note: fc.option(fc.string({ minLength: 1, maxLength: 500 }), { nil: undefined }),
+});
+
+test("ISC-103: for random accepts and rejects on temp deck files, every receipt is 300 characters or fewer and still says what changed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "isc103-"));
+  const labelsPath = join(dir, "labels.jsonl");
+  let accepts = 0, numbersShown = 0;
+  try {
+    fc.assert(fc.property(receiptDraw, (r) => {
+      const cmd = ciOf(r.commander);
+      const inside = cards.filter((c) => c.name !== r.commander && fitsIn(c.ci, cmd));
+      const deckNames = [...new Set(r.seeds.map((s) => inside[s % inside.length].name))];
+      const pool = inside.filter((c) => !c.land && !deckNames.includes(c.name));
+      const out = r.outAt === undefined ? undefined : deckNames[r.outAt % deckNames.length];
+      const inn = r.withIn || out === undefined ? pool[r.inAt % pool.length].name : undefined;
+      const name = `${r.file}.txt`;
+      const deckFile = join(dir, name);
+      writeFileSync(deckFile, `${deckNames.map((n) => `1 ${n}`).join("\n")}\n`);
+      const base = { commander: r.commander, out, in: inn, lever: r.lever, note: r.note };
+
+      const res = acceptSwap(store, { ...base, deckFile }, { labelsPath });
+      const receipt = acceptReceipt(res);
+      expect(JSON.stringify(receipt).length).toBeLessThanOrEqual(300);
+      // the swap: the change-log line the file now ends with, naming both cards, in the file the receipt names
+      expect(receipt.verdict).toBe("accept");
+      expect(readFileSync(deckFile, "utf8").trimEnd().split("\n").at(-1)).toBe(receipt.changeLog);
+      if (out) expect(receipt.changeLog).toContain(`-1 ${out}`);
+      if (inn) expect(receipt.changeLog).toContain(`+1 ${inn}`);
+      expect(receipt.file === name || (receipt.file.startsWith("…") && name.endsWith(receipt.file.slice(1)))).toBe(true);
+      // the numbers that moved, each [before, after] as deck_stats reads the two lists; all of them when they fit
+      const moved: Record<string, [number, number]> = {};
+      if (res.before.averageManaValue !== res.after.averageManaValue) moved.averageManaValue = [res.before.averageManaValue, res.after.averageManaValue];
+      for (const role of Object.keys(res.after.roleCounts)) {
+        if (res.before.roleCounts[role] !== res.after.roleCounts[role]) moved[role] = [res.before.roleCounts[role], res.after.roleCounts[role]];
+      }
+      for (const [k, v] of Object.entries(receipt.changed)) expect([k, v]).toEqual([k, moved[k]]);
+      if (JSON.stringify({ ...receipt, file: name, changed: moved }).length <= 300) expect(receipt.changed).toEqual(moved);
+      accepts++;
+      numbersShown += Object.keys(receipt.changed).length;
+
+      const rej = rejectReceipt(rejectSwap(store, { ...base, deckFile }, { labelsPath }));
+      expect(JSON.stringify(rej).length).toBeLessThanOrEqual(300);
+      expect(rej).toEqual({ verdict: "reject", ...(out && { out }), ...(inn && { in: inn }), ...(r.lever && { lever: r.lever }) });
+    }), { numRuns: 120, seed: 10301 });
+    expect(accepts).toBe(120);
+    expect(numbersShown).toBeGreaterThan(120); // most receipts show the numbers that moved
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+}, 120_000);
+
+// ---------- several cards in one lookup (DT-6.16, ISC-106) ----------
+// `card` with `names`: one row per name, in the order asked, with the store's facts, or a note saying why there are none.
+// A wrong card's facts are worse than no facts, so a name that fits several cards gets a note and no card.
+
+const LOOKUP_COLUMNS = ["name", "manaCost", "manaValue", "typeLine", "power", "toughness", "keywords", "oracleText", "note"];
+type LookupRow = { name: string | null; manaCost: string | null; manaValue: number | null; typeLine: string | null; power: string | null; toughness: string | null; keywords: string[] | null; oracleText: string | null; note: string | null };
+const lookupRows = (r: { structuredContent?: unknown }) => {
+  const t = (r.structuredContent as { cards: { columns: string[]; rows: unknown[][] } }).cards;
+  expect(t.columns).toEqual(LOOKUP_COLUMNS);
+  return t.rows.map((row) => Object.fromEntries(t.columns.map((c, i) => [c, row[i]]))) as LookupRow[];
+};
+/** The row a card's own store columns call for, read without the lookup's code. */
+const storeRow = (name: string): LookupRow => {
+  const r = store.db.query("SELECT name, mana_cost AS manaCost, mana_value AS manaValue, type_line AS typeLine, power, toughness, keywords, oracle_text AS oracleText FROM cards WHERE name = ?").get(name) as Omit<LookupRow, "keywords" | "note"> & { keywords: string };
+  return { ...r, keywords: JSON.parse(r.keywords), note: null };
+};
+const NO_CARD = { name: null, manaCost: null, manaValue: null, typeLine: null, power: null, toughness: null, keywords: null, oracleText: null };
+
+const lookupDraw = fc.array(fc.record({ kind: fc.constantFrom("exact", "front", "misspelled", "unknown"), seed: fc.nat() }), { minLength: 1, maxLength: 50 });
+
+test("ISC-106: for random name lists with misspelled and unknown names, one call gives one row per name in the order asked, with the store's facts, or a note and no failure", async () => {
+  let exact = 0, noted = 0, unknown = 0;
+  const twoFaced = cards.filter((c) => c.name.includes(" // "));
+  await fc.assert(fc.asyncProperty(lookupDraw, async (draws) => {
+    const asked = draws.map((d, i) => {
+      const c = cards[d.seed % cards.length];
+      if (d.kind === "exact") return c.name;
+      if (d.kind === "front") return twoFaced[d.seed % twoFaced.length].name.split(" // ")[0];
+      if (d.kind === "unknown") return `Qzxv Wkjh ${d.seed} Zzqp ${i}`;
+      const at = Math.floor(c.name.length / 2);
+      return c.name.slice(0, at) + c.name.slice(at + 1);
+    });
+    const res = await client.callTool({ name: "card", arguments: { names: asked } });
+    expect(res.isError).toBeFalsy();
+    const rows = lookupRows(res);
+    expect(rows.length).toBe(asked.length);
+    for (const [i, row] of rows.entries()) {
+      const kind = draws[i].kind;
+      if (kind === "exact") { expect(row).toEqual(storeRow(asked[i])); exact++; }
+      else if (kind === "front") { expect(row.name?.split(" // ")[0]).toBe(asked[i]); expect(row).toEqual(storeRow(row.name!)); }
+      else if (kind === "unknown") { expect(row).toEqual({ ...NO_CARD, note: `no card matches "${asked[i]}"` }); unknown++; }
+      else if (row.note !== null) {
+        // misspelled: read as one card (its facts, and a note saying so), or too close to several (no card, and a note naming them)
+        expect(row.note).toContain(asked[i]);
+        expect(row).toEqual(row.name === null ? { ...NO_CARD, note: row.note } : { ...storeRow(row.name), note: row.note });
+        noted++;
+      } else expect(row).toEqual(storeRow(row.name!)); // the misspelling is another card's exact name
+    }
+    // same list, same text
+    const again = await client.callTool({ name: "card", arguments: { names: asked } });
+    expect((again.content as { text: string }[])[0].text).toBe((res.content as { text: string }[])[0].text);
+  }), { numRuns: 40, seed: 10601 });
+  expect([exact > 0, noted > 0, unknown > 0]).toEqual([true, true, true]);
+}, 120_000);
+
+test("ISC-106: a name that fits several cards is reported with them and picks none; an unambiguous partial name is read as its card, and says so; repeats keep their rows", async () => {
+  const rows = lookupRows(await client.callTool({ name: "card", arguments: { names: ["Talrand", "Lightnig Bolt", "Opt", "Opt"] } }));
+  expect(rows[0]).toMatchObject(NO_CARD);
+  expect(rows[0].note).toMatch(/"Talrand" fits several cards/);
+  for (const n of ["Talrand, Sky Summoner", "Talrand's Invocation"]) expect(rows[0].note).toContain(n);
+  expect(rows[1]).toEqual({ ...storeRow("Lightning Bolt"), note: expect.stringContaining('"Lightnig Bolt"') });
+  expect(rows[2]).toEqual(storeRow("Opt"));
+  expect(rows[3]).toEqual(storeRow("Opt"));
+  // a misspelling equally close to two cards fits both
+  const [tie] = lookupRows(await client.callTool({ name: "card", arguments: { names: ["Crypteq"] } }));
+  expect(tie).toMatchObject(NO_CARD);
+  for (const n of ["Cryptek", "Cryptex"]) expect(tie.note).toContain(n);
+});
+
+test("ISC-106: the lookup holds at most 50 names and says so; it takes name or names, not both; SQL in a name is an unknown name; detail stays a single-card flag", async () => {
+  const opt = (n: number) => Array.from({ length: n }, () => "Opt");
+  expect((await client.callTool({ name: "card", arguments: { names: opt(50) } })).isError).toBeFalsy();
+  for (const args of [{ names: opt(51) }, { names: [] }, {}, { name: "Opt", names: ["Opt"] }, { names: ["Opt"], detail: true }]) {
+    expect([args, (await client.callTool({ name: "card", arguments: args })).isError]).toEqual([args, true]);
+  }
+  const evil = "x' OR '1'='1'; DROP TABLE cards; --";
+  const before = (store.db.query("SELECT COUNT(*) AS n FROM cards").get() as { n: number }).n;
+  const rows = lookupRows(await client.callTool({ name: "card", arguments: { names: [evil, "   "] } }));
+  expect(rows.map((r) => r.note)).toEqual([`no card matches "${evil}"`, 'no card matches "   "']);
+  expect((store.db.query("SELECT COUNT(*) AS n FROM cards").get() as { n: number }).n).toBe(before);
+  const tool = (await client.listTools()).tools.find((t) => t.name === "card")!;
+  expect(tool.description).toMatch(/`names`/);
+  expect(tool.description).toMatch(/up to 50/);
+  expect(tool.description).toMatch(/instead of one lookup per card/);
+});
+
+test("ISC-106: the single-card lookup answers as before, byte for byte", async () => {
+  for (const name of ["Talrand", "Lightnig Bolt", "Sol Ring", "Delver of Secrets"]) {
+    const compact = await client.callTool({ name: "card", arguments: { name } });
+    expect((compact.content as { text: string }[])[0].text).toBe(JSON.stringify(compactCard(cardDetails(store, { name }))));
+    const full = await client.callTool({ name: "card", arguments: { name, detail: true } });
+    expect((full.content as { text: string }[])[0].text).toBe(JSON.stringify(cardDetails(store, { name })));
+  }
+});
+
+// ---------- diagnose (DT-6.4) ----------
+
+test("ISC-41: the diagnose tool's input schema takes the plan (themes, priority cards, themes to avoid), and a call without it is refused", async () => {
+  const schema = (await toolSchema("diagnose")) as JsonSchema & { required?: string[] };
+  expect(schema.required).toEqual(expect.arrayContaining(["commander", "plan"]));
+  const plan = schema.properties!.plan as JsonSchema & { anyOf?: unknown };
+  expect(Object.keys(plan.properties ?? {}).sort()).toEqual(["avoid", "priorities", "themes"]);
+  for (const k of ["avoid", "priorities", "themes"]) expect(plan.properties![k].type).toBe("array");
+  const noPlan = await client.callTool({ name: "diagnose", arguments: { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt" } });
+  expect(noPlan.isError).toBe(true);
+  const emptyPlan = await client.callTool({ name: "diagnose", arguments: { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: {} } });
+  expect(emptyPlan.isError).toBe(true);
+  expect((emptyPlan.content as { text: string }[])[0].text).toMatch(/at least one theme or one priority card/);
+});
+
+test("diagnose over MCP: the tool answers with the same result as the function (detail: true; compact.test.ts checks the default); an unknown theme comes back as a tool error naming close themes", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: NAMOR_PLAN };
+  const res = await client.callTool({ name: "diagnose", arguments: { ...args, detail: true } });
+  expect(res.isError).toBeFalsy();
+  expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(diagnose(store, args))));
+  const bad = await client.callTool({ name: "diagnose", arguments: { ...args, plan: { themes: ["Spellslingr"] } } });
+  expect(bad.isError).toBe(true);
+  expect((bad.content as { text: string }[])[0].text).toContain("Spellslinger");
+}, 60_000);
+
+// ---------- shortlist (DT-6.5) ----------
+
+test("ISC-41: the shortlist tool's input schema takes the plan (themes, priority cards, themes to avoid) and the problem, and a call without a plan is refused", async () => {
+  const schema = (await toolSchema("shortlist")) as JsonSchema & { required?: string[] };
+  expect(schema.required).toEqual(expect.arrayContaining(["commander", "plan", "problem"]));
+  const plan = schema.properties!.plan;
+  expect(Object.keys(plan.properties ?? {}).sort()).toEqual(["avoid", "priorities", "themes"]);
+  for (const k of ["avoid", "priorities", "themes"]) expect(plan.properties![k].type).toBe("array");
+  // the problem is one of three shapes: a role, an engine gap's words, or cards off the plan
+  const alts = (schema.properties!.problem.anyOf ?? []).map((a) => Object.keys(a.properties ?? {}).join(","));
+  expect(alts.sort()).toEqual(["engineGap", "offPlan", "role"]);
+  const base = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", problem: { role: "removal" } };
+  const noPlan = await client.callTool({ name: "shortlist", arguments: base });
+  expect(noPlan.isError).toBe(true);
+  const emptyPlan = await client.callTool({ name: "shortlist", arguments: { ...base, plan: {} } });
+  expect(emptyPlan.isError).toBe(true);
+  expect((emptyPlan.content as { text: string }[])[0].text).toMatch(/at least one theme or one priority card/);
+});
+
+test("shortlist over MCP: the tool answers with the function's result (detail: true; compact.test.ts checks the default); an unknown role or engine event is a tool error listing what is known", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", plan: NAMOR_PLAN, problem: { role: "removal" } };
+  const res = await client.callTool({ name: "shortlist", arguments: { ...args, detail: true } });
+  expect(res.isError).toBeFalsy();
+  expect(res.structuredContent).toEqual(JSON.parse(JSON.stringify(shortlist(store, args))));
+  const role = await client.callTool({ name: "shortlist", arguments: { ...args, problem: { role: "removals" } } });
+  expect(role.isError).toBe(true);
+  expect((role.content as { text: string }[])[0].text).toMatch(/unknown role "removals".*removal/);
+  const gap = await client.callTool({ name: "shortlist", arguments: { ...args, problem: { engineGap: "a dragon roaring" } } });
+  expect(gap.isError).toBe(true);
+  expect((gap.content as { text: string }[])[0].text).toMatch(/no deck card pays off on "a dragon roaring".*casting a spell/);
+  const out = await client.callTool({ name: "shortlist", arguments: { ...args, out: "Lightning Bolt" } });
+  expect(out.isError).toBe(true);
+  expect((out.content as { text: string }[])[0].text).toMatch(/Lightning Bolt is not in the deck/);
+}, 60_000);
+
+test("ISC-67: a swap built from a Teysa shortlist carries the deck before and after, plan fit included, and both sides agree with deck_stats on the lists themselves", async () => {
+  const TEYSA = { commander: "Teysa Karlov", deckFile: "fixtures/teysa.txt" };
+  const plan = { themes: ["Aristocrats"] };
+  // the card to swap out: the first off-plan card the diagnosis names
+  const off = diagnose(store, { ...TEYSA, plan }).offPlan[0].name;
+  // the full result (detail: true); the compact default keeps `before`, `after` and `planGain` with `out` (compact.test.ts)
+  const res = await client.callTool({ name: "shortlist", arguments: { ...TEYSA, plan, problem: { engineGap: "a creature dying" }, out: off, detail: true } });
+  expect(res.isError).toBeFalsy();
+  const r = res.structuredContent as { before: { onPlan: number; planOf: number; cards: number }; out: { name: string; planFit: number }; cards: { name: string; after: { onPlan: number; planOf: number; cards: number; averageManaValue: number; roleCounts: Record<string, number> }; delta: { onPlan: number; cards: number }; planGain: number; evidence: { planFit: { score: number } } }[] };
+  expect(r.out).toMatchObject({ name: off, planFit: 0 });
+  // before: deck_stats on the list as it is
+  const text = readFileSync(new URL("../fixtures/teysa.txt", import.meta.url), "utf8");
+  const statsBefore = deckStats(store, { ...TEYSA, plan }).planFit!;
+  expect(r.before).toMatchObject({ onPlan: statsBefore.onPlan, planOf: statsBefore.of, cards: 100 });
+  const swapped = r.cards.filter((c) => c.evidence.planFit.score > 0).slice(0, 3);
+  expect(swapped.length).toBe(3);
+  for (const c of swapped) {
+    // after: deck_stats on the list with the swap written into it by hand
+    const lines = text.split("\n");
+    const k = lines.findIndex((l) => l.replace(/^\d+\s+/, "").trim() === off);
+    expect(k).toBeGreaterThanOrEqual(0);
+    lines[k] = `1 ${c.name}`;
+    const after = deckStats(store, { commander: TEYSA.commander, decklist: lines.join("\n"), plan });
+    expect([c.name, c.after]).toMatchObject([c.name, { cards: 100, onPlan: after.planFit!.onPlan, planOf: after.planFit!.of, averageManaValue: after.averageManaValue, roleCounts: after.roleCounts }]);
+    // an on-plan card in for an off-plan one: one more card on plan, and the plan gain is the card's own fit
+    expect([c.name, c.delta.onPlan, c.delta.cards]).toEqual([c.name, 1, 0]);
+    expect(c.planGain).toBeCloseTo(c.evidence.planFit.score, 3);
+  }
+  // without out, each card is an add: no after, and the delta adds one card
+  const adds = shortlist(store, { ...TEYSA, plan, problem: { engineGap: "a creature dying" } });
+  for (const c of adds.cards) { expect(c.after).toBeUndefined(); expect(c.delta.cards).toBe(1); }
+}, 120_000);
+
+// ---------- card facts in deck results (DT-6.15, ISC-92) ----------
+// Claude must quote a deck card's mana value, type and rules text from a tool result, never from memory (ISC-91), so
+// deck_stats and diagnose carry those three facts for every card of the deck: each distinct resolved card of the list,
+// lands included, and the commander whether or not the list names it. The oracle is the store's plain columns.
+
+const BASIC_OF: Record<string, string> = { W: "Plains", U: "Island", B: "Swamp", R: "Mountain", G: "Forest" };
+type FactRow = { name: string; manaValue: number; typeLine: string; power: string | null; toughness: string | null; oracleText: string };
+const storeFacts = (name: string): FactRow =>
+  store.db.query("SELECT name, mana_value AS manaValue, type_line AS typeLine, power, toughness, oracle_text AS oracleText FROM cards WHERE name = ?").get(name) as FactRow;
+const byFactName = (a: FactRow, b: FactRow) => byteCmp(a.name, b.name);
+/** Every card of a list as the store resolves it (distinct), plus the commander. */
+function expectedFacts(commander: string, decklist: string): FactRow[] {
+  const names = new Set(parseDecklist(store.space, decklist).entries.flatMap((e) => (e.card ? [e.card.name] : [])));
+  names.add(commander);
+  return [...names].map(storeFacts).sort(byFactName);
+}
+const factDraw = fc.record({ commander: fc.constantFrom(...SWAP_COMMANDERS), seeds: fc.array(fc.nat(), { minLength: 10, maxLength: 10 }), off: fc.nat(), withCommander: fc.boolean(), typo: fc.boolean() });
+function factDeck(r: fc.RecordValue<typeof factDraw extends fc.Arbitrary<infer T> ? T : never>): string {
+  const basics = [...ciOf(r.commander)].map((c) => `3 ${BASIC_OF[c]}`);
+  return [drawDeck(r.commander, r.seeds, r.off), ...basics, ...(r.withCommander ? [`1 ${r.commander}`] : []), ...(r.typo ? ["1 Lightnig Bolt"] : [])].join("\n");
+}
+
+test("ISC-92: for random decks across commanders, deck_stats carries every deck card's mana value, type line and rules text, equal to the store's", () => {
+  let checked = 0;
+  fc.assert(fc.property(factDraw, (r) => {
+    const decklist = factDeck(r);
+    const s = deckStats(store, { commander: r.commander, decklist });
+    expect([...s.cardFacts].sort(byFactName)).toEqual(expectedFacts(r.commander, decklist));
+    checked += s.cardFacts.length;
+  }), { numRuns: 60, seed: 9201 });
+  expect(checked).toBeGreaterThan(60 * 10);
+}, 120_000);
+
+test("ISC-92: for random decks across commanders, diagnose carries every deck card's mana value, type line and rules text, equal to the store's", () => {
+  let checked = 0;
+  fc.assert(fc.property(factDraw, (r) => {
+    const decklist = factDeck(r);
+    const d = diagnose(store, { commander: r.commander, decklist, plan: { themes: ["Tokens"] } });
+    expect([...d.cardFacts].sort(byFactName)).toEqual(expectedFacts(r.commander, decklist));
+    checked += d.cardFacts.length;
+  }), { numRuns: 15, seed: 9202 });
+  expect(checked).toBeGreaterThan(15 * 10);
+}, 240_000);
+
+test("ISC-92: over MCP, deck_stats and diagnose asked for cardFacts return the card facts for every card of Namor's list, each with the store's text and nothing more", async () => {
+  const args = { commander: "Namor the Sub-Mariner", deckFile: "fixtures/namor.txt", cardFacts: true };
+  const stats = await client.callTool({ name: "deck_stats", arguments: args });
+  const diag = await client.callTool({ name: "diagnose", arguments: { ...args, plan: NAMOR_PLAN } });
+  const text = readFileSync(NAMOR_DECK, "utf8");
+  for (const res of [stats, diag]) {
+    expect(res.isError).toBeFalsy();
+    // DT-6.16: a table, the facts and the name as its columns, nothing else per card
+    const t = (res.structuredContent as { cardFacts: { columns: string[]; rows: unknown[][] } }).cardFacts;
+    expect(t.columns).toEqual(["name", "manaValue", "typeLine", "power", "toughness", "oracleText"]);
+    const got = t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]]))) as FactRow[];
+    expect([...got].sort(byFactName)).toEqual(expectedFacts(args.commander, text));
+  }
+}, 60_000);

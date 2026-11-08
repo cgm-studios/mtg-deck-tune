@@ -1,6 +1,6 @@
 {
-  "version": "2026-11-06",
-  "url": "https://github.com/cgm-studios/mtg-deck-tune/releases/download/data-2026-11-06/cards.db.gz",
-  "gzSha256": "96fdce2b451ef86b63b96e06dafca6ecfec61a10dc07d46d56590a3de06b1f97",
-  "dbSha256": "1b13f801873ff679566cd5850062b3dd9fa1f7c05b671b40590dcea975c8bb36"
+  "version": "2026-11-07",
+  "url": "https://github.com/cgm-studios/mtg-deck-tune/releases/download/data-2026-11-07/cards.db.gz",
+  "gzSha256": "e8869b5de86bd1522fd7eade229739757414ecf9aa668d3a6c6b88b1a57088c0",
+  "dbSha256": "428deb239a06f217e52f0c5ae98bf9c7512e9bc67810825366dd14b1305126d7"
 }

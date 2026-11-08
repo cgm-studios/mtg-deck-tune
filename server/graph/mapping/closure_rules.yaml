@@ -1,0 +1,272 @@
+version: "2.0"
+description: >
+  Closure rules define implications between events and between effects.
+  Used by the graph compiler to generate transitive edges.
+  Rules may be unconditional or conditional on target card type.
+
+# =============================================================================
+# EVENT IMPLICATIONS — "if X happens, then Y also happens"
+# =============================================================================
+event_implications:
+  # Zone transition chains
+  - from: Sacrifice
+    implies: Dies
+    condition:
+      target_type: [creature, planeswalker]
+    note: "Only creatures and planeswalkers 'die'. Other permanents go to graveyard but don't trigger Dies."
+
+  - from: Sacrifice
+    implies: LTB
+    condition: null
+    note: "All sacrificed permanents leave the battlefield."
+
+  - from: Sacrifice
+    implies: PutIntoGraveyard
+    condition: null
+    note: "Any sacrificed permanent goes to the graveyard (Treasure, artifacts, lands too). Added 2026-11-06 for F5."
+
+  - from: Destroy
+    implies: PutIntoGraveyard
+    condition: null
+    note: "Any destroyed permanent goes to the graveyard. Added 2026-11-06 for F5."
+
+  - from: Dies
+    implies: LTB
+    condition: null
+    note: "Dying always means leaving the battlefield."
+
+  - from: Destroy
+    implies: Dies
+    condition:
+      target_type: [creature, planeswalker]
+    note: "Destroyed creatures/planeswalkers die. Destroyed artifacts/enchantments go to graveyard without dying."
+
+  - from: Destroy
+    implies: LTB
+    condition: null
+    note: "All destroyed permanents leave the battlefield."
+
+  - from: Exile
+    implies: LTB
+    condition: null
+    note: "Exiled permanents leave the battlefield."
+
+  - from: ReturnToHand
+    implies: LTB
+    condition: null
+    note: "Bounced permanents leave the battlefield."
+
+  - from: Flicker
+    implies: LTB
+    condition: null
+    note: "Flickered permanent leaves then re-enters."
+
+  - from: Flicker
+    implies: ETB
+    condition: null
+    note: "Flickered permanent re-enters the battlefield."
+
+  # Token and reanimate implications
+  - from: TokenCreated
+    implies: ETB
+    condition: null
+    note: "Created tokens enter the battlefield."
+
+  - from: Reanimate
+    implies: ETB
+    condition: null
+    note: "Reanimated cards enter the battlefield."
+
+  # Note: CombatDamage -> DamageDealt is handled by parent/child hierarchy in events.yaml
+
+# =============================================================================
+# EFFECT CLOSURES — "if effect X resolves, then event Y fires"
+# =============================================================================
+effect_closures:
+  - effect: CreateToken
+    triggers_event: ETB
+    condition: null
+    note: "Creating a token puts it onto the battlefield."
+
+  - effect: CreateToken
+    triggers_event: TokenCreated
+    condition: null
+    note: "Creating a token fires TokenCreated."
+
+  - effect: Reanimate
+    triggers_event: ETB
+    condition: null
+    note: "Reanimating puts a card onto the battlefield."
+
+  - effect: LandToBattlefield
+    triggers_event: ETB
+    condition: null
+    note: "Putting a land onto the battlefield is an ETB."
+
+  - effect: LandToBattlefield
+    triggers_event: LandPlayed
+    condition: null
+    note: "Land entering triggers LandPlayed."
+
+  - effect: Destroy
+    triggers_event: Dies
+    condition:
+      target_type: [creature, planeswalker]
+    note: "Destroying a creature/planeswalker causes it to die."
+
+  - effect: Destroy
+    triggers_event: LTB
+    condition: null
+    note: "Destroying any permanent causes LTB."
+
+  - effect: Sacrifice
+    triggers_event: Dies
+    condition:
+      target_type: [creature, planeswalker]
+    note: "Sacrificing a creature/planeswalker causes it to die."
+
+  - effect: Sacrifice
+    triggers_event: LTB
+    condition: null
+    note: "Sacrificing any permanent causes LTB."
+
+  - effect: Bounce
+    triggers_event: LTB
+    condition: null
+    note: "Bouncing causes LTB."
+
+  - effect: Exile
+    triggers_event: LTB
+    condition: null
+    note: "Exiling a permanent causes LTB."
+
+  - effect: Flicker
+    triggers_event: LTB
+    condition: null
+    note: "Flickering causes LTB then ETB."
+
+  - effect: Flicker
+    triggers_event: ETB
+    condition: null
+    note: "Flickered permanent re-enters."
+
+  - effect: GainLife
+    triggers_event: LifeGained
+    condition: null
+    note: "Gaining life triggers LifeGained."
+
+  - effect: LoseLife
+    triggers_event: LifeLost
+    condition: null
+    note: "Losing life triggers LifeLost."
+
+  - effect: DrainLife
+    triggers_event: LifeGained
+    condition: null
+    note: "Drain = damage + life gain."
+
+  - effect: DrainLife
+    triggers_event: LifeLost
+    condition: null
+    note: "Drain = opponent loses life."
+
+  - effect: Damage
+    triggers_event: DamageDealt
+    condition: null
+    note: "Dealing damage fires DamageDealt."
+
+  - effect: Draw
+    triggers_event: DrawCard
+    condition: null
+    note: "Drawing fires DrawCard."
+
+  - effect: Discard
+    triggers_event: Discard
+    condition: null
+    note: "Forcing discard fires Discard event."
+
+  - effect: Mill
+    triggers_event: Mill
+    condition: null
+    note: "Milling fires Mill event."
+
+  - effect: AddCounter
+    triggers_event: CounterPlaced
+    condition: null
+    note: "Adding counters fires CounterPlaced."
+
+  - effect: RemoveCounter
+    triggers_event: CounterRemoved
+    condition: null
+    note: "Removing counters fires CounterRemoved."
+
+  - effect: Proliferate
+    triggers_event: CounterPlaced
+    condition: null
+    note: "Proliferate adds counters."
+
+  - effect: Control
+    triggers_event: Control
+    condition: null
+    note: "Gaining control fires Control event."
+
+  - effect: ReturnToHand
+    triggers_event: LTB
+    condition: null
+    note: "Returning to hand means leaving battlefield."
+
+  - effect: CreateCopy
+    triggers_event: ETB
+    condition: null
+    note: "Copy of a permanent enters the battlefield."
+
+  # ExtraTurn implies all turn phase events
+  - effect: ExtraTurn
+    triggers_event: ExtraTurn
+    condition: null
+    note: "Extra turn effect fires the ExtraTurn event."
+
+  - effect: ExtraTurn
+    triggers_event: Upkeep
+    condition: null
+    note: "Extra turn includes an upkeep step."
+
+  - effect: ExtraTurn
+    triggers_event: DrawStep
+    condition: null
+    note: "Extra turn includes a draw step."
+
+  - effect: ExtraTurn
+    triggers_event: MainPhase
+    condition: null
+    note: "Extra turn includes main phases."
+
+  - effect: ExtraTurn
+    triggers_event: EndStep
+    condition: null
+    note: "Extra turn includes an end step."
+
+  - effect: ExtraTurn
+    triggers_event: BeginningOfCombat
+    condition: null
+    note: "Extra turn includes a combat phase."
+
+  - effect: ExtraTurn
+    triggers_event: AttackDeclared
+    condition: null
+    note: "Extra turn includes declare attackers step."
+
+  - effect: ExtraTurn
+    triggers_event: BlockDeclared
+    condition: null
+    note: "Extra turn includes declare blockers step."
+
+  - effect: SearchLand
+    triggers_event: LandPlayed
+    condition: null
+    note: "Searching for a land and putting it onto the battlefield triggers LandPlayed."
+
+  - effect: SearchLand
+    triggers_event: ETB
+    condition: null
+    note: "The found land enters the battlefield."

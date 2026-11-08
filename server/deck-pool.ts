@@ -10,6 +10,7 @@
 // same pool card for card (ISC-3).
 
 import { fitsIdentity } from "./color-identity";
+import { deckLines } from "./deck-lines";
 import { oracleText, readJSONL } from "./scryfall";
 
 export const METHODS = ["leiden", "leidenHi", "hdb10"] as const;
@@ -211,20 +212,24 @@ export function pool(space: Space, a: Pick<Anchors, "commander" | "cards" | "reg
 }
 
 // ---------- decklists ----------
-// `1 Card Name` lines as TopDecked, Moxfield and Archidekt export them: trailing spaces, section headers
-// ("Commander (1)", "Main (99)", "namor: namor"), URLs and comments skipped; set codes and foil marks stripped.
-export type DeckEntry = { line: number; qty: number; text: string; card?: SpaceCard };
+// `1 Card Name` lines, read by deck-lines.ts (the one reading of a list): headers, URLs, comments, words with no count,
+// and sideboard, maybeboard and considering lines (ISC-113) are skipped; set codes and foil marks stripped.
+export type DeckEntry = { line: number; qty: number; text: string; card?: SpaceCard; section?: string };
 export type Decklist = { entries: DeckEntry[]; unresolved: DeckEntry[]; skipped: { line: number; text: string }[] };
 
 export function parseDecklist(space: Space, text: string): Decklist {
   const entries: DeckEntry[] = [], skipped: Decklist["skipped"] = [];
-  text.split(/\r?\n/).forEach((raw, k) => {
-    const line = raw.trim();
-    if (!line) return;
-    const m = line.match(/^(\d+)\s*x?\s+(.+)$/i);
-    if (!m) { skipped.push({ line: k + 1, text: line }); return; }
-    const name = m[2].replace(/\s+\*[A-Z]+\*$/, "").replace(/\s+\([A-Za-z0-9]{2,6}\)(\s+\S+)?$/, "").replace(/\s+#.*$/, "").trim();
-    entries.push({ line: k + 1, qty: +m[1], text: name, card: resolveName(space, name) });
-  });
+  for (const l of deckLines(text)) {
+    if (l.kind === "entry" && l.inDeck) entries.push({ line: l.line, qty: l.qty!, text: l.name!, card: resolveName(space, l.name!), section: l.section });
+    else skipped.push({ line: l.line, text: l.text });
+  }
   return { entries, unresolved: entries.filter((e) => !e.card), skipped };
+}
+
+/** ISC-118: whether a text reads as a deck list: at least one line names a card, and such lines are at least half of the
+ * lines that are not headers, URLs or comments. Sideboard lines count: they are card lines. */
+export function readsAsDeck(space: Space, text: string): boolean {
+  const lines = deckLines(text).filter((l) => l.kind !== "aside");
+  const named = lines.filter((l) => l.kind === "entry" && resolveName(space, l.name!)).length;
+  return named > 0 && named * 2 >= lines.length;
 }
