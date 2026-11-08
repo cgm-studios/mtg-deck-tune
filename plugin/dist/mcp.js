@@ -40425,7 +40425,9 @@ function acceptReceipt(r) {
     file: file3,
     changeLog: r.changeLog,
     changed: Object.fromEntries(changed.slice(0, n)),
-    ...off && { offColor: { count: off.length, names: off.slice(0, names) } }
+    ...off && { offColor: { count: off.length, names: off.slice(0, names) } },
+    ...r.oldCommander && { oldCommander: r.oldCommander },
+    ...r.before.cards !== r.after.cards && r.oldCommander && { cards: [r.before.cards, r.after.cards] }
   });
   const size = (x) => JSON.stringify(x).length;
   const file2 = basename(r.deckFile);
@@ -41287,6 +41289,8 @@ function checkCommanderChange(f, commander, out, inCard) {
     throw new ToolInputError(`changeCommander: out must be the commander, ${commander.name}`);
   if (!inCard)
     throw new ToolInputError("changeCommander needs the new commander as in; a commander cannot be cut");
+  if (inCard.id === commander.id)
+    throw new ToolInputError(`${inCard.name} is already the commander`);
   if (!canBeCommander(inCard))
     throw new ToolInputError(`${inCard.name} cannot be a commander`);
 }
@@ -41320,10 +41324,12 @@ function acceptSwap(store, input3, opts = {}) {
   const outEntry = out ? deck.entries.find((e) => e.card?.id === out.id) : undefined;
   if (out && !outEntry)
     throw new ToolInputError(`${out.name} is not in the deck`);
+  const promoted = f.changeCommander ? deck.entries.filter((e) => e.card?.id === inCard.id) : [];
+  const oldStays = promoted.length > 0 && fitsIdentity(commander, inCard.ci);
   if (inCard) {
     if (!f.changeCommander && !fitsIdentity(inCard, commander.ci))
       throw new ToolInputError(`${inCard.name} is outside the commander's color identity`);
-    if (deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta.type))
+    if (!promoted.length && deck.entries.some((e) => e.card?.id === inCard.id) && !/\bBasic\b/.test(inCard.meta.type))
       throw new ToolInputError(`${inCard.name} is already in the deck`);
   }
   const hadFinalNewline = text.endsWith(`
@@ -41335,7 +41341,13 @@ function acceptSwap(store, input3, opts = {}) {
   const cr = text.includes(`\r
 `) ? "\r" : "";
   const inLine = inCard ? `1 ${inCard.name}${cr}` : null;
-  if (outEntry) {
+  if (promoted.length) {
+    lines[outEntry.line - 1] = inLine;
+    if (oldStays)
+      lines[promoted[0].line - 1] = `${outEntry.qty} ${commander.name}${cr}`;
+    for (const e of (oldStays ? promoted.slice(1) : promoted).reverse())
+      lines.splice(e.line - 1, 1);
+  } else if (outEntry) {
     const i = outEntry.line - 1;
     const rest = outEntry.qty > 1 ? [lines[i].replace(/^(\s*)(\d+)/, (_, sp, q) => `${sp}${+q - 1}`)] : [];
     lines.splice(i, 1, ...rest, ...inLine ? [inLine] : []);
@@ -41346,7 +41358,7 @@ function acceptSwap(store, input3, opts = {}) {
   }
   const date6 = opts.today ?? localDate();
   const what = f.changeCommander ? "changed commander" : `accepted swap${f.lever ? ` (${f.lever})` : ""}`;
-  const changeLog = `# ${date6} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
+  const changeLog = promoted.length ? `# ${date6} commander promoted: ${inCard.name}; ${commander.name} ${oldStays ? "stays" : "left"}` : `# ${date6} ${what}: ${[out && `-1 ${out.name}`, inCard && `+1 ${inCard.name}`].filter(Boolean).join(", ")}`;
   lines.push(`${changeLog}${cr}`);
   const next = lines.join(`
 `) + (hadFinalNewline ? `
@@ -41360,7 +41372,8 @@ function acceptSwap(store, input3, opts = {}) {
     lever: f.lever ?? null,
     deckFile: f.deckFile,
     note: f.note ?? null,
-    ...f.changeCommander && { changedCommander: true }
+    ...f.changeCommander && { changedCommander: true },
+    ...promoted.length > 0 && { promoted: true }
   };
   saveDeck(path, f.deckFile, next, () => appendLabel(label, opts.labelsPath ?? LABELS_PATH));
   const nextEntries = parseDecklist(store.space, next).entries;
@@ -41370,7 +41383,8 @@ function acceptSwap(store, input3, opts = {}) {
     label,
     before: swapStats(deckNumbers(store, commander, deck.entries)),
     after: swapStats(deckNumbers(store, commander, nextEntries)),
-    ...f.changeCommander && { offColor: deckNumbers(store, inCard, nextEntries).offIdentity }
+    ...f.changeCommander && { offColor: deckNumbers(store, inCard, nextEntries).offIdentity },
+    ...promoted.length > 0 && { oldCommander: oldStays ? "stays" : "left" }
   };
 }
 function rejectSwap(store, input3, opts = {}) {
@@ -42135,7 +42149,7 @@ function createDeckServer(store, verdicts = {}) {
   }, async ({ detail, ...args }) => withStore(store, (s) => detail ? swapCandidates(s, args) : compactSwapCandidates(swapCandidates(s, args))));
   server.registerTool("accept_swap", {
     title: "Accept a swap",
-    description: "Record that the player accepted a swap: rewrites the deck file (the outgoing card's line becomes the incoming " + "card's line), appends a dated change-log line, and logs the card pair as a quality label. Exact card names only. " + "Give out alone for a cut, in alone for an add. Returns a short receipt: the change-log line written, the file's name, and " + "the deck numbers that moved (average mana value and role counts, each [before, after]); run deck_stats for the full numbers. " + "The commander cannot leave the deck unless the player asks to change it: then `out` is the commander, `in` the new one (a card that can be a commander), " + "and `changeCommander: true`. The new commander's colors then judge the deck; no card is removed, and the receipt's `offColor` gives how many cards fall outside " + "those colors and the first of their names (deck_stats with the new commander lists them all as `offIdentity`). " + "A file that does not read as a deck list is refused and left as it was.",
+    description: "Record that the player accepted a swap: rewrites the deck file (the outgoing card's line becomes the incoming " + "card's line), appends a dated change-log line, and logs the card pair as a quality label. Exact card names only. " + "Give out alone for a cut, in alone for an add. Returns a short receipt: the change-log line written, the file's name, and " + "the deck numbers that moved (average mana value and role counts, each [before, after]); run deck_stats for the full numbers. " + "The commander cannot leave the deck unless the player asks to change it: then `out` is the commander, `in` the new one (a card that can be a commander), " + "and `changeCommander: true`. The new commander's colors then judge the deck; no card is removed, and the receipt's `offColor` gives how many cards fall outside " + "those colors and the first of their names (deck_stats with the new commander lists them all as `offIdentity`). " + 'A new commander already in the deck is promoted: one copy of it remains, the old commander takes its place when its colors fit (`oldCommander: "stays"`), and otherwise leaves (`"left"`, with `cards` giving the deck\'s size [before, after]). ' + "A file that does not read as a deck list is refused and left as it was.",
     inputSchema: acceptSwapShape
   }, async (args) => withStore(store, (s) => acceptReceipt(acceptSwap(s, args, verdicts))));
   server.registerTool("reject_swap", {
