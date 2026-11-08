@@ -1,88 +1,88 @@
-# MV-17: the judge stage of the deck-tune eval, an Assay v2 suite. Run it with `bun app/deck-tune-eval.ts`, which runs
-# the code stage first (`bun test ./app/deck-tune-checks.test.ts`: ISC-13, 22.1, 22.2, 23.1 and the code half of
-# ISC-23.2) and dispatches this suite only when the code stage is green.
+# MV-17, DT-6.7: the judge stage of the deck-tune eval, an Assay v2 suite, for the three criteria only a reader can settle: ISC-84
+# (a cut weighs the card's own text), ISC-87 (a thin plan searches card text for what the plan is about) and ISC-107 (no swap
+# reaches the player with a read that says to skip it). Run it by hand on one real session:
 #
-# Each case's prompt is a recorded session (docs/research/deck-tune/*.jsonl). The suite runs through Assay's
-# runAgenticSuite with an offline replay adapter: the "output" a trial grades is the rendered transcript, never a fresh
-# generation, so trials vary only in the judge. Code can check that every swap block carries a Claude's read line; only
-# a reader can tell whether a quality judgment slipped in somewhere else unlabeled, so ISC-23.2 is the one judged assert.
-name: mtg-vector-deck-tune
+#   bun server/deck-tune-eval.ts -t "ISC-107" --session <session.jsonl>
+#
+# `--session` replaces each case's prompt; the suite runs through Assay's runAgenticSuite with an offline replay adapter, so the
+# "output" a trial grades is the rendered session, never a fresh generation. The stage only reports: a failed, provisional or
+# unavailable judge blocks nothing (the code stage is the eval). A question names no card and no commander. Each case carries an
+# adversarial fixture that passes the code-checkable prerequisites and breaks only what the question asks, so the judge is shown
+# able to fail.
+name: mtg-deck-tune-skill
 type: regression
 pass_threshold: 1
 trials: 3
-system_prompt: "Replay suite: the offline adapter returns a recorded deck-tune transcript; no model under test runs."
+system_prompt: "Replay suite: the offline adapter returns a recorded deck-tune session; no model under test runs."
 cases:
-  - id: isc-23-2-namor-reads-labeled
-    prompt: docs/research/deck-tune/namor-mana-efficient.jsonl
+  - id: isc-84-read-before-cut
+    prompt: "(a real session, given with --session)"
     assert:
-      # Prerequisites (code): the session has swaps, labeled reads, and the numbers and levers came first.
-      - type: contains
-        value: "**Claude's read**"
       - type: regex
-        value: 'mtg-deck\.deck_stats[\s\S]*Levers, ranked by expected help[\s\S]*mtg-deck\.swap_candidates[\s\S]*### Swap 1:'
+        value: '### (Swap|Cut) \d'
       - type: llm-assert
-        derived_from: ~/Documents/02_areas/mtg-vector/ISA.md#ISC-23.2
+        derived_from: ~/Documents/02_areas/mtg-deck-tune/ISA.md#ISC-84
         value: >-
-          In the turns headed "Claude", every judgment of a candidate card's quality (calling a card strong, weak,
-          playable, a staple, an upgrade, worth or not worth playing, or better or worse than another card) is
-          explicitly labeled as Claude's own judgment from its own Magic knowledge, for example by a "Claude's read"
-          label on that line or sentence. Facts restated from tool results (mana value, price, similarity, Tagger tags,
-          roles, deck numbers) need no label.
-    # Passes both prerequisites; one quality judgment ("a clear upgrade, one of the best cards in blue") sits unlabeled
-    # inside a data line. Only a reader catches it, so the judge must fail this.
+          Wherever a reply suggests cutting a card, it weighs what that card's own rules text does against this deck and its
+          commander (how the card would or would not help this deck's plan), and does not judge the cut by its role or label
+          alone.
     adversarial_output: |-
-      # Deck tune: Namor (adversarial fixture)
-
-      ### Tool `mtg-deck.deck_stats`
-
-      ```
-      {"averageManaValue":2.766,"curve":{"1":9,"2":27,"3":15,"4":6,"5":3,"7+":4}}
-      ```
+      # Deck tune (adversarial fixture)
 
       ### Claude
 
-      Average mana value 2.77; curve 1: 9 · 2: 27 · 3: 15 · 4: 6 · 5: 3 · 7+: 4.
+      ### Swap 1: Counterspell → Cultivate
+      - **Reason (data):** Counterspell holds the counterspell role, which is over its count; mana value 2 → 3.
+      - **Deck after:** average mana value 3.09 → 3.11.
+      - **My read:** the role is over target, so it goes.
 
-      **Levers, ranked by expected help:**
-      1. **Trim the 7+ top end** (`cheaper` on Hullbreaker Horror)
-      2. **More ramp** (`roles`)
-
-      This ranking is Claude's read. Which lever do you want?
+  - id: isc-87-search-the-plan
+    prompt: "(a real session, given with --session)"
+    assert:
+      - type: regex
+        value: 'mtg-deck\.find_cards[\s\S]*### (Swap|Cut|Add) \d'
+      - type: llm-assert
+        derived_from: ~/Documents/02_areas/mtg-deck-tune/ISA.md#ISC-87
+        value: >-
+          Before the first swap, the session searches card rules text for what the player's plan is about (the interaction the
+          player described or the cards they named make happen), not for an unrelated phrase.
+    adversarial_output: |-
+      # Deck tune (adversarial fixture)
 
       ### Player
 
-      1.
+      Think of cheap mana rocks that make my turns explosive.
 
-      ### Tool `mtg-deck.swap_candidates`
+      ### Tool `mtg-deck.find_cards`
+
+      input: `{"rulesText":["draw a card"],"colorIdentity":"GU"}`
 
       ```
-      1. out Hullbreaker Horror (MV 7) | in Cryptic Command (MV 4) | in-color neighbor #3 of Hullbreaker Horror (similarity 0.876); mana value 4 vs 7 (-3)
-      2. out Hullbreaker Horror (MV 7) | in Teferi's Response (MV 2) | in-color neighbor #27 of Hullbreaker Horror (similarity 0.841); mana value 2 vs 7 (-5)
+      {"cards":{"columns":["name","manaValue"],"rows":[["Harmonize",4]]}}
       ```
 
       ### Claude
 
-      ### Swap 1: Hullbreaker Horror → Cryptic Command
-      - **Reason (data):** in-color neighbor #3 of Hullbreaker Horror (similarity 0.876); mana value 4 vs 7 (-3). A clear upgrade, one of the best cards in blue.
-      - **Deck after:** average mana value 2.766 → 2.719.
-      - **Claude's read** (my own Magic knowledge, not the data): it costs four instead of seven.
+      ### Swap 1: Counterspell → Harmonize
+      - **Reason (data):** Harmonize draws cards.
+      - **Deck after:** average mana value 3.09 → 3.2.
+      - **My read:** a reasonable card.
 
-      ### Swap 2: Hullbreaker Horror → Teferi's Response
-      - **Reason (data):** in-color neighbor #27 of Hullbreaker Horror (similarity 0.841); mana value 2 vs 7 (-5).
-      - **Deck after:** average mana value 2.766 → 2.688.
-      - **Claude's read** (my own Magic knowledge, not the data): a weak card; it rarely has a target in Commander. Skip.
-
-  - id: isc-13-no-pick-no-swaps
-    negative: true
-    prompt: docs/research/deck-tune/namor-no-pick.jsonl
+  - id: isc-107-only-recommended-swaps
+    prompt: "(a real session, given with --session)"
     assert:
-      # ISC-13 on the rendered session (code): no swap block and no swap_candidates call when no lever was picked.
-      - type: not-regex
-        value: '### (Swap|Cut|Add) \d'
-      - type: not-contains
-        value: "mtg-deck.swap_candidates"
-      - type: not-llm-assert
-        derived_from: ~/Documents/02_areas/mtg-vector/ISA.md#ISC-23.2
+      - type: llm-assert
+        derived_from: ~/Documents/02_areas/mtg-deck-tune/ISA.md#ISC-107
         value: >-
-          In the turns headed "Claude", a judgment of a specific card's quality (strong, weak, playable, better or worse
-          than another card) is stated without being labeled as Claude's own judgment.
+          Every swap, cut or add the reply shows the player is one Claude recommends: none of them carries a read that says to skip
+          it, pass on it, avoid it, that it is not worth making, or that Claude would not make it. A swap Claude would advise
+          against is filtered out before it is shown.
+    adversarial_output: |-
+      # Deck tune (adversarial fixture)
+
+      ### Claude
+
+      ### Swap 1: Counterspell → Cultivate
+      - **Reason (data):** both do a job the plan wants; mana value 2 → 3.
+      - **Deck after:** average mana value 3.09 → 3.11.
+      - **My read:** a small gain at best. Skip it.

@@ -1,43 +1,42 @@
-// MV-17: the code stage of the deck-tune eval. Each check reads one recorded session (deck-tune-transcript.ts) and
-// decides one ISA criterion without a model: ISC-13 (no swaps before the player picks a lever), ISC-22.1 (the deck's numbers
-// before any swap), ISC-22.2 (ranked levers before any swap), ISC-23.1 (every card Claude names came from the session)
-// and the code half of ISC-23.2 (every swap block carries the Claude's read label), plus ISC-28 (no turn offers a card
-// search it did not run). Whether a quality judgment outside those labels slipped through is a reading question, left to the Assay judge stage (deck-tune-eval.ts).
+// MV-17, DT-6.7: the code stage of the deck-tune eval. Each check reads one recorded session (deck-tune-transcript.ts) and
+// decides one ISA criterion without a model. Six checks, the ones a program can decide from what a session recorded:
 //
-// The checks read the two block shapes the skill (plugin/skills/deck-tune/SKILL.md) fixes: the "Levers, ranked by
-// expected help" list and the "### Swap n: out → in" / "### Cut n: out" / "### Add n: in" blocks.
+//   ISC-111  accept_swap and reject_swap run only on the player's own word for that swap
+//   ISC-91   a card's cost, type or stats stated in a reply comes from a tool result that returned that card
+//   ISC-68   every incoming card in a swap block came back from a shortlist, swap_candidates or find_cards call
+//   ISC-29   no reply names a tool, argument, tag label, match count, file path or other code vocabulary
+//   ISC-108  every swap block carries the "my read" label, and "Claude's read" appears in no reply
+//   ISC-110  a mana curve chart's rows equal the curve of a deck_stats result from the session
+//
+// The one structure a check relies on is the judgment block the player saw and kept: "### Swap n: out → in" (also
+// "### Cut n: out" and "### Add n: in"), then bullets. ISC-83 (product code names no card or commander) lives below as
+// helpers for its test. What needs a reader (ISC-84, 87, 107) is the judge stage (deck-tune-eval.ts, evals/deck-tune.yaml).
 
 import { LEVERS } from "./swap-tools";
-import type { ToolEvent, Transcript, TranscriptEvent } from "./deck-tune-transcript";
+import type { ToolEvent, Transcript } from "./deck-tune-transcript";
 
 export type CheckResult = { pass: boolean; details: string[] };
 
-const LEVER_SET = new Set<string>(LEVERS);
-/** The lever names the player sees, one per tool lever; SKILL.md's table carries the same words (a test holds them equal). */
-export const LEVER_NAMES: Record<(typeof LEVERS)[number], string> = {
-  plan: "Stronger fits for the commander",
-  cheaper: "Lower the curve",
-  budget: "Cheaper to buy",
-  roles: "Fill thin roles",
-  redundancy: "Trim what's doubled up",
-};
-const leverByName = (title: string) =>
-  (Object.entries(LEVER_NAMES).find(([, n]) => n.toLowerCase() === title.trim().toLowerCase().replace(/’/g, "'"))?.[0] ?? null);
-const READ_LABEL = /\*\*Claude[’']s read\*\*/;
-const SWAP_HEADING = /^#{2,4}\s*(Swap|Cut|Add)\s+(\d+)\s*:\s*(.+?)\s*$/;
-const LEVERS_HEADING = /levers,?\s+ranked by expected help/i;
-const LIST_ITEM = /^\s*(\d+)\.\s+(.*)$/;
-const FORMAT_LABELS = /\*\*(?:Reason \(data\):|Deck after:|Claude[’']s read)\*\*|Levers,?\s+ranked by expected help/g;
+/** The label on an own-knowledge claim: "**My read**:", "**My read:**", any capitals (ISC-108). */
+const READ_LABEL = /\*\*\s*my read\s*:?\s*\*\*/i;
+/** The label ISC-108 retired. */
+const OLD_READ_LABEL = /Claude[’']s\s+read/i;
+const SWAP_HEADING = /^#{2,4}\s*(Swap|Cut|Add)\s+(\d+)\s*:\s*(.+?)\s*$/i;
+const FORMAT_LABELS = /\*\*\s*(?:Reason \(data\)|Deck after|my read|Claude[’']s read)\s*:?\s*\*\*/gi;
+
 
 export type SwapBlock = { event: number; kind: "Swap" | "Cut" | "Add"; n: number; out: string | null; in: string | null; text: string };
-export type LeverItem = { n: number; title: string; lever: string | null; text: string };
-export type LeverList = { event: number; items: LeverItem[] };
 
+/** A tool's own name: a Claude Code log names it "mcp__plugin_<plugin>_mtg-deck__<tool>". */
+const bareName = (name: string) => name.replace(/^mcp__.*?mtg-deck__/, "");
 const toolEvents = (t: Transcript): { i: number; e: ToolEvent }[] =>
-  t.events.flatMap((e, i) => (e.kind === "tool" ? [{ i, e }] : []));
+  t.events.flatMap((e, i) => (e.kind === "tool" ? [{ i, e: { ...e, name: bareName(e.name) } }] : []));
 const turns = (t: Transcript, kind: "user" | "assistant"): { i: number; text: string }[] =>
   t.events.flatMap((e, i) => (e.kind === kind ? [{ i, text: e.text }] : []));
-const firstIndex = (xs: { i: number }[]): number => (xs.length ? xs[0].i : Infinity);
+
+
+/** A card name as a heading writes it: without bold or code marks or a trailing parenthetical ("Name (4 mana)"). */
+const cleanName = (raw: string | undefined): string => (raw ?? "").replace(/[*`_]/g, "").replace(/\s*\([^)]*\)\s*$/, "").trim();
 
 /** Every swap, cut or add block in the assistant turns, in order. */
 export function swapBlocks(t: Transcript): SwapBlock[] {
@@ -57,114 +56,16 @@ export function swapBlocks(t: Transcript): SwapBlock[] {
         else if (line.trim() !== "") break;
       }
       const kind = m[1] as SwapBlock["kind"];
-      const [a, b] = m[3].split(/\s*(?:→|->)\s*/);
+      const [a, b] = m[3].split(/\s*(?:→|->)\s*/).map(cleanName);
       out.push({
         event: i, kind, n: Number(m[2]),
-        out: kind === "Add" ? null : a.trim(),
-        in: kind === "Swap" ? (b ?? "").trim() || null : kind === "Add" ? a.trim() : null,
+        out: kind === "Add" ? null : a,
+        in: kind === "Swap" ? b || null : kind === "Add" ? a : null,
         text: lines.slice(l, end).join("\n"),
       });
     }
   }
   return out;
-}
-
-/** Every "Levers, ranked by expected help" list in the assistant turns, with its numbered items. */
-export function leverLists(t: Transcript): LeverList[] {
-  const out: LeverList[] = [];
-  for (const { i, text } of turns(t, "assistant")) {
-    const lines = text.split("\n");
-    const h = lines.findIndex((l) => LEVERS_HEADING.test(l));
-    if (h < 0) continue;
-    const items: LeverItem[] = [];
-    for (let l = h + 1; l < lines.length; l++) {
-      const m = LIST_ITEM.exec(lines[l]);
-      if (m) {
-        const title = /\*\*(.+?)\*\*/.exec(m[2])?.[1] ?? "";
-        // The lever name from SKILL.md's table; sessions recorded before 2026-11-06's "talk Magic" change named the
-        // tool lever in backticks instead.
-        const lever = leverByName(title) ?? [...m[2].matchAll(/`([a-z]+)`/g)].map((x) => x[1]).find((x) => LEVER_SET.has(x)) ?? null;
-        items.push({ n: Number(m[1]), title, lever, text: m[2] });
-      } else if (lines[l].trim() !== "") break; // blank lines between items are the house list format, not the list's end
-    }
-    out.push({ event: i, items });
-  }
-  return out;
-}
-
-/** Whether a user turn picks this lever item: its number on its own, its bold title, or its tool lever by name. */
-function picks(userText: string, item: LeverItem): boolean {
-  const text = userText.toLowerCase();
-  if (new RegExp(`(^|[^\\d])${item.n}([^\\d]|$)`).test(text)) return true;
-  if (item.title && text.includes(item.title.toLowerCase())) return true;
-  return item.lever !== null && new RegExp(`\\b${item.lever}\\b`).test(text);
-}
-
-/** ISC-13: no lever produces swaps until the player picks it. Each swap_candidates call follows a user pick of a lever with
- * that tool lever from the latest levers list, and no swap block appears before the first such call. */
-export function checkNoSwapsWithoutPick(t: Transcript): CheckResult {
-  const violations: string[] = [];
-  const lists = leverLists(t);
-  const users = turns(t, "user");
-  const calls = toolEvents(t).filter(({ e }) => e.name === "swap_candidates");
-  for (const { i, e } of calls) {
-    const list = [...lists].reverse().find((l) => l.event < i);
-    if (!list) { violations.push(`event ${i}: swap_candidates (${String(e.input.lever)}) ran before any levers list`); continue; }
-    const picked = users.filter((u) => u.i > list.event && u.i < i)
-      .some((u) => list.items.some((item) => item.lever === e.input.lever && picks(u.text, item)));
-    if (!picked) violations.push(`event ${i}: swap_candidates (${String(e.input.lever)}) ran with no user pick of that lever after the list at event ${list.event}`);
-  }
-  const blocks = swapBlocks(t);
-  const firstCall = firstIndex(calls);
-  for (const b of blocks.filter((b) => b.event < firstCall)) violations.push(`event ${b.event}: ${b.kind} ${b.n} listed before any swap_candidates call`);
-  if (violations.length) return { pass: false, details: violations };
-  return { pass: true, details: [`${calls.length} swap_candidates call(s), each after a pick; ${blocks.length} swap block(s), none before a call`] };
-}
-
-/** ISC-22.1: the deck's numbers (deck_stats, then an assistant turn with its average mana value and curve) come
- * before the first swap block and the first swap_candidates call. */
-export function checkNumbersBeforeSwaps(t: Transcript): CheckResult {
-  const stats = toolEvents(t).find(({ e }) => e.name === "deck_stats" && !e.isError);
-  if (!stats) return { pass: false, details: ["no successful deck_stats call in the session"] };
-  const avg = (stats.e.result as { averageManaValue?: unknown }).averageManaValue;
-  if (typeof avg !== "number") return { pass: false, details: [`deck_stats at event ${stats.i} has no numeric averageManaValue`] };
-  const shown = [avg.toFixed(2), avg.toFixed(3)];
-  const report = turns(t, "assistant").find((a) => a.i > stats.i && shown.some((s) => a.text.includes(s)) && /\bcurve\b/i.test(a.text));
-  if (!report) return { pass: false, details: [`no assistant turn after deck_stats shows the average mana value (${shown.join(" or ")}) and the curve`] };
-  const firstSwap = Math.min(firstIndex(swapBlocks(t).map((b) => ({ i: b.event }))), firstIndex(toolEvents(t).filter(({ e }) => e.name === "swap_candidates")));
-  const pass = report.i < firstSwap;
-  return { pass, details: [`deck_stats at event ${stats.i}, numbers reported at event ${report.i}, first swap at ${firstSwap === Infinity ? "none" : `event ${firstSwap}`}`] };
-}
-
-/** ISC-22.2: a levers list ranked by expected help, at least two items each naming a tool lever, comes before the
- * first swap block and the first swap_candidates call. */
-export function checkLeversBeforeSwaps(t: Transcript): CheckResult {
-  const list = leverLists(t).find((l) => l.items.length >= 2 && l.items.every((x) => x.lever !== null));
-  if (!list) return { pass: false, details: ["no 'Levers, ranked by expected help' list with two or more items, each naming a tool lever"] };
-  const ranked = list.items.every((x, k) => x.n === k + 1);
-  const firstSwap = Math.min(firstIndex(swapBlocks(t).map((b) => ({ i: b.event }))), firstIndex(toolEvents(t).filter(({ e }) => e.name === "swap_candidates")));
-  const pass = ranked && list.event < firstSwap;
-  return {
-    pass,
-    details: [`levers at event ${list.event}: ${list.items.map((x) => `${x.n}. ${x.title} (${x.lever})`).join("; ")}${ranked ? "" : " (not numbered 1..n)"}; first swap at ${firstSwap === Infinity ? "none" : `event ${firstSwap}`}`],
-  };
-}
-
-function stringLeaves(v: unknown, out: string[] = []): string[] {
-  if (typeof v === "string") out.push(v);
-  else if (Array.isArray(v)) for (const x of v) stringLeaves(x, out);
-  else if (v && typeof v === "object") for (const x of Object.values(v)) stringLeaves(x, out);
-  return out;
-}
-
-type CandidatePair = { out: string | null; in: string | null };
-function returnedPairs(t: Transcript): CandidatePair[] {
-  return toolEvents(t).filter(({ e }) => e.name === "swap_candidates" && !e.isError).flatMap(({ e }) => {
-    const cands = (e.result as { candidates?: unknown }).candidates;
-    if (!Array.isArray(cands)) return [];
-    const name = (side: unknown) => (side && typeof side === "object" && typeof (side as { name?: unknown }).name === "string" ? (side as { name: string }).name : null);
-    return cands.map((c) => ({ out: name((c as { out?: unknown }).out), in: name((c as { in?: unknown }).in) }));
-  });
 }
 
 /** Where `name` occurs in `text` as a whole name: case-sensitive, not inside a longer word. */
@@ -179,7 +80,7 @@ function nameSpans(text: string, name: string): [number, number][] {
 }
 
 /** The card names named in `text`. A name seen only inside a longer name ("Study" in "Rhystic Study") is not counted. */
-function namedCards(text: string, names: string[]): string[] {
+export function namedCards(text: string, names: string[]): string[] {
   const found = names.map((n) => ({ n, spans: nameSpans(text, n) })).filter((f) => f.spans.length > 0);
   const inside = ([a, b]: [number, number], self: string) =>
     found.some((f) => f.n !== self && f.n.length > self.length && f.spans.some(([c, d]) => c <= a && b <= d));
@@ -197,63 +98,6 @@ export function scannableNames(cardNames: string[]): string[] {
   return [...names];
 }
 
-/** ISC-23.1: every card Claude proposes came back from a tool in the session. Two halves: each swap block's pair is
- * a candidate pair some swap_candidates call returned, and every card name in an assistant turn appears in a tool
- * result, a file read or a user turn of the same session. `names` comes from scannableNames over the card store. */
-export function checkProposalsFromTools(t: Transcript, names: string[]): CheckResult {
-  const details: string[] = [];
-  const pairs = returnedPairs(t);
-  const blocks = swapBlocks(t);
-  const unreturned = blocks.filter((b) => !pairs.some((p) => p.out === b.out && p.in === b.in));
-  for (const b of unreturned) details.push(`${b.kind} ${b.n} (event ${b.event}): ${b.out ?? "∅"} → ${b.in ?? "∅"} is not a pair any swap_candidates call returned`);
-  const sources: string[] = t.events.flatMap((e: TranscriptEvent) =>
-    e.kind === "tool" ? (e.isError ? [] : stringLeaves(e.result)) : e.kind === "read" ? [e.content] : e.kind === "user" ? [e.text] : []);
-  const sourceText = sources.join("\n");
-  // The block labels are the skill's own words, not card names ("Reason" is also a card face).
-  const said = turns(t, "assistant").map((a) => a.text.replace(FORMAT_LABELS, " ")).join("\n");
-  const named = namedCards(said, names);
-  const outside = named.filter((n) => !sourceText.includes(n));
-  for (const n of outside) details.push(`"${n}" is named by Claude but appears in no tool result, file read or user turn of the session`);
-  if (details.length === 0) details.push(`${blocks.length} swap block(s), all returned pairs; ${named.length} card names in Claude's turns, all from the session`);
-  return { pass: unreturned.length === 0 && outside.length === 0, details };
-}
-
-/** ISC-23.2, code half: every swap, cut or add block carries the Claude's read label. */
-export function checkReadsLabeled(t: Transcript): CheckResult {
-  const blocks = swapBlocks(t);
-  const missing = blocks.filter((b) => !READ_LABEL.test(b.text));
-  return {
-    pass: missing.length === 0,
-    details: missing.length ? missing.map((b) => `${b.kind} ${b.n} (event ${b.event}) has no **Claude's read** line`) : [`${blocks.length} swap block(s), each with a **Claude's read** line`],
-  };
-}
-
-// A turn that offers a search instead of running it ("I can run it whenever you want", "want me to search"). The
-// offer is the miss: the store answers that search, so the turn should already hold its result.
-const SEARCH_OFFER = /\b(?:(?:I|we)\s+(?:can|could)\s+(?:run|search|pull|look)|want me to\s+(?:run|search|pull|look)|whenever you (?:want|like)|if you(?:'d| would)? like,? I (?:can|could))\b/i;
-const SEARCH_WORD = /find_cards|\btags?\b|search|look(?:\s+|-)?up/i;
-
-/** ISC-28: a turn never offers a card search it could run. Each assistant turn that offers one must have a find_cards
- *  call since the user turn before it. */
-export function checkSearchesNotDeferred(t: Transcript): CheckResult {
-  const details: string[] = [];
-  let since: string[] = [];
-  let offers = 0;
-  t.events.forEach((e, i) => {
-    if (e.kind === "user") since = [];
-    else if (e.kind === "tool") since.push(e.name);
-    else if (e.kind === "assistant") {
-      for (const sentence of e.text.split(/(?<=[.!?])\s+|\n+/)) {
-        if (!SEARCH_OFFER.test(sentence) || !SEARCH_WORD.test(sentence)) continue;
-        offers++;
-        if (!since.includes("find_cards")) details.push(`event ${i} offers a search it did not run: "${sentence.trim().slice(0, 160)}"`);
-      }
-      since = [];
-    }
-  });
-  if (details.length === 0) details.push(`${offers} search offer(s), each with its find_cards call in the same turn`);
-  return { pass: !details[0].startsWith("event"), details };
-}
 
 // Tool and code vocabulary a reply to the player never carries (SKILL.md "Talk Magic, not tools"). Each entry is a name the
 // MCP or the repo uses and a player would not: tool names, tool arguments and JSON fields, file paths, tag talk, search
@@ -262,7 +106,7 @@ export function checkSearchesNotDeferred(t: Transcript): CheckResult {
 const TOOL_TALK: [string, RegExp][] = [
   ["tool name", /\b(?:deck_stats|swap_candidates|find_cards|accept_swap|reject_swap|commander_profile)\b|`(?:diagnose|shortlist)`/],
   ["tool lever in backticks", new RegExp("`(?:" + LEVERS.join("|") + ")`")],
-  ["tool argument or field", /\b(?:belowTarget|dropsRole|deckFile|decklist|colorIdentity|manaValue|engineGap|offPlan|maxManaValue|maxPrice|planPartners|planGain|genericLinks|noLinks)\b|`(?:card|targets|tags|neighbors)`/],
+  ["tool argument or field", /\b(?:belowTarget|dropsRole|deckFile|decklist|colorIdentity|manaValue|engineGap|offPlan|maxManaValue|maxPrice|planPartners|planGain|genericLinks|noLinks|cardFacts)\b|`(?:card|targets|tags|neighbors)`/],
   ["file path", /(?:^|[\s(`])(?:app|labels|evals|data)\/\S+|\S+\.(?:json|jsonl|ts|yaml)\b/],
   ["tag talk", /\b(?:Tagger|tags?)\b/i],
   ["match count", /\b\d+\s+match(?:es|ed)?\b/i],
@@ -369,4 +213,285 @@ export function cardNamesInLiterals(literals: string[], names: string[]): { name
     }
   }
   return hits;
+}
+
+
+// ---------- reading a session ----------
+
+const norm = (s: string) => s.replace(/[’‘]/g, "'").replace(/[“”]/g, '"');
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Faces of a multi-face card name, plus the whole name. */
+const faces = (name: string) => (name.includes(" // ") ? [name, ...name.split(" // ")] : [name]);
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const isTable = (v: unknown): v is { columns: string[]; rows: unknown[][] } =>
+  isObj(v) && Array.isArray(v.columns) && Array.isArray(v.rows) && v.rows.every(Array.isArray);
+
+/** Every table ({columns, rows}) inside a tool result, as one object per row. */
+function tableRows(v: unknown, out: Record<string, unknown>[] = []): Record<string, unknown>[] {
+  if (isTable(v)) {
+    for (const row of v.rows) out.push(Object.fromEntries(v.columns.map((c, k) => [c, row[k]])));
+  } else if (Array.isArray(v)) for (const x of v) tableRows(x, out);
+  else if (isObj(v)) for (const x of Object.values(v)) tableRows(x, out);
+  return out;
+}
+
+/** Every object with a string \`name\` inside a result, tables flattened to their rows. */
+function namedRecords(v: unknown, out: Record<string, unknown>[] = []): Record<string, unknown>[] {
+  if (isTable(v)) out.push(...tableRows(v));
+  else if (Array.isArray(v)) for (const x of v) namedRecords(x, out);
+  else if (isObj(v)) {
+    if (typeof v.name === "string") out.push(v);
+    // the commander and the plan are echoed in most results; they are not cards a tool returned
+    for (const [k, x] of Object.entries(v)) if (k !== "commander") namedRecords(x, out);
+  }
+  return out;
+}
+
+const okResults = (t: Transcript, names: string[], before = Infinity): { i: number; e: ToolEvent }[] =>
+  toolEvents(t).filter(({ i, e }) => i < before && !e.isError && names.includes(e.name));
+
+/** The card names a set of tools returned before an event: a name column or a name field, and a bare name in a list of
+ * names (the diagnosis's unread and off-plan groups). A two-face name is also known by each face. */
+function returnedBy(t: Transcript, tools: string[], before = Infinity): Set<string> {
+  const out = new Set<string>();
+  const add = (n: unknown) => { if (typeof n === "string" && n) for (const f of faces(n)) out.add(f); };
+  for (const { e } of okResults(t, tools, before)) {
+    for (const r of namedRecords(e.result)) add(r.name);
+    const walk = (v: unknown) => {
+      if (isObj(v) && Array.isArray(v.cards)) for (const c of v.cards) add(c);
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (isObj(v)) Object.values(v).forEach(walk);
+    };
+    walk(e.result);
+  }
+  return out;
+}
+
+
+/** Text outside code fences and judgment blocks, line by line (the prose of a reply). */
+function proseLines(text: string): string[] {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let fenced = false;
+  for (let l = 0; l < lines.length; l++) {
+    if (/^\s*```/.test(lines[l])) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    if (SWAP_HEADING.test(lines[l])) {
+      let k = l + 1;
+      let bullets = false;
+      for (; k < lines.length; k++) {
+        if (/^\s*[-*]\s/.test(lines[k]) || (bullets && /^\s{2,}\S/.test(lines[k]))) bullets = true;
+        else if (lines[k].trim() !== "") break;
+      }
+      l = k - 1;
+      continue;
+    }
+    out.push(lines[l]);
+  }
+  return out;
+}
+
+// ---------- ISC-91: card facts ----------
+
+type Fact = { manaValue?: number; typeLine?: string; power?: string | null; toughness?: string | null };
+/** Every card fact the session's tools returned before an event, by card name (each face too). */
+function factsBefore(t: Transcript, before: number): Map<string, Fact> {
+  const facts = new Map<string, Fact>();
+  for (const { e } of okResults(t, ["card", "find_cards", "deck_stats", "diagnose", "shortlist", "swap_candidates", "neighbors"], before)) {
+    for (const r of namedRecords(e.result)) {
+      if (typeof r.name !== "string") continue;
+      const fact: Fact = {};
+      if (typeof r.manaValue === "number") fact.manaValue = r.manaValue;
+      if (typeof r.typeLine === "string") fact.typeLine = r.typeLine;
+      if ("power" in r) { fact.power = r.power === null || r.power === undefined ? null : String(r.power); fact.toughness = r.toughness === null || r.toughness === undefined ? null : String(r.toughness); }
+      if (Object.keys(fact).length === 0) continue;
+      for (const f of faces(r.name)) facts.set(f, { ...facts.get(f), ...fact });
+    }
+    if (isObj(e.result) && isObj(e.result.card) && typeof e.result.card.name === "string") {
+      const c = e.result.card;
+      const fact: Fact = { manaValue: typeof c.manaValue === "number" ? c.manaValue : undefined, typeLine: typeof c.typeLine === "string" ? c.typeLine : undefined, power: c.power === undefined ? null : String(c.power), toughness: c.toughness === undefined ? null : String(c.toughness) };
+      for (const f of faces(c.name as string)) facts.set(f, { ...facts.get(f), ...fact });
+    }
+  }
+  return facts;
+}
+
+const TYPES = ["creature", "artifact", "enchantment", "instant", "sorcery", "land", "planeswalker", "battle"];
+const MV_COMPARE = /\b(?:mana value|MV|cmc)\s*:?\s*(\d+)\s*(?:vs\.?|versus|→|->|against|compared (?:to|with))\s*(?:mana value|MV|cmc)?\s*(\d+)|\b(?:mana value|MV|cmc)\s+from\s+(\d+)\s+to\s+(\d+)\b/gi;
+const MV_CLAIMS = [/(\d+)-drop\b/gi, /\b(?:mana value|MV|cmc)\s*:?\s*(\d+)/gi, /\bcosts?\s+(?:just\s+)?\{?(\d+)\}?(?![\d/])/gi];
+
+/** ISC-91, code half: every card cost, type or stats a reply states for a card is backed by a tool result in that session that
+ * returned that card, and agrees with it. A sentence that names a card beside a mana value, a cost, power and toughness or a
+ * card type counts as stating a fact; one that names several cards is held only to "each card was returned". Whether a stated
+ * rules-text fact matches its card is the judge stage's. \`names\` comes from scannableNames over the card store. */
+export function checkFactsFromTools(t: Transcript, names: string[]): CheckResult {
+  const details: string[] = [];
+  let stated = 0;
+  for (const { i, text } of turns(t, "assistant")) {
+    const facts = factsBefore(t, i);
+    for (const line of proseLines(text).concat(swapBlocks({ ...t, events: [t.events[i]] }).flatMap((b) => b.text.split("\n")))) {
+      for (const sentence of line.split(/(?<=[.!?])\s+/)) {
+        const s = norm(sentence).replace(FORMAT_LABELS, " ");
+        const cards = namedCards(s, names);
+        if (cards.length === 0) continue;
+        // "mana value 4 vs 7" compares two cards' costs, so it is one claim that holds when either number is the named card's.
+        const compared = [...s.matchAll(MV_COMPARE)].map((m) => [Number(m[1] ?? m[3]), Number(m[2] ?? m[4])]);
+        const claimsMV = MV_CLAIMS.flatMap((re) => [...s.replace(MV_COMPARE, " ").matchAll(re)].map((m) => Number(m[1])));
+        const afterName = cards.flatMap((c) => { const m = new RegExp(`${esc(c)}(?:\\*\\*)?\\s*\\((\\d+)\\)`).exec(s); return m ? [{ card: c, mv: Number(m[1]) }] : []; });
+        const pt = /\btokens?\b/i.test(s) ? [] : [...s.matchAll(/(?<![+\-\d])(\d+)\s*\/\s*(\d+)(?!\d)/g)].map((m) => [m[1], m[2]]);
+        const typeClaim = cards.length === 1 ? new RegExp(`${esc(cards[0])}(?:\\*\\*)?\\s+(?:is|are)\\s+(?:a|an)\\s+([a-z ,]+?)(?:[.,;:]|$)`, "i").exec(s)?.[1] : undefined;
+        const typeWords = typeClaim ? TYPES.filter((w) => new RegExp(`\\b${w}\\b`, "i").test(typeClaim)) : [];
+        const makesClaim = claimsMV.length + compared.length + afterName.length + pt.length + typeWords.length > 0;
+        if (!makesClaim) continue;
+        stated++;
+        for (const c of cards) if (!facts.has(c)) details.push(`event ${i}: states a fact about ${c}, which no tool result before it returned: ${sentence.trim().slice(0, 100)}`);
+        if (cards.length === 1) {
+          const f = facts.get(cards[0]);
+          if (f) {
+            for (const [a, b] of compared) if (f.manaValue !== undefined && f.manaValue !== a && f.manaValue !== b) details.push(`event ${i}: compares mana values ${a} and ${b} beside ${cards[0]}; the data says ${f.manaValue}`);
+            for (const mv of claimsMV) if (f.manaValue !== undefined && f.manaValue !== mv) details.push(`event ${i}: says ${cards[0]} has mana value ${mv}; the data says ${f.manaValue}`);
+            for (const [p, tt] of pt) if (f.power !== undefined && !/\btokens?\b/i.test(s) && (f.power === null || f.power !== p || f.toughness !== tt)) details.push(`event ${i}: says ${cards[0]} is ${p}/${tt}; the data says ${f.power === null ? "no power or toughness" : `${f.power}/${f.toughness}`}`);
+            for (const w of typeWords) if (f.typeLine !== undefined && !new RegExp(`\\b${w}\\b`, "i").test(f.typeLine)) details.push(`event ${i}: says ${cards[0]} is a ${w}; the data says ${f.typeLine}`);
+          }
+        }
+        for (const a of afterName) {
+          const f = facts.get(a.card);
+          if (f && f.manaValue !== undefined && f.manaValue !== a.mv) details.push(`event ${i}: shows ${a.card} at ${a.mv}; the data says mana value ${f.manaValue}`);
+        }
+      }
+    }
+  }
+  return details.length ? { pass: false, details } : { pass: true, details: [`${stated} stated card fact(s), each from a result that returned the card and agreeing with it`] };
+}
+
+
+// ---------- ISC-110: the mana curve chart ----------
+
+const CHART_ROW = /^\s*(?:MV\s*|mana value\s*)?(\d+\+?)\s*[:|]?\s+([█░]+)\s*(\d+)?\s*$/i;
+
+/** ISC-110: a reply that shows the whole mana curve draws it as a chart in a code block with one row per mana value, one filled
+ * cell (█) per card, the count at the end of the row and ░ padding to a common width, and every row matches the curve in a
+ * deck_stats result from earlier in the session. A zero bucket may be left out. */
+export function checkCurveChart(t: Transcript): CheckResult {
+  const details: string[] = [];
+  let charts = 0;
+  for (const { i, text } of turns(t, "assistant")) {
+    const lines = text.split("\n");
+    const fenced = (idx: number) => { let f = false; for (let k = 0; k <= idx; k++) if (/^\s*```/.test(lines[k]) && k !== idx) f = !f; return f; };
+    const barLines = lines.map((l, k) => ({ l, k })).filter(({ l }) => /[█░]/.test(l));
+    if (barLines.length === 0) continue;
+    const loose = barLines.filter(({ k }) => !fenced(k));
+    if (loose.length) details.push(`event ${i}: a chart row sits outside a code block: ${loose[0].l.trim().slice(0, 60)}`);
+    const rows = barLines.filter(({ k }) => fenced(k)).map(({ l }) => ({ l, m: CHART_ROW.exec(l) }));
+    const parsed = rows.flatMap((r) => (r.m ? [{ bucket: r.m[1], filled: [...r.m[2]].filter((c) => c === "█").length, width: [...r.m[2]].length, count: r.m[3] === undefined ? null : Number(r.m[3]), line: r.l }] : []));
+    for (const r of rows.filter((r) => !r.m)) details.push(`event ${i}: a chart row has no mana value, bars and count: ${r.l.trim().slice(0, 60)}`);
+    if (parsed.length === 0) continue;
+    charts++;
+    const stats = okResults(t, ["deck_stats"], i).map(({ i: si, e }) => ({ si, curve: isObj(e.result) && isObj(e.result.curve) ? (e.result.curve as Record<string, unknown>) : null })).filter((x) => x.curve);
+    if (stats.length === 0) { details.push(`event ${i}: a mana curve chart with no deck_stats result before it`); continue; }
+    const problems = stats.map(({ si, curve }) => {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const r of parsed) {
+        const key = r.bucket;
+        if (seen.has(key)) out.push(`mana value ${key} appears twice`);
+        seen.add(key);
+        const want = curve![key];
+        if (typeof want !== "number") { out.push(`mana value ${key} is not a bucket of the deck_stats curve`); continue; }
+        if (r.filled !== want) out.push(`mana value ${key} has ${r.filled} filled cell(s); the deck has ${want}`);
+        if (r.count === null) out.push(`mana value ${key} has no count at the end`);
+        else if (r.count !== want) out.push(`mana value ${key} prints ${r.count}; the deck has ${want}`);
+        if (r.width !== parsed[0].width) out.push(`mana value ${key} is padded to ${r.width}, not ${parsed[0].width}`);
+      }
+      for (const [k, v] of Object.entries(curve!)) if (typeof v === "number" && v > 0 && !seen.has(k)) out.push(`the row for mana value ${k} (${v} cards) is missing`);
+      return { si, out };
+    });
+    const best = problems.find((p) => p.out.length === 0);
+    if (!best) {
+      const nearest = problems.reduce((a, b) => (b.out.length < a.out.length ? b : a));
+      details.push(...nearest.out.map((m) => `event ${i}: ${m} (against deck_stats at event ${nearest.si})`));
+    }
+  }
+  return details.length ? { pass: false, details } : { pass: true, details: [charts ? `${charts} chart(s), every row equal to a deck_stats curve bucket` : "no reply shows the whole curve as a chart"] };
+}
+
+/** ISC-108: every swap, cut or add block carries the "my read" label, in any capitals, and "Claude's read" appears in no reply. */
+export function checkMyRead(t: Transcript): CheckResult {
+  const details: string[] = [];
+  const blocks = swapBlocks(t);
+  for (const b of blocks.filter((b) => !READ_LABEL.test(b.text))) details.push(`${b.kind} ${b.n} (event ${b.event}) has no **My read** line`);
+  for (const { i, text } of turns(t, "assistant")) for (const l of text.split("\n").filter((l) => OLD_READ_LABEL.test(l))) details.push(`event ${i} says "Claude's read": ${l.trim().slice(0, 100)}`);
+  return { pass: details.length === 0, details: details.length ? details : [`${blocks.length} swap block(s), each with a **My read** line; no reply says "Claude's read"`] };
+}
+
+// ---------- ISC-68: incoming cards come from a search ----------
+
+/** ISC-68: every incoming card in a swap or add block came back from a shortlist, swap_candidates or find_cards call earlier in
+ * the session. */
+export function checkIncomingFromSearch(t: Transcript): CheckResult {
+  const blocks = swapBlocks(t).filter((b) => b.in !== null);
+  const bad = blocks.filter((b) => !returnedBy(t, ["shortlist", "swap_candidates", "find_cards"], b.event).has(b.in!));
+  return bad.length
+    ? { pass: false, details: bad.map((b) => `${b.kind} ${b.n} (event ${b.event}): ${b.in} came back from no shortlist, swap_candidates or find_cards call before it`) }
+    : { pass: true, details: [`${blocks.length} incoming card(s), each returned by a shortlist, swap_candidates or find_cards call before its block`] };
+}
+
+// ---------- ISC-111: verdicts on the player's word ----------
+
+const ACCEPTS = /\b(?:yes|yep|yeah|accept\w*|take|keep|add|do it|go ahead|go for it|sounds good|swap (?:it|them|that)|make (?:it|that|those|them)|lock (?:it|them) in|approve\w*|ok|okay|sure)\b/i;
+const REJECTS = /\b(?:no|nope|nah|reject\w*|skip|pass|don'?t|do not|drop|leave it|not that)\b/i;
+const EVERY = /\b(?:all|both|every|each|those|them|the rest|everything)\b/i;
+
+/** The swap numbers a player's words name: "1", "swap 2", "1 and 3", "1-3", "1 to 3". */
+function numbersNamed(text: string): Set<number> {
+  const out = new Set<number>();
+  for (const m of text.matchAll(/(\d+)\s*(?:-|–|to|through|thru)\s*(\d+)/gi)) for (let n = Number(m[1]); n <= Number(m[2]) && n < 100; n++) out.add(n);
+  for (const m of text.matchAll(/\d+/g)) out.add(Number(m[0]));
+  return out;
+}
+
+/** ISC-111: accept_swap and reject_swap run only on the player's own word for that swap. The latest player turn before each call
+ * gives the verdict (an accepting word for accept_swap, a rejecting one for reject_swap) and names that swap: the card it adds or
+ * cuts, its number in a block Claude showed before that turn, or every swap at once. A lever pick, silence, or "looks interesting"
+ * is no verdict. */
+export function checkVerdictsOnPlayersWord(t: Transcript): CheckResult {
+  const calls = toolEvents(t).filter(({ e }) => e.name === "accept_swap" || e.name === "reject_swap");
+  const details: string[] = [];
+  const users = turns(t, "user");
+  const blocks = swapBlocks(t);
+  for (const { i, e } of calls) {
+    const accept = e.name === "accept_swap";
+    const out = typeof e.input.out === "string" ? e.input.out : null;
+    const inn = typeof e.input.in === "string" ? e.input.in : null;
+    const label = `${e.name} ${[out, inn].filter(Boolean).join(" → ")}`;
+    const u = [...users].reverse().find((x) => x.i < i);
+    if (!u) { details.push(`event ${i}: ${label} ran with no player turn before it`); continue; }
+    const between = t.events.slice(u.i + 1, i).some((x) => x.kind === "assistant");
+    if (between) { details.push(`event ${i}: ${label} ran after a reply that came after the player's last word (event ${u.i})`); continue; }
+    const word = accept ? ACCEPTS.test(u.text) : REJECTS.test(u.text);
+    if (!word) { details.push(`event ${i}: ${label}, but the player's last turn (event ${u.i}) does not ${accept ? "accept" : "reject"} anything`); continue; }
+    const names = [out, inn].filter((x): x is string => !!x).some((n) => new RegExp(`(?<![\\p{L}\\p{N}])${esc(n)}(?![\\p{L}\\p{N}])`, "iu").test(u.text));
+    const block = blocks.find((b) => b.event < u.i && ((out !== null && b.out === out) || (inn !== null && b.in === inn)));
+    const byNumber = block !== undefined && numbersNamed(u.text).has(block.n);
+    const every = block !== undefined && EVERY.test(u.text);
+    if (!names && !byNumber && !every) details.push(`event ${i}: ${label}, but the player's turn at event ${u.i} names no card of that swap and no shown swap number${block ? ` (it was swap ${block.n})` : " (no block showed it)"}`);
+  }
+  return details.length ? { pass: false, details } : { pass: true, details: [`${calls.length} verdict call(s), each on the player's word for that swap`] };
+}
+
+// ---------- grading a whole session ----------
+
+export type Graded = { id: string; title: string; result: CheckResult };
+
+/** The six session checks on one transcript. `names` comes from scannableNames over the card store. */
+export function gradeSession(t: Transcript, names: string[]): Graded[] {
+  return [
+    { id: "ISC-111", title: "verdicts run on the player's word", result: checkVerdictsOnPlayersWord(t) },
+    { id: "ISC-91", title: "card facts come from tool results", result: checkFactsFromTools(t, names) },
+    { id: "ISC-68", title: "incoming cards came from a search", result: checkIncomingFromSearch(t) },
+    { id: "ISC-29", title: "no tool or code vocabulary in a reply", result: checkNoToolTalk(t) },
+    { id: "ISC-108", title: "\"my read\" on every block; \"Claude's read\" nowhere", result: checkMyRead(t) },
+    { id: "ISC-110", title: "the curve chart matches deck_stats", result: checkCurveChart(t) },
+  ];
 }

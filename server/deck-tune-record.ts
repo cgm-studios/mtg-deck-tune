@@ -2,12 +2,12 @@
 // agent plays the skill turn by turn: it writes each user and assistant turn with this tool, and every tool call goes
 // through a real MCP client over stdio (the server command `.mcp.json` gives), logged with its full result.
 //
-//   bun app/deck-tune-record.ts init <session.jsonl> --title <t> --note <n> --played-by <model> [--real]
-//   bun app/deck-tune-record.ts user <session.jsonl>            (turn text on stdin)
-//   bun app/deck-tune-record.ts assistant <session.jsonl>       (turn text on stdin)
-//   bun app/deck-tune-record.ts read <session.jsonl> <path>     (a file the skill reads, relative to the repo root)
-//   bun app/deck-tune-record.ts call <session.jsonl> <tool> <json-arguments>
-//   bun app/deck-tune-record.ts render <session.jsonl> <out.md>
+//   bun server/deck-tune-record.ts init <session.jsonl> --title <t> --note <n> --played-by <model> [--real]
+//   bun server/deck-tune-record.ts user <session.jsonl>            (turn text on stdin)
+//   bun server/deck-tune-record.ts assistant <session.jsonl>       (turn text on stdin)
+//   bun server/deck-tune-record.ts read <session.jsonl> <path>     (a file the skill reads, relative to the repo root)
+//   bun server/deck-tune-record.ts call <session.jsonl> <tool> <json-arguments>
+//   bun server/deck-tune-record.ts render <session.jsonl> <out.md>
 //
 // Each call starts the server, connects, checks the tool is listed, calls it and closes: the tools are deterministic,
 // so a fresh server per call gives the same answer a long-lived one would.

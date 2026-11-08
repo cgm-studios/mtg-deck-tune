@@ -1,203 +1,158 @@
-// MV-17: the code stage of the deck-tune eval on the two recorded sessions in docs/research/deck-tune/, plus one
-// broken copy per check that must go red, so a check that passes everything cannot hide here.
+// MV-17, DT-6.7: the code stage of the deck-tune eval: six session checks (ISC-111, 91, 68, 29, 108, 110) and the product-code
+// probe ISC-83. Every session check is shown red on a bad example before it is shown green; the sessions are small and built here
+// from generic cards.
 
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import {
-  cardNamesInLiterals, stringLiterals,
-  checkLeversBeforeSwaps, checkNoSwapsWithoutPick, checkSearchesNotDeferred, checkNumbersBeforeSwaps, checkProposalsFromTools, checkReadsLabeled,
-  checkNoToolTalk, LEVER_NAMES, leverLists, scannableNames, swapBlocks,
+  cardNamesInLiterals, checkCurveChart, checkFactsFromTools, checkIncomingFromSearch, checkMyRead, checkNoToolTalk, checkVerdictsOnPlayersWord,
+  gradeSession, namedCards, scannableNames, stringLiterals,
 } from "./deck-tune-checks";
 import { openStore } from "./deck-tools";
+import { caseMatches } from "./deck-tune-eval";
 import { parseTranscript, readTranscript, serializeTranscript, TranscriptError, type Transcript, type TranscriptEvent } from "./deck-tune-transcript";
 
+// grading a session scans every card name of the store against each sentence
+setDefaultTimeout(120_000);
 const DIR = new URL("../docs/research/deck-tune/", import.meta.url).pathname;
-const namor = readTranscript(`${DIR}namor-mana-efficient.jsonl`);
-const noPick = readTranscript(`${DIR}namor-no-pick.jsonl`);
 let names: string[] = [];
 beforeAll(() => { names = scannableNames(openStore().names.map((n) => n.name)); });
 
-const clone = (t: Transcript): Transcript => structuredClone(t);
-/** A copy with every assistant turn's text passed through `edit`. */
-function editAssistant(t: Transcript, edit: (text: string, i: number) => string): Transcript {
-  const c = clone(t);
-  c.events = c.events.map((e, i) => (e.kind === "assistant" ? { ...e, text: edit(e.text, i) } : e));
-  return c;
-}
-const lastAssistant = (t: Transcript) => t.events.findLastIndex((e) => e.kind === "assistant");
+// ---------- small sessions ----------
+const user = (text: string): TranscriptEvent => ({ kind: "user", text });
+const say = (text: string): TranscriptEvent => ({ kind: "assistant", text });
+const call = (name: string, input: Record<string, unknown>, result: unknown, isError = false): TranscriptEvent => ({ kind: "tool", server: "mtg-deck", name, input, result, isError });
+const session = (...events: TranscriptEvent[]): Transcript => ({
+  header: { kind: "header", agentPlayed: true, playedBy: "synthetic", skill: "plugin/skills/deck-tune/SKILL.md", title: "t", note: "n", recordedAt: "2026-11-08T00:00:00.000Z" },
+  events,
+});
+const table = (columns: string[], rows: unknown[][]) => ({ columns, rows });
+const CURVE = { "0": 0, "1": 12, "2": 23, "3": 8, "4": 7, "5": 5, "6": 3, "7+": 6 };
+const STATS = call("deck_stats", { cardFacts: true }, {
+  curve: CURVE,
+  cardFacts: table(["name", "manaValue", "typeLine", "power", "toughness", "oracleText"], [
+    ["Arcane Signet", 2, "Artifact", null, null, "{T}: Add one mana."], ["Counterspell", 2, "Instant", null, null, "Counter target spell."],
+    ["Harmonize", 4, "Sorcery", null, null, "Draw three cards."]]),
+});
+const SHORT = call("shortlist", { plan: { themes: ["Ramp"] } }, { cards: table(["name", "manaValue", "typeLine"], [["Cultivate", 3, "Sorcery"], ["Farseek", 2, "Sorcery"]]) });
+const block = (n: number, out: string, inn: string, read = "- **My read:** it fits.") =>
+  [`### Swap ${n}: ${out} → ${inn}`, "- **Reason (data):** the same job; mana value 2 → 3.", "- **Deck after:** average mana value 3.09 → 3.11.", read].filter(Boolean).join("\n");
+const TWO = `${block(1, "Counterspell", "Cultivate")}\n\n${block(2, "Harmonize", "Farseek")}\n\nWant either?`;
+const accept = (out: string, inn: string) => call("accept_swap", { out, in: inn }, { verdict: "accept" });
+const reject = (out: string, inn: string) => call("reject_swap", { out, in: inn }, { verdict: "reject" });
+const shown = [user("make my deck better"), STATS, SHORT, say(TWO)];
 
-describe("recorded sessions", () => {
-  test("both are labeled agent-played and parse back to the same JSONL", () => {
-    for (const t of [namor, noPick]) {
-      expect(t.header.agentPlayed).toBe(true);
-      expect(parseTranscript(serializeTranscript(t))).toEqual(t);
+// ---------- ISC-111 ----------
+describe("ISC-111: accept and reject run only on the player's own word for that swap", () => {
+  test("ISC-111 goes red on silence, a hedge, a lever pick, the wrong swap number and the wrong verdict, then green on the player's word", () => {
+    const red = (...rest: TranscriptEvent[]) => checkVerdictsOnPlayersWord(session(...shown, ...rest));
+    expect(red(accept("Counterspell", "Cultivate")).details.join()).toContain("after a reply that came after the player's last word"); // silence: the swaps were just shown
+    expect(checkVerdictsOnPlayersWord(session(accept("Counterspell", "Cultivate"))).details.join()).toContain("ran with no player turn before it");
+    expect(checkVerdictsOnPlayersWord(session(user("make it better"), STATS, say("Which lever?"), user("1"), SHORT, say(TWO), accept("Counterspell", "Cultivate"))).pass).toBe(false); // the lever pick is not a verdict
+    expect(red(user("looks interesting"), accept("Counterspell", "Cultivate")).details.join()).toContain("does not accept anything");
+    expect(red(user("yes, take swap 2"), accept("Counterspell", "Cultivate")).details.join()).toContain("names no card of that swap");
+    expect(red(user("yes, take swap 1"), reject("Counterspell", "Cultivate")).details.join()).toContain("does not reject anything");
+    expect(red(user("yes take 1"), say("Done."), accept("Counterspell", "Cultivate")).pass).toBe(false); // Claude spoke after the player's last word
+    expect(red(user("yes, take swap 1"), accept("Counterspell", "Cultivate"))).toEqual({ pass: true, details: ["1 verdict call(s), each on the player's word for that swap"] });
+  });
+
+  test("ISC-111 takes the player's word by card name, number, range or 'all', and a reject on a no", () => {
+    const ok = (...rest: TranscriptEvent[]) => checkVerdictsOnPlayersWord(session(...shown, ...rest)).pass;
+    expect(ok(user("no, skip the Farseek one"), reject("Harmonize", "Farseek"))).toBe(true);
+    expect(ok(user("sure, add cultivate"), accept("Counterspell", "Cultivate"))).toBe(true);
+    expect(ok(user("take 1-2"), accept("Counterspell", "Cultivate"), accept("Harmonize", "Farseek"))).toBe(true);
+    expect(ok(user("yes, both"), accept("Counterspell", "Cultivate"), accept("Harmonize", "Farseek"))).toBe(true);
+    expect(ok(user("take swap 1 and 2"), accept("Counterspell", "Cultivate"), accept("Harmonize", "Farseek"))).toBe(true);
+    expect(ok(user("take swap 1"), accept("Counterspell", "Cultivate"), accept("Harmonize", "Farseek"))).toBe(false); // swap 2 was not named
+    expect(checkVerdictsOnPlayersWord(session(user("yes, swap Counterspell for Cultivate"), accept("Counterspell", "Cultivate"))).pass).toBe(true); // a swap the player asked for in their own words
+  });
+});
+
+// ---------- ISC-91 ----------
+describe("ISC-91: card facts come from tool results", () => {
+  const say1 = (line: string) => checkFactsFromTools(session(STATS, SHORT, say(line)), names);
+
+  test("ISC-91 goes red on a mana value that contradicts the data, a card no tool returned, a wrong stat or type, then green on facts that match", () => {
+    expect(say1("Cultivate costs 5 mana.").details.join()).toContain("says Cultivate has mana value 5; the data says 3");
+    expect(say1("Wayfarer's Bauble is a 1-drop that fetches a basic.").details.join()).toContain("Wayfarer's Bauble");
+    expect(say1("Harmonize is a 7-drop.").pass).toBe(false);
+    expect(say1("Arcane Signet is a 3/3 for 2.").pass).toBe(false);
+    expect(say1("Arcane Signet is an instant.").pass).toBe(false);
+    expect(say1("**Farseek** (4) fetches a land.").pass).toBe(false);
+    expect(say1("Harmonize is mana value 2 vs 3, so it saves one.").pass).toBe(false);
+    expect(say1("Cultivate costs 3 mana.")).toMatchObject({ pass: true });
+    expect(say1("Harmonize is a 4-drop.").pass).toBe(true);
+    expect(say1("Arcane Signet is an artifact.").pass).toBe(true);
+    expect(say1("**Farseek** (2) fetches a land.").pass).toBe(true);
+    expect(say1("Harmonize is mana value 2 vs 4, so it saves two.").pass).toBe(true);
+  });
+
+  test("ISC-91 a card named with no fact stated needs no result, and a result that came after the reply does not count", () => {
+    expect(say1("I like Wayfarer's Bauble in general.").pass).toBe(true);
+    expect(checkFactsFromTools(session(say("Cultivate costs 3 mana."), SHORT), names).pass).toBe(false);
+  });
+});
+
+// ---------- ISC-68 ----------
+describe("ISC-68: every incoming card came from a shortlist, swap_candidates or find_cards call", () => {
+  test("ISC-68 goes red on an incoming card from memory or returned only after its block, then green on each of the three tools", () => {
+    expect(checkIncomingFromSearch(session(STATS, SHORT, say(block(1, "Counterspell", "Wayfarer's Bauble")))).details.join()).toContain("Wayfarer's Bauble came back from no shortlist");
+    expect(checkIncomingFromSearch(session(STATS, say(block(1, "Counterspell", "Cultivate")), SHORT)).pass).toBe(false);
+    const found = call("find_cards", {}, { cards: table(["name", "manaValue"], [["Cultivate", 3]]) });
+    const paired = call("swap_candidates", {}, { candidates: [{ out: { name: "Counterspell" }, in: { name: "Cultivate" } }] });
+    for (const tool of [SHORT, found, paired]) expect(checkIncomingFromSearch(session(STATS, tool, say(block(1, "Counterspell", "Cultivate"))))).toMatchObject({ pass: true });
+    expect(checkIncomingFromSearch(session(STATS, say("No swaps yet.")))).toMatchObject({ pass: true });
+  });
+});
+
+// ---------- ISC-108 ----------
+describe("ISC-108: Claude's own judgment is labeled my read, and Claude's read appears in no reply", () => {
+  test("ISC-108 goes red on a block with the old label or none, and on the old label anywhere in a reply, then green on my read in any capitals", () => {
+    const old = block(1, "Counterspell", "Cultivate", "- **Claude's read** (my own Magic knowledge, not the data): it fits.");
+    expect(checkMyRead(session(say(old))).details.join()).toContain("Swap 1 (event 0) has no **My read** line");
+    expect(checkMyRead(session(say(block(1, "Counterspell", "Cultivate", "")))).pass).toBe(false);
+    for (const line of ["**Claude’s read**: keep it.", "claude's READ: keep it.", `${block(1, "Counterspell", "Cultivate")}\n\nMy view, **Claude's read**.`]) {
+      expect([line, checkMyRead(session(say(line))).pass]).toEqual([line, false]);
     }
-  });
-
-  test("the Namor session has 15 swap blocks from three cheaper calls; the no-pick session has none", () => {
-    expect(swapBlocks(namor).length).toBe(15);
-    expect(namor.events.filter((e) => e.kind === "tool" && e.name === "swap_candidates").length).toBe(3);
-    expect(swapBlocks(noPick).length).toBe(0);
-    expect(leverLists(namor)[0].items.map((x) => x.lever)).toEqual(["cheaper", "roles", "cheaper", "cheaper"]);
-  });
-
-  test("a malformed line is a TranscriptError, not a pass", () => {
-    expect(() => parseTranscript('{"kind":"header"}')).toThrow(TranscriptError);
-    expect(() => parseTranscript(`${serializeTranscript(namor)}{"kind":"tool","name":"x"}\n`)).toThrow(TranscriptError);
+    for (const label of ["**My read:**", "**MY READ:**", "**my read**:", "**My Read**:", "** my read **"]) {
+      expect([label, checkMyRead(session(say(block(1, "Counterspell", "Cultivate", `- ${label} it fits.`)))).pass]).toEqual([label, true]);
+    }
+    expect(checkMyRead(session(say(TWO)))).toEqual({ pass: true, details: ['2 swap block(s), each with a **My read** line; no reply says "Claude\'s read"'] });
   });
 });
 
-describe("ISC-13: no lever produces swaps until the player picks it", () => {
-  test("ISC-13 no-pick session: 0 swaps listed, 0 swap_candidates calls", () => {
-    const r = checkNoSwapsWithoutPick(noPick);
-    expect(r).toEqual({ pass: true, details: ["0 swap_candidates call(s), each after a pick; 0 swap block(s), none before a call"] });
+// ---------- ISC-110 ----------
+describe("ISC-110: the mana curve chart matches deck_stats", () => {
+  const rows = (curve: Record<string, number>) => { const max = Math.max(...Object.values(curve)); return Object.entries(curve).map(([k, n]) => `${k.padEnd(2)} ${"█".repeat(n)}${"░".repeat(max - n)} ${String(n).padStart(2)}`); };
+  const fence = (r: string[]) => `\`\`\`\n${r.join("\n")}\n\`\`\``;
+  const withChart = (text: string, stats = STATS) => session(stats, say(text));
+  const good = rows(CURVE);
+
+  test("ISC-110 goes red on a cell too many, a wrong or missing count, a missing or doubled row, an unfenced chart, uneven padding and no deck_stats, then green on the true chart", () => {
+    const bad = (r: string[]) => checkCurveChart(withChart(fence(r)));
+    expect(bad(good.map((r) => (r.startsWith("1 ") ? r.replace("░", "█") : r))).details.join()).toContain("mana value 1 has 13 filled cell(s); the deck has 12");
+    expect(bad(good.map((r) => (r.startsWith("3 ") ? r.replace(/ 8$/, " 9") : r))).details.join()).toContain("prints 9; the deck has 8");
+    expect(bad(good.map((r) => (r.startsWith("3 ") ? r.replace(/ +8$/, "") : r))).details.join()).toContain("no count at the end");
+    expect(bad(good.filter((r) => !r.startsWith("5"))).details.join()).toContain("the row for mana value 5 (5 cards) is missing");
+    expect(bad([...good, good[1]]).details.join()).toContain("appears twice");
+    expect(checkCurveChart(withChart(good.join("\n"))).details.join()).toContain("outside a code block");
+    expect(bad(good.map((r) => (r.startsWith("7+") ? r.replace("░", "") : r))).details.join()).toContain("is padded to");
+    expect(checkCurveChart(session(say(fence(good)))).details.join()).toContain("no deck_stats result");
+    expect(bad(good)).toMatchObject({ pass: true });
   });
 
-  test("ISC-13 Namor session: every swap_candidates call follows the player's pick of that lever", () => {
-    expect(checkNoSwapsWithoutPick(namor).pass).toBe(true);
-  });
-
-  test("ISC-13 goes red when swaps run without a pick", () => {
-    const unpicked = clone(namor);
-    const pick = unpicked.events.findIndex((e, i) => e.kind === "user" && i > 0);
-    unpicked.events[pick] = { kind: "user", text: "Hmm, let me think about it." };
-    const r = checkNoSwapsWithoutPick(unpicked);
-    expect(r.pass).toBe(false);
-    expect(r.details.length).toBe(3);
-
-    const wrongLever = clone(namor);
-    wrongLever.events[pick] = { kind: "user", text: "More ramp, please." };
-    expect(checkNoSwapsWithoutPick(wrongLever).pass).toBe(false);
-
-    const listedEarly = editAssistant(noPick, (text, i) => (i === lastAssistant(noPick) ? `${text}\n\n### Swap 1: Hullbreaker Horror → Cryptic Command\n- **Claude's read** (my own Magic knowledge, not the data): strong.` : text));
-    expect(checkNoSwapsWithoutPick(listedEarly).pass).toBe(false);
-  });
-});
-
-describe("ISC-28: a turn never offers a card search it could run", () => {
-  test("ISC-28 both recorded sessions pass", () => {
-    for (const s of [namor, noPick]) expect(checkSearchesNotDeferred(s).pass).toBe(true);
-  });
-
-  test("ISC-28 goes red on the offer a real session caught (2026-11-06), and green once the turn ran find_cards", () => {
-    const offer = "A find_cards search (Merfolk or blue cards tagged anthem or evasion) would surface them, and I can run it whenever you want.";
-    const offered = editAssistant(noPick, (text, i) => (i === lastAssistant(noPick) ? `${text}\n\n${offer}` : text));
-    const r = checkSearchesNotDeferred(offered);
-    expect(r.pass).toBe(false);
-    expect(r.details[0]).toContain("I can run it whenever you want");
-    expect(checkSearchesNotDeferred(editAssistant(noPick, (text, i) => (i === lastAssistant(noPick) ? `${text}\n\nWant me to search for anthems?` : text))).pass).toBe(false);
-
-    const ran = clone(offered);
-    ran.events.splice(lastAssistant(ran), 0, { kind: "tool", server: "mtg-deck", name: "find_cards", input: { tags: ["anthem"], colorIdentity: "U" }, result: { total: 70, offset: 0, cards: [] }, isError: false } as TranscriptEvent);
-    expect(checkSearchesNotDeferred(ran).pass).toBe(true);
+  test("ISC-110 leaves out a zero bucket, reads labels such as MV 3, and matches a chart to the deck_stats it came from after the deck changed", () => {
+    expect(checkCurveChart(withChart(fence(good.filter((r) => !r.startsWith("0"))))).pass).toBe(true);
+    expect(checkCurveChart(withChart(fence(good.map((r) => r.replace(/^(\d\+?)/, "MV $1"))))).pass).toBe(true);
+    const later = { ...CURVE, "2": 24, "7+": 5 };
+    const t = session(STATS, say(fence(good)), call("deck_stats", {}, { curve: later }), say(fence(rows(later))));
+    expect(checkCurveChart(t).pass).toBe(true);
+    expect(checkCurveChart(session(STATS, say(fence(rows(later))))).pass).toBe(false); // the later chart before the later result
+    expect(checkCurveChart(session(STATS, say("No chart here."))).details).toEqual(["no reply shows the whole curve as a chart"]);
   });
 });
 
-describe("ISC-22.1: the deck's numbers come before any swap", () => {
-  test("ISC-22.1 Namor session: deck_stats, then the numbers, then the first swap", () => {
-    expect(checkNumbersBeforeSwaps(namor)).toEqual({ pass: true, details: ["deck_stats at event 2, numbers reported at event 3, first swap at event 5"] });
-    expect(checkNumbersBeforeSwaps(noPick).pass).toBe(true);
-  });
-
-  test("ISC-22.1 goes red when the numbers are missing or come late", () => {
-    const noStats = clone(namor);
-    noStats.events = noStats.events.filter((e) => !(e.kind === "tool" && e.name === "deck_stats"));
-    expect(checkNumbersBeforeSwaps(noStats).pass).toBe(false);
-
-    const late = editAssistant(namor, (text) => text.replaceAll(/2\.77(?!\d)/g, "low"));
-    expect(checkNumbersBeforeSwaps(late).pass).toBe(false);
-  });
-});
-
-describe("ISC-22.2: ranked levers come before any swap", () => {
-  test("ISC-22.2 Namor session: four levers ranked 1 to 4 before the first swap", () => {
-    expect(checkLeversBeforeSwaps(namor).pass).toBe(true);
-    expect(checkLeversBeforeSwaps(noPick).pass).toBe(true);
-  });
-
-  test("ISC-22.2 goes red with no ranked list, a one-item list, or a lever with no tool lever", () => {
-    expect(checkLeversBeforeSwaps(editAssistant(namor, (t) => t.replace("Levers, ranked by expected help", "Some options"))).pass).toBe(false);
-    expect(checkLeversBeforeSwaps(editAssistant(namor, (t) => t.replace(/\n2\. [\s\S]*?\n\nThis ranking/, "\n\nThis ranking"))).pass).toBe(false);
-    expect(checkLeversBeforeSwaps(editAssistant(namor, (t) => t.replace("(`roles`, filling", "(filling"))).pass).toBe(false);
-  });
-});
-
-describe("ISC-23.1: every proposed card came from the session's tools", () => {
-  test("ISC-23.1 Namor session: every swap pair was returned and every named card is from the session", () => {
-    const r = checkProposalsFromTools(namor, names);
-    expect(r.details).toEqual([expect.stringMatching(/^15 swap block\(s\), all returned pairs; \d+ card names in Claude's turns, all from the session$/)]);
-    expect(r.pass).toBe(true);
-    expect(checkProposalsFromTools(noPick, names).pass).toBe(true);
-  });
-
-  test("ISC-23.1 goes red on a card from memory, in a swap heading or in prose", () => {
-    const heading = editAssistant(namor, (t) => t.replace("### Swap 1: Hullbreaker Horror → Cryptic Command", "### Swap 1: Hullbreaker Horror → Rhystic Study"));
-    const h = checkProposalsFromTools(heading, names);
-    expect(h.pass).toBe(false);
-    expect(h.details.join("\n")).toContain("Rhystic Study");
-
-    const prose = editAssistant(namor, (t, i) => (i === lastAssistant(namor) ? `${t}\n\nYou could also just play Rhystic Study.` : t));
-    expect(checkProposalsFromTools(prose, names).details).toEqual(['"Rhystic Study" is named by Claude but appears in no tool result, file read or user turn of the session']);
-
-    // A returned card shown against the wrong outgoing card is a pair no call returned.
-    const pair = editAssistant(namor, (t) => t.replace("### Swap 6: Blatant Thievery → Tempted by the Oriq", "### Swap 6: Blatant Thievery → Cryptic Command"));
-    expect(checkProposalsFromTools(pair, names).pass).toBe(false);
-  });
-
-  test("ISC-23.1 scanner skips short one-word names and keeps each face of a split card", () => {
-    expect(scannableNames(["Opt", "Cut // Ribbons", "Brainstorm", "Mana Leak"]).sort()).toEqual(["Brainstorm", "Cut // Ribbons", "Mana Leak", "Ribbons"]);
-  });
-});
-
-describe("ISC-23.2 (code half): every swap block carries the Claude's read label", () => {
-  test("ISC-23.2 Namor session: 15 of 15 blocks labeled", () => {
-    expect(checkReadsLabeled(namor)).toEqual({ pass: true, details: ["15 swap block(s), each with a **Claude's read** line"] });
-  });
-
-  test("ISC-23.2 goes red on an unlabeled block, even with a labeled summary after it", () => {
-    const stripped = editAssistant(namor, (t) => t.replace(
-      "- **Claude's read** (my own Magic knowledge, not the data): weak. It saves one mana and bounces your Merfolk with everything else. Skip.",
-      "- Weak. It saves one mana and bounces your Merfolk with everything else. Skip."));
-    expect(checkReadsLabeled(stripped)).toEqual({ pass: false, details: ["Swap 15 (event 8) has no **Claude's read** line"] });
-  });
-});
-
-test("events keep their order: tool calls sit between the turns that asked for them", () => {
-  const kinds = namor.events.map((e: TranscriptEvent) => (e.kind === "tool" ? e.name : e.kind));
-  expect(kinds).toEqual(["user", "read", "deck_stats", "assistant", "user", "swap_candidates", "swap_candidates", "swap_candidates", "assistant"]);
-});
-
-describe("real player session (ISC-25.2): Namor, more damage", () => {
-  const real = readTranscript(`${DIR}namor-more-damage.jsonl`);
-
-  test("is labeled a real session, called the deck MCP, and parses back to the same JSONL", () => {
-    expect(real.header.agentPlayed).toBe(false);
-    expect(parseTranscript(serializeTranscript(real))).toEqual(real);
-    const calls = real.events.filter((e) => e.kind === "tool" && !e.isError);
-    expect(calls.map((e) => e.kind === "tool" && e.name)).toContain("find_cards");
-    expect(swapBlocks(real).length).toBe(0);
-  });
-
-  test("passes every code check: ISC-13, 22.1, 22.2, 23.1, 23.2 (code half) and 28", () => {
-    const results = {
-      "ISC-13": checkNoSwapsWithoutPick(real), "ISC-22.1": checkNumbersBeforeSwaps(real), "ISC-22.2": checkLeversBeforeSwaps(real),
-      "ISC-23.1": checkProposalsFromTools(real, names), "ISC-23.2": checkReadsLabeled(real), "ISC-28": checkSearchesNotDeferred(real),
-    };
-    for (const [id, r] of Object.entries(results)) expect({ id, ...r }).toMatchObject({ id, pass: true });
-  });
-});
-
-describe("blank lines between list items (the house list format) do not end a block", () => {
-  test("a levers list and a swap block with spaced items parse whole", () => {
-    const spaced = editAssistant(noPick, (text, i) => (i === lastAssistant(noPick)
-      ? `**Levers, ranked by expected help:**\n\n1. **Trim** (\`cheaper\` on Hullbreaker Horror): a.\n\n2. **Roles** (\`roles\` on the whole deck): b.\n\n### Swap 1: Hullbreaker Horror → Opt\n\n- **Reason (data):** r\n\n- **Deck after:** d\n\n- **Claude's read** (my own Magic knowledge, not the data): fine.`
-      : text));
-    expect(leverLists(spaced).at(-1)!.items.map((x) => x.lever)).toEqual(["cheaper", "roles"]);
-    const [block] = swapBlocks(spaced);
-    expect(block.text).toContain("**Claude's read**");
-  });
-});
-
+// ---------- ISC-29 ----------
 describe("ISC-29: no reply carries tool or code vocabulary", () => {
   const real = readTranscript(`${DIR}namor-more-damage.jsonl`);
 
@@ -208,45 +163,76 @@ describe("ISC-29: no reply carries tool or code vocabulary", () => {
     for (const flagged of ["find_cards", "`redundancy`", "`plan`", "`roles`", "app/role-targets.json", "64 matches"]) expect(all).toContain(flagged);
   });
 
-  test("ISC-29 is green on the same answer said in player's words, and the levers still parse", () => {
-    const plain = [
-      "**Search past the levers: blue cards that pump or evade**",
-      "",
-      "- **Levitation** (4 mana): **Claude's read**: my top pick.",
-      "",
-      "**Levers, ranked by expected help:**",
-      "",
-      "1. **Trim what's doubled up** (the whole deck, most likely the 11 counterspells): frees slots for the cards above.",
-      "",
-      "2. **Stronger fits for the commander** (the mana rocks, starting with Thought Vessel): blue-pip cards at the same cost.",
-      "",
-      "3. **Fill thin roles** (the whole deck): less on point, there's no damage role.",
-      "",
-      "The first and third measure against role counts I'm suggesting, not ones you've set. Which lever do you want?",
-    ].join("\n");
-    const t = editAssistant(real, () => plain);
-    expect(checkNoToolTalk(t)).toEqual({ pass: true, details: ["no tool or code vocabulary in any reply"] });
-    expect(leverLists(t)[0].items.map((x) => x.lever)).toEqual(["redundancy", "plan", "roles"]);
-    expect(checkLeversBeforeSwaps(t).pass).toBe(true);
+  test("ISC-29 is green on the same answer said in a player's words", () => {
+    const plain = ["**Search past the levers: blue cards that pump or evade**", "", "- **Levitation** (4 mana): **My read**: my top pick.", "",
+      "1. **Trim what's doubled up** (the whole deck, most likely the 11 counterspells): frees slots for the cards above.", "",
+      "The first and third measure against role counts I'm suggesting, not ones you've set. Which lever do you want?"].join("\n");
+    expect(checkNoToolTalk(session(say(plain)))).toEqual({ pass: true, details: ["no tool or code vocabulary in any reply"] });
   });
 
   test("ISC-29 flags the diagnose and shortlist tools by name and their arguments, but not the words diagnose or shortlist in a player's sentence", () => {
-    const said = (line: string) => checkNoToolTalk(editAssistant(real, () => line));
-    for (const line of ["I ran `shortlist` for removal.", "Calling `diagnose` now.", "With engineGap set to dying:", "Under maxManaValue 3,", "offPlan cards first", "maxPrice 5 keeps it cheap", "its planPartners count is 4"]) {
+    const said = (line: string) => checkNoToolTalk(session(say(line)));
+    for (const line of ["I ran `shortlist` for removal.", "Calling `diagnose` now.", "With engineGap set to dying:", "Under maxManaValue 3,", "offPlan cards first", "maxPrice 5 keeps it cheap", "its planPartners count is 4", "I read cardFacts first."]) {
       expect([line, said(line).pass]).toEqual([line, false]);
     }
     for (const line of ["Here's a shortlist of removal that fits.", "Let me diagnose the deck against that plan first.", "Three cards on the shortlist feed your death triggers."]) {
       expect([line, said(line).pass]).toEqual([line, true]);
     }
   });
+});
 
-  test("SKILL.md's lever table names each lever exactly as the checks do", async () => {
-    const skill = await Bun.file(new URL("../plugin/skills/deck-tune/SKILL.md", import.meta.url).pathname).text();
-    for (const [lever, name] of Object.entries(LEVER_NAMES)) expect(skill).toContain(`| \`${lever}\` | ${name} |`);
+describe("a transcript and the six checks together", () => {
+  test("a recorded real session parses back to the same JSONL, and a malformed line is a TranscriptError, not a pass", () => {
+    const real = readTranscript(`${DIR}namor-more-damage.jsonl`);
+    expect(real.header.agentPlayed).toBe(false);
+    expect(real.events.filter((e) => e.kind === "tool" && !e.isError).map((e) => e.kind === "tool" && e.name)).toContain("find_cards");
+    expect(parseTranscript(serializeTranscript(real))).toEqual(real);
+    expect(() => parseTranscript('{"kind":"header"}')).toThrow(TranscriptError);
+  });
+
+  test("gradeSession runs exactly the six, and a session that does everything right is green on all of them", () => {
+    const t = session(user("make my deck better"), STATS, SHORT, say(`Here is your curve:\n\n${fenceOf(CURVE)}`), say(TWO), user("yes, take swap 1"), accept("Counterspell", "Cultivate"));
+    const graded = gradeSession(t, names);
+    expect(graded.map((g) => g.id)).toEqual(["ISC-111", "ISC-91", "ISC-68", "ISC-29", "ISC-108", "ISC-110"]);
+    expect(graded.filter((g) => !g.result.pass).map((g) => `${g.id}: ${g.result.details.join(" | ")}`)).toEqual([]);
+  });
+});
+function fenceOf(curve: Record<string, number>) {
+  const max = Math.max(...Object.values(curve));
+  return "```\n" + Object.entries(curve).map(([k, n]) => `${k.padEnd(2)} ${"█".repeat(n)}${"░".repeat(max - n)} ${String(n).padStart(2)}`).join("\n") + "\n```";
+}
+
+// ---------- the judge suite ----------
+describe("the judge suite (evals/deck-tune.yaml): ISC-107, 84 and 87", () => {
+  type Case = { id: string; prompt: string; assert: { type: string; value: string }[]; adversarial_output?: string };
+  const text = readFileSync(new URL("../evals/deck-tune.yaml", import.meta.url).pathname, "utf8");
+  const suite = Bun.YAML.parse(text) as { cases: Case[] };
+
+  test("the judged questions name no card and no commander, and the retired label is nowhere", () => {
+    const judged = suite.cases.flatMap((c) => c.assert.filter((a) => a.type === "llm-assert").map((a) => ({ id: c.id, value: a.value })));
+    expect(judged.map((j) => j.id).sort()).toEqual(["isc-107-only-recommended-swaps", "isc-84-read-before-cut", "isc-87-search-the-plan"]);
+    for (const { id, value } of judged) expect({ id, cards: namedCards(value, names) }).toEqual({ id, cards: [] });
+    expect(text).not.toMatch(/Claude[’']s read/);
+  });
+
+  test("each case carries an adversarial fixture that passes its code-checkable prerequisites, so only the judge can fail it", () => {
+    for (const c of suite.cases) {
+      expect({ id: c.id, adversarial: typeof c.adversarial_output }).toEqual({ id: c.id, adversarial: "string" });
+      for (const a of c.assert) {
+        if (a.type === "contains") expect({ id: c.id, ok: c.adversarial_output!.includes(a.value) }).toEqual({ id: c.id, ok: true });
+        if (a.type === "regex") expect({ id: c.id, ok: new RegExp(a.value).test(c.adversarial_output!) }).toEqual({ id: c.id, ok: true });
+      }
+    }
+  });
+
+  test("a criterion pattern selects its cases: ISC-107 takes isc-107-..., ISC-10 does not", () => {
+    expect(caseMatches("isc-107-only-recommended-swaps", "ISC-107")).toBe(true);
+    expect(caseMatches("isc-107-only-recommended-swaps", "ISC-10")).toBe(false);
+    expect(caseMatches("isc-84-read-before-cut", "isc-84")).toBe(true);
   });
 });
 
-// DT-6.12, ISC-83 (the code probe for the no-overfitting constraint, Sage 2026-11-07): product code under server/ names no
+// DT-6.12, ISC-83 (the code probe for the no-overfitting constraint, the user, 2026-11-07): product code under server/ names no
 // specific commander or card as a rule, a constant or a branch. How it reads: every string literal (and regex source) of
 // every non-test, non-fixture server/**/*.ts file is checked against the card store's names. Comments are not read.
 // What counts as a hit, and what does not:
