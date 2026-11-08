@@ -20,7 +20,7 @@ claude plugin install mtg-deck-tune --marketplace cgm-studios/mtg-deck-tune
 
 Or, inside a Claude Code session: `/plugin marketplace add cgm-studios/mtg-deck-tune`, then `/plugin install mtg-deck-tune@cgm-studios`.
 
-The first time the card tools run, they download the card data (about 37 MB, checked against a checksum) into the plugin's data folder. That takes a minute once.
+The first time the card tools run, they download the card data (about 63 MB, checked against a checksum) into the plugin's data folder. That takes a minute once.
 
 ## Use
 
