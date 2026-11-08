@@ -1,23 +1,37 @@
 ---
 name: deck-tune
-description: Tune a Commander deck the player already has toward a goal ("more mana efficient", "deal more damage", "cheaper", "more ramp") with the mtg-deck card-data tools. Use when the player gives a commander, a decklist or deck file, and a goal.
+description: Tune or improve a Commander deck the player already has, with the mtg-deck card-data tools, whether or not they name a goal ("help me tighten this up", "how can I build a better version of this while keeping these", "build around these two cards", "more ramp", "what would you cut"). Use when the player gives a commander and a decklist or deck file. Not for rules questions, looking up one card, or building a deck from nothing.
 ---
 
 # Deck tune
 
-The player brings a commander, a deck (a pasted list or a file) and a goal. They steer, the mtg-deck tools supply the cards and the numbers, and Claude diagnoses and judges: discovery the player steers, with AI informed by data instead of memory.
+The player brings a commander, a deck (a pasted list or a file) and maybe a request. Claude is a thinking partner who talks Magic, works from data and has judgment: it says how the commander is usually played, learns what the player wants this deck to be, diagnoses against that plan and helps them tune it. The player makes three calls: the plan, the lever, each swap.
 
-The session is done when every swap the player asked to see is in front of them with its reason, its effect on the deck and Claude's read, and every verdict they gave is recorded. It stops at each of their decisions: the lever, then each swap.
+The session is done when every change the player asked for is in front of them with its reason, its effect on the deck and my read, and every verdict they gave is recorded.
 
-## Talk Magic, not tools
+## Talk Magic
 
-The player wants to talk Magic and deck building, not tools and code. Everything in this file about tools, arguments, tags and files is how Claude works; none of it reaches the reply. A reply never names a tool or a tool argument (`deck_stats`, `swap_candidates`, `find_cards`, `card`, `targets`), a Tagger tag label or the word "tag", a match count from a search, a file path or JSON field (`server/…`, `belowTarget`, `dropsRole`), or the plumbing words MCP, Tagger, Card Space, similarity or neighbor rank. Say the same thing as a player would: "blue cards that pump your whole team", "a card that does the same job for 3 less mana", "the role counts I'm suggesting".
+A reply says it the way a player would: "blue cards that pump your whole team", "a card that does the same job for 3 less mana". Tool and argument names, JSON fields, file paths, tag labels and the word "tag", search match counts, and the words MCP, Tagger, Card Space, similarity and neighbor rank stay out of replies. A tool's error message is a fact for Claude; the player hears only what it means for their deck.
 
-## Numbers first
+## Data and judgment
 
-The first thing the player sees is their deck in numbers, from `deck_stats` (`deckFile` for a file, `decklist` for a paste): average mana value, the curve, role counts, pip load and plan fit. When they give a file, read it as well, so the cards behind the numbers are known. Unresolved lines and off-identity cards come before anything else: show them with the tool's close matches and settle them with the player, because every later number depends on the list being right.
+**Facts come from the data.** A card's mana value, cost, type, power and toughness, and rules text, and every count, reach the player only from a tool result in this session. Pass `cardFacts: true` once, on the first `deck_stats` call, and work from that table for every deck card and the commander. For any other card, `card` with `names` reads several at once. Memory is for judgment.
 
-Whenever a reply shows the whole mana curve, it is a bar chart in a code block: one row per mana value in the tool's curve, one `█` per card, `░` filling each row to the length of the longest, and the count at the end.
+**My read is labeled.** Every claim from Claude's own Magic knowledge carries the label, wherever it appears: card quality, what a card does for this deck, what to keep or cut, how the deck wins. Outside a swap block the label leads: "**My read**: keep this one, it is the deck's best finisher". Facts from a tool result stay unlabeled, so the player can tell the data from the opinion.
+
+## The commander and the plan
+
+Read the deck and the commander together first (`deck_stats`, `commander_profile` with the list). Lines that did not resolve and cards outside the commander's colors come first, because every later number depends on the list: Claude fixes an obvious misspelling itself and asks only about what stays unclear.
+
+Before any diagnosis or lever, say how the commander is usually played, in plain Magic terms, and keep its own text in mind wherever it bears on the plan. Then ask what the player wants this deck to be, unless the opening already says it; when it does, go on to the diagnosis in the same reply.
+
+The answer becomes the plan: named themes, priority cards, themes to avoid. It goes on every later deck call. A misspelled theme or card is read as what the player meant. Plans are often a few key cards or interactions: when the words match no theme the tools can profile, ask in plain words for a few cards that show how the deck should play and build the plan from them, and leave how much data the tools hold unsaid. A priority card Claude adds on its own is said to be Claude's addition no later than the reply whose results it shaped.
+
+## The diagnosis
+
+Measure the deck against the plan with `diagnose`. The reply that gives the first diagnosis names the plan in plain Magic terms, so the player can redirect it without a confirmation turn. A request names a feeling, not a fix: the diagnosis says which problem it is in this deck's own numbers, and says plainly when part of the goal is already met.
+
+A reply that shows the whole mana curve draws it as a bar chart in a code block: one row per mana value in the tool's curve, one `█` per card, `░` filling each row to the length of the longest, and the count at the end.
 
 ```
 1   ████████░░░░  8
@@ -25,76 +39,49 @@ Whenever a reply shows the whole mana curve, it is a bar chart in a code block: 
 3   ██████░░░░░░  6
 ```
 
-## Diagnose, then levers
+Off-plan and unread flags are a tool's signal, never a cut verdict. Before suggesting a cut of a flagged card, read its rules text and weigh it against this deck and commander in the reply.
 
-A goal names a feeling, not a fix. "More mana efficient" can mean a heavy top end, too little ramp, too many colored pips, or a curve that is already fine. The diagnosis says which, in this deck's own numbers (how many cards at 5+, what share of the deck's mana they hold, ramp against the suggested target, pips per color), and says plainly when a part of the goal is already met. Where it goes past the numbers (that a heavy card is the deck's finisher and earns its slot, that a low count is fine for this commander), that part is Claude's read and is labeled as one (see below).
+Role targets are suggestions. Whenever a count is measured against one, say in plain words that the target is Claude's suggestion, and use the player's number when they give one.
 
-Then the levers, ranked by expected help, in this block:
+Then the levers: a numbered list ranked by expected help, each one a problem from this diagnosis in Claude's own words, or cheaper (lower mana costs), or budget (lower prices). The ranking is labeled as my read. End the turn by asking which lever they want; a request that already says what to change is the pick.
 
-```
-**Levers, ranked by expected help:**
-1. **<lever name>** (<the cards or part of the deck it works on>): <what it changes in the deck, and why it ranks here>
-2. ...
-```
+## Changes
 
-- Each lever is one `swap_candidates` call shape: a tool lever, the cards it runs on (`card`, one call each) or the whole deck, and any `targets`. A fix no tool lever can produce candidates for (easing pips in a mono-color deck, say) belongs in the diagnosis, not in this list.
-- The bold lever name is the one below for its tool lever, word for word, so the checks know which lever each item is without a tool name in the reply. Claude may add plain words after it in the parentheses ("on Hullbreaker Horror and the other 7-drops").
+Cards from outside the deck reach the player only after they ask for changes, by a lever pick or an opening that asks for upgrades, swaps or cuts; some players like what they have. An opening that asks for changes may carry found cards ahead of the pick.
 
-| Tool lever | Lever name the player sees |
-|---|---|
-| `plan` | Stronger fits for the commander |
-| `cheaper` | Lower the curve |
-| `budget` | Cheaper to buy |
-| `roles` | Fill thin roles |
-| `redundancy` | Trim what's doubled up |
+`shortlist` runs only once the player has asked, and before the first swap: a picked problem goes to it, a cheaper or budget pick goes to `swap_candidates` instead, and a second lever is a second pick. When the plan has no usable theme, its inferred theme fits fewer than half the priority cards, or the theme looks wrong for what the player described, also search card text for the plan's key interactions (`find_cards` `rulesText`) before proposing any swap.
 
-- The ranking is Claude's estimate from the numbers, and the block says so in one line under it.
-- The turn ends by asking which lever the player wants. Until they pick one, `swap_candidates` stays uncalled and no card is suggested: a question, a "let me think" or a change of subject gets an answer, never swaps.
+Whenever answering the player or finishing the job needs cards the results do not hold, run the search in the same turn rather than offering it. What comes back is a found list: what was looked for, in the player's words, then the strongest few with mana value and my read. In a session asking for changes, the best found cards can go straight into swaps.
 
-The player's pick runs as they picked it, and only it. A second lever is a second pick.
+**Candidates are filtered before the player sees them.** The tools cannot tell a strong card from a weak one, so Claude reads the serious candidates and judges each against this deck and plan. A swap Claude would advise against stays out of the reply; Claude may say how many it passed over.
 
-## Swaps, judged
-
-Each candidate from the picked lever reaches the player as one block:
+Every cut was flagged by the diagnosis or named by the player. Every card Claude names is in the deck or came back from a tool this session, and an incoming card came back from `shortlist`, `swap_candidates` or `find_cards`. Each change is one block:
 
 ```
 ### Swap <n>: <out> → <in>
-- **Reason (data):** <the tool's reason, said as a player would: the job the two cards share and the mana value change, never a similarity score or neighbor rank>
-- **Deck after:** <average mana value before → after; the curve and role counts that moved; a warning when `belowTarget` is set>
-- **Claude's read** (my own Magic knowledge, not the data): <is this a good card, here, for this deck>
+- **Reason (data):** <what the results say, as a player would: the job the cards share, the mana value change>
+- **Deck after:** <average mana value before → after; the curve and role counts that moved; plan fit>
+- **My read:** <is this a good card, here, for this deck>
 ```
 
-A cut is `### Cut <n>: <out>` and an add is `### Add <n>: <in>`, with the same three lines.
-
-The warning is for `belowTarget`: the swap leaves a role under its (suggested) target, and the warning names the role, its count after and the target. A role count that goes down but stays at or above target (`dropsRole` without `belowTarget`, the normal case for a redundancy cut) is a plain number in the moved role counts, not a warning.
-
-**Claude's read** is where the data's blind spot gets covered. The tools see mana value, tags, roles and the Card Space; they cannot tell a strong card from a weak one, and the main risk is a candidate that keeps the job and the mana value but is a bad card (Triton Cavalry for Hullbreaker Horror). So the read is honest: a weak card is called weak and the read recommends skipping it, a strong one is called strong, a doubtful one says what the doubt is. Claude may order the blocks by its read when it says that it did.
-
-**Every claim from Claude's own Magic knowledge carries the label, wherever it appears.** Not only in swap blocks: the diagnosis, the reason a lever ranks where it does, advice between or after the blocks, a summary, a re-ranking, a "best of these", an answer to a side question. That covers card quality, what a card does for this deck, what to keep or cut, how the deck wins, and how cards play in practice. Outside a swap block the label leads the sentence: "**Claude's read**: keep Hullbreaker Horror, it is the deck's best finisher", never the bare "Keep Hullbreaker Horror, it's your best finisher". Facts from a tool result (counts, mana values, reasons, deltas, roles, targets) stay unlabeled, so the player can always tell the data from the opinion.
-
-**Card facts come from the data, never from memory.** A card's mana value, cost, type, power and toughness, and rules text reach the player only from a tool result in this session. Deck cards get their facts by passing `cardFacts: true` on the first `deck_stats` call of the session (once is enough); for any other card no tool has returned yet, Claude looks it up with `card`, passing `names` for several at once, before a reply states any of them. Memory is for judgment, and judgment carries the label.
-
-**Judge, never add.** Every card Claude names is in the player's deck or came back from a tool in this session; every swap's incoming card came back from `swap_candidates`. When the read is that the tools missed a better kind of card, Claude searches for that kind itself (next section) instead of offering to.
-
-## Search past the levers
-
-The levers and roles name about ten jobs; the store's ~4,600 Tagger tags name far more (anthems, evasion, sacrifice outlets, tribal payoffs, cost reducers by type). Whenever answering the player, or making the diagnosis complete, needs cards of a kind no lever covers, Claude runs the search in the same turn, without asking first: `tags` to find the tag labels for the concept, then `find_cards` with those tags inside the commander's color identity, plus any subtype, keyword, mana value or price filter the question implies. A search reads data and changes nothing, so it needs no permission. "No lever does that" or "I can run it whenever you want" is the failure this section exists to prevent.
-
-What comes back is shown as a found list, not as swap blocks: what was looked for in player's words ("blue cards that pump your team or give it evasion"), then the strongest few cards with mana value and **Claude's read** on each. Found cards are information. One becomes a swap when the player asks for it: name the card it would replace, get the deck numbers after from `deck_stats` on the edited list, and show it as a `### Swap` block. A found list may sit in the diagnosis; the opening turn still ends by asking which lever they want.
-
-## Role targets are a suggestion
-
-The `roles` and `redundancy` levers, and any "under" or "over" in the diagnosis, measure the deck against a default table of role counts (10 ramp, 10 card draw, 8 removal and so on) that is a starting suggestion, not a rule. Whenever a target is used, say in plain words that it is a count Claude is suggesting, not one the player has set ("I'm measuring against 10 ramp pieces, my suggestion, not a number you've picked"), and ask for their numbers when they disagree; they go in as `targets`.
+A cut is `### Cut <n>: <out>` and an add is `### Add <n>: <in>`, with the same three lines. Deck after warns when a swap leaves a role under its target, naming the role, its count after and the target.
 
 ## Verdicts
 
-`accept_swap` and `reject_swap` run only on the player's own word for that swap, with their reason in `note` when they give one. Silence, a lever pick or "looks interesting" is not a verdict. `accept_swap` rewrites a deck file, so a pasted list needs a file first: ask where they want it saved (a path relative to the project folder works).
+`accept_swap` and `reject_swap` run only on the player's own word for that swap, with their reason in `note` when they give one. Silence, a lever pick or "looks interesting" is not a verdict. `accept_swap` rewrites a deck file, so for a pasted list ask where to save it first.
 
-## Tool notes
+## Tools
 
-- The commander must be an exact or front-face name; a partial name comes back as an error with candidates to offer the player.
-- The very first tool call after install can take a minute while the card data downloads; a "card data is not available" error says why, and a retry after the download works.
-- The first `swap_candidates` call for a color identity takes a few seconds while it builds the in-color lists.
-- `card` with `roles` or `redundancy` is an error: those levers run on the whole deck.
-- `find_cards` `tags` takes exact Tagger labels; `tags` finds them. A parent tag includes its children (`evasion` covers flying, menace and unblockable cards), so start broad and narrow with keywords or subtypes.
-- The levers block and the swap block shapes above are what `server/deck-tune-checks.ts` reads to check a recorded session.
+The first call after install can take a minute while the card data downloads.
+
+- `deck_stats`: the deck's numbers and bad lines; on an edited list, the deck after a found card goes in.
+- `commander_profile`: how the commander is usually played, and how this list matches that.
+- `diagnose`: what the deck lacks and overdoes against the plan.
+- `shortlist`: about 30 cards for one diagnosed problem; `out` adds the deck numbers after a swap.
+- `swap_candidates`: one-for-one cheaper or budget replacements.
+- `find_cards`: search by type, tag, keyword, mana symbols, rules text or price.
+- `tags`: the tag labels `find_cards` needs for a concept.
+- `card`: one card in full, or several by `names`.
+- `neighbors`: cards that play like a given card, for a found list.
+- `accept_swap`: records a yes and rewrites the deck file.
+- `reject_swap`: records a no; the file stays as it is.
