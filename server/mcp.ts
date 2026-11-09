@@ -14,6 +14,7 @@ import { commanderProfile, commanderProfileShape } from "./commander";
 import {
   acceptReceipt, cardLookupTable, compactCard, compactDeckStats, compactDiagnosis, compactFindCards, compactShortlist, compactSwapCandidates, detailFlag, rejectReceipt,
 } from "./compact";
+import { deckCompare, deckCompareShape } from "./deck-compare";
 import { diagnose, diagnoseShape } from "./diagnose";
 import {
   cardDetails, cardLookupNames, cardShape, deckStats, deckStatsShape, findCards, findCardsShape, findTags, neighbors, neighborsShape, LOOKUP_MAX, lookupCards, openStore, tagsShape, ToolInputError, type Store,
@@ -54,7 +55,7 @@ const cardFactsFlag = z.boolean().optional().describe("true = also every deck ca
 
 /** `verdicts` points the accept and reject labels elsewhere (tests); the server uses the defaults. */
 export function createDeckServer(store: Store | Promise<Store>, verdicts: VerdictOptions = {}): McpServer {
-  const server = new McpServer({ name: "mtg-deck", version: "0.2.0" });
+  const server = new McpServer({ name: "mtg-deck", version: "0.3.0" });
   server.registerTool("find_cards", {
     title: "Find cards",
     description: "Find commander-legal cards in the card store (Scryfall, Tagger tags). Every filter given must hold. " +
@@ -200,6 +201,16 @@ export function createDeckServer(store: Store | Promise<Store>, verdicts: Verdic
       "Returns the verdict and the pair logged.",
     inputSchema: rejectSwapShape,
   }, async (args) => withStore(store, (s) => rejectReceipt(rejectSwap(s, args, verdicts))));
+  server.registerTool("deck_compare", {
+    title: "Deck compare page",
+    description: "A before-and-after page of a Commander deck, as one self-contained HTML file: the numbers and mana curve before and after, " +
+      "what changed, and a map of the triggers that drive the plan, with the cards that cause each one and the cards that pay it off. The before deck is rebuilt from the deck file's change log (the lines accept_swap writes), " +
+      "limited by `since`; a deck with no logged change gets a page of the deck as it stands. Call it first with no `triggers`: that lists the deck's events with their cards and writes nothing. " +
+      "Then call it with the triggers that matter (at most 8). A trigger's `event` takes its cards from the card data; `keep` narrows a broad event to the cards that belong and `drop` removes noise; a card added under `causes` or `payoffs` needs a `note` and is marked as my read. " +
+      "A trigger the data cannot read (an untap, a discount, a lasting effect) omits `event` and lists its cards by hand. Every card named must be in the deck, before or after. " +
+      "The page is saved beside the deck file unless `outFile` says otherwise, and a file this tool did not write is never replaced. Returns the path and each trigger's connections.",
+    inputSchema: deckCompareShape,
+  }, async (args) => withStore(store, (s) => deckCompare(s, args)));
   return server;
 }
 

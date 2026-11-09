@@ -1,6 +1,6 @@
 ---
 name: deck-tune
-description: Tune or improve a Commander deck the player already has, with the mtg-deck card-data tools, whether or not they name a goal ("help me tighten this up", "how can I build a better version of this while keeping these", "build around these two cards", "more ramp", "what would you cut"). Use when the player gives a commander and a decklist or deck file. Not for rules questions, looking up one card, or building a deck from nothing.
+description: Tune or improve a Commander deck the player already has, with the mtg-deck card-data tools, whether or not they name a goal ("help me tighten this up", "how can I build a better version of this while keeping these", "build around these two cards", "more ramp", "what would you cut"). Use when the player gives a commander and a decklist or deck file. Not for rules questions, looking up one card, writing a primer or explaining a deck as it stands, or building a deck from nothing.
 ---
 
 # Deck tune
@@ -11,7 +11,7 @@ The session is done when every change the player asked for is in front of them w
 
 ## Talk Magic
 
-A reply says it the way a player would: "blue cards that pump your whole team", "a card that does the same job for 3 less mana". Tool and argument names, JSON fields, file paths, tag labels and the word "tag", search match counts, and the words MCP, Tagger, Card Space, similarity and neighbor rank stay out of replies. A tool's error message is a fact for Claude; the player hears only what it means for their deck.
+A reply says it the way a player would: "blue cards that pump your whole team", "a card that does the same job for 3 less mana". Tool and argument names, JSON fields, file paths, tag labels and the word "tag", search match counts, and the words MCP, Tagger, Card Space, similarity and neighbor rank stay out of replies; the one path a reply gives is where a page saved for the player is. A tool's error message is a fact for Claude; the player hears only what it means for their deck.
 
 ## Data and judgment
 
@@ -76,6 +76,10 @@ A player can ask to change commander and keep the cards. Help them find options,
 
 Once the player has accepted swaps, offer them a before-and-after of the deck as a single self-contained HTML page: the numbers and curve before and after, and a map of the triggers that drive this plan, showing which cards cause each one and which pay it off. Triggers and notes on the map are my read. They can also ask for it at any time; on a deck with no swaps it shows the deck as it stands.
 
+Offer them a primer of the deck as it now stands in the same breath: how it plays, what works together and how it wins. The `deck-primer` skill writes it, working from the plan they confirmed here. A player who turned down every change can still have one.
+
+`deck_compare` builds the page. Call it with no `triggers` to read the deck's events, then with the few that drive this plan, named as a player would say them. An `event` brings its cards from the data, and some events are broad (anything entering the battlefield, not just lands): `keep` only the cards that really belong, or `drop` the few that do not, reading their rules text first. What the data cannot read (an untap, a discount, a lasting effect) goes in by hand, each card with a `note` taken from its rules text. Give the cards that matter most a one-line `note` too, so the page says why they connect. Pass `summary` for how the deck wins in one line. When the deck file holds older changes and the player wants only this session's, pass `since`. If this session can publish a private web page, publish the saved file and give the player the link; otherwise tell them where it is saved.
+
 ## Tools
 
 The first call after install can take a minute while the card data downloads.
@@ -91,3 +95,4 @@ The first call after install can take a minute while the card data downloads.
 - `neighbors`: cards that play like a given card, for a found list.
 - `accept_swap`: records a yes and rewrites the deck file; `changeCommander: true` when the player asks to replace the commander.
 - `reject_swap`: records a no; the file stays as it is.
+- `deck_compare`: lists the deck's triggers, then saves the before-and-after page.

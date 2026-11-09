@@ -32,6 +32,14 @@ Put your decklist in a text file in your project, one card per line (`1 Sol Ring
 
 You can also paste the list into the chat. Accepted swaps rewrite your deck file and add a dated line at the bottom saying what changed.
 
+Want your deck explained instead of changed? Ask for a primer: how it plays, what works together and how it wins, written from the cards' own text.
+
+```
+/mtg-deck-tune:deck-primer decks/my-deck.txt
+```
+
+A primer reads the cards' rules text, not official rulings, so confirm the interactions before you rely on them.
+
 ## Updates
 
 Run `claude plugin update mtg-deck-tune@cgm-studios`, or turn on auto-update for the `cgm-studios` marketplace under **Marketplaces** in `/plugin`.
